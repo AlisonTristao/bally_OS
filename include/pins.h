@@ -84,8 +84,8 @@ void init_pins(){
     pinMode(B1, INPUT);
 
     // Buttons
-    pinMode(BTN1, INPUT);
-    pinMode(BTN2, INPUT);
+    pinMode(BTN1, INPUT_PULLUP);
+    pinMode(BTN2, INPUT_PULLUP);
 
     // Buzzer
     pinMode(BZR, OUTPUT);

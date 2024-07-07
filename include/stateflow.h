@@ -19,7 +19,7 @@ enum states {
 extern states state;
 void state_machine() {
     if (state == STANDBY) {
-        state = STANDBY; // Manter o estado em STATE4 se já estiver no final
+        state = POWER_ON; // Manter o estado em STATE4 se já estiver no final
     } else {
         state = static_cast<states>(state + 1); // Incrementar o estado
     }
