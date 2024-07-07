@@ -13,9 +13,13 @@ enum states {
 
 extern bool right_flag; // -> Definada no interrupt.h
 extern bool left_flag;  // -> Definada no interrupt.h
+extern int tempo;       // -> Definada no interrupt.h
+
 
 extern states state; // -> Definida na MAIN
 
+
+int counter = 0;
 
 void state_machine() {
     if (state == RUNNING) {
@@ -27,9 +31,6 @@ void state_machine() {
 
 
 void state_1() {
-
-    right_flag = false;
-    left_flag = false;
 
     digitalWrite(LED2, LOW);
     digitalWrite(LED0, HIGH);
@@ -43,8 +44,29 @@ void state_2() {
 }
 
 void state_3() {
+
+    if (millis() >= tempo + 1000 && (right_flag ||left_flag)) {
+        if (left_flag  && !right_flag && counter == 0) {
+            counter++;
+        } else if  (left_flag  && !right_flag && counter == 1) {
+            right_flag = false;
+            left_flag = false;
+            counter = 0;
+            state_machine();
+        }
+
+        right_flag = false;
+        left_flag = false;
+    }
+
+    
+
     digitalWrite(LED1, LOW);
     digitalWrite(LED2, HIGH);
+    Serial.print(" ");
+    Serial.print(left_flag);
+    Serial.print(" ");    
+    Serial.print(right_flag);
 	Serial.println(" -> CORRENDO <- ");
 }
 

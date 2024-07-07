@@ -7,6 +7,7 @@
 
 bool right_flag = false;
 bool left_flag = false;
+int tempo = 0;
 
 extern states state; // -> Definida na MAIN
 
@@ -29,21 +30,14 @@ void IRAM_ATTR button_isr_handler2() {
 void IRAM_ATTR LEFT_interrupt() {
     if (state == RUNNING) {
         left_flag = true;
-
-        if (!right_flag && left_flag) {
-            state_machine();
-        } else {
-            left_flag = false;
-            right_flag = false;
-        }
-
-
+        tempo = millis();
     }
 }
 
 void IRAM_ATTR RIGHT_interrupt() {
     if (state == RUNNING) {
         right_flag = true;
+        tempo = millis();
     }
 }
 
