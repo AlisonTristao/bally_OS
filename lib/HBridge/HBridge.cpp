@@ -45,6 +45,13 @@ void HBridge::changeDirection(movement move)
 }
 void HBridge::applyPWM(int32_t pwm)
 {
+    // limita o pwm
+    if (pwm > +100)
+        pwm = +100;
+    if (pwm < -100)
+        pwm = -100;
+    // normaliza o pwm (tira da porcentagem)
+    pwm = pwm * 40.95;
     // define a direção
     movement move = FORWARD;
     if (pwm > 0)
