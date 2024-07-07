@@ -4,10 +4,17 @@
 #include <Arduino.h>
 #include "stateflow.h"
 
-extern states state;
+
+bool right_flag = false;
+bool left_flag = false;
+int tempo = 0;
+
+extern states state; // -> Definida na MAIN
+
+
 void IRAM_ATTR button_isr_handler() {
     digitalWrite(LED0, HIGH);
-    if (state == STANDBY) {
+    if (state == POWER_ON) {
         state_machine();
     }
 
@@ -15,22 +22,22 @@ void IRAM_ATTR button_isr_handler() {
 
 void IRAM_ATTR button_isr_handler2() {
     digitalWrite(LED0, LOW);
-    if (state == POWER_ON) {
-        state_machine();
-    }
-}
-
-void IRAM_ATTR LEFT_interrupt() {
-    digitalWrite(LED3, HIGH);
     if (state == CALIBRATION) {
         state_machine();
     }
 }
 
-void IRAM_ATTR RIGHT_interrupt() {
-    digitalWrite(LED3, LOW);
+void IRAM_ATTR LEFT_interrupt() {
     if (state == RUNNING) {
-        state_machine();
+        left_flag = true;
+        tempo = millis();
+    }
+}
+
+void IRAM_ATTR RIGHT_interrupt() {
+    if (state == RUNNING) {
+        right_flag = true;
+        tempo = millis();
     }
 }
 
