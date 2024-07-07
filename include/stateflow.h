@@ -4,21 +4,15 @@
 
 #include <Arduino.h>
 
-// estado 1 -> inicial
-// estado 2 -> Calibrando sensores
-// estado 3 -> Corrida
-// estado 4 -> Fim corrida
-
 enum states {
-    POWER_ON,
-    CALIBRATION,
-    RUNNING,
-    STANDBY
+    POWER_ON,       // estado 1 -> inicial / Fim corrida
+    CALIBRATION,    // estado 2 -> Calibrando sensores
+    RUNNING         // estado 3 -> Corrida
 };
 
 extern states state;
 void state_machine() {
-    if (state == STANDBY) {
+    if (state == RUNNING) {
         state = POWER_ON; // Manter o estado em STATE4 se já estiver no final
     } else {
         state = static_cast<states>(state + 1); // Incrementar o estado
