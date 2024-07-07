@@ -5,6 +5,8 @@
 #include "interrupt.h"
 #include "HBridge.h"
 #include <ESP32Encoder.h>
+#include "buzzer_Mario.h"
+#include "buzzer_Pantera.h"
 
 double pwm_ant_D = 0;
 double pwm_ant_E = 0;
@@ -35,6 +37,7 @@ void setup()
 	encoderD.clearCount();
 	encoderE.clearCount();
 	Serial.println("direito;esquerdo;PWM(%)");
+	Musica_Mario();
 }
 
 void loop()
