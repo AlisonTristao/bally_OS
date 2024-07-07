@@ -20,71 +20,71 @@ Encoder enc_right(B0, B1);
 
 
 void setup() {
-    Serial.begin(921600);
+  Serial.begin(921600);
 
 
-    ESP32Encoder encoderD;
-    ESP32Encoder encoderE;
+  ESP32Encoder encoderD;
+  ESP32Encoder encoderE;
 
-    enc_left.init();
-    enc_right.init();
+  enc_left.init();
+  enc_right.init();
 
-    encoderD.attachHalfQuad(A0, A1);
-	  encoderE.attachHalfQuad(B0, B1);
+  encoderD.attachHalfQuad(A0, A1);
+	encoderE.attachHalfQuad(B0, B1);
 
-    // init pins
-    init_pins();
-    motorD.init();
-    motorE.init();
-    motorD.applyPWM(2000);
-    motorE.applyPWM(-1000);
+  // init pins
+  init_pins();
+  motorD.init();
+  motorE.init();
+  motorD.applyPWM(2000);
+  motorE.applyPWM(-1000);
   
-    // Set omterruptions
-    set_all_interruptions();
-
-	  encoderD.clearCount();
-	  encoderE.clearCount();
+  // Set omterruptions
+  set_all_interruptions();
+  
+  encoderD.clearCount();
+	encoderE.clearCount();
 }
 
 void loop()
 {
   // debug
-	//Serial.print(sensor.debub());
-	//Serial.print(" ");
-	//Serial.println(sensor.read_line());
-    Serial.print(enc_left.getCount());
-    Serial.print(" ");
-    Serial.println(enc_right.getSpeed());
-  
-  	Serial.print(String((double)encoderD.getSpeed()));
-	  Serial.println(" " + String((double)encoderE.getSpeed()));
-	  delay(100);
-  
-    // wait 3 seconds
-	  Serial.println(sensor.calibrate_status());
+  //Serial.print(sensor.debub());
+  //Serial.print(" ");
+  //Serial.println(sensor.read_line());
+  Serial.print(enc_left.getCount());
+  Serial.print(" ");
+  Serial.println(enc_right.getSpeed());
 
-    // clear count
-    enc_left.clearCount();
-    enc_right.clearCount();
-  
-    // calibrate sensor
-	  sensor.calibrate(30, 100, LED0);
-  
-    switch (state){ 
-        
-		case POWER_ON:
-            state_1();
-			break;
+  Serial.print(String((double)encoderD.getSpeed()));
+  Serial.println(" " + String((double)encoderE.getSpeed()));
+  delay(100);
 
-		case CALIBRATION:
-            state_2();
-			break;
+  // wait 3 seconds
+  Serial.println(sensor.calibrate_status());
 
-		case RUNNING:
-            state_3();
-			break;
-		
-		default:
-			break;
+  // clear count
+  enc_left.clearCount();
+  enc_right.clearCount();
+
+  // calibrate sensor
+  sensor.calibrate(30, 100, LED0);
+
+  switch (state){ 
+      
+    case POWER_ON:
+      state_1();
+      break;
+
+    case CALIBRATION:
+      state_2();
+      break;
+
+    case RUNNING:
+      state_3();
+      break;
+    
+    default:
+      break;
 	}
 }
