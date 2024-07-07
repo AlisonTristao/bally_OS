@@ -39,19 +39,15 @@ void loop() {
     switch (state){ 
         
 		case POWER_ON:
-			Serial.println(" ESTADO 1");
+            state_1();
 			break;
 
 		case CALIBRATION:
-			Serial.println("ESTADO 2");
+            state_2();
 			break;
 
 		case RUNNING:
-			Serial.println("ESTADO 3");
-			break;
-
-		case STANDBY:
-			Serial.println("ESTADO 4");
+            state_3();
 			break;
 		
 		default:
