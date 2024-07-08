@@ -41,6 +41,7 @@ void setup()
 	// musica = random(0, 3);
 	/* Musica_Pantera(); */
 }
+
 void loop()
 {
 	motorD.applyPWM(100);
@@ -69,5 +70,6 @@ void loop()
 			Serial.println(pwm_D);
 			pwm_ant_D = pwm_D;
 			// pwm_ant_E = pwm_E;*/
-	}
+     }
+  }
 }
