@@ -1,5 +1,5 @@
-#ifndef BUZZER_H
-#define BUZZER_H
+#ifndef BZR_H
+#define BZR_H
 #include <Arduino.h>
 #include "pins.h"
 
@@ -95,10 +95,7 @@
 #define REST 0
 
 // change this to make the song slower or faster
-int tempo = 200;
-
-// change this to whichever pin you want to use
-int buzzer = 11;
+int tempo_mario = 200;
 
 // notes of the moledy followed by the duration.
 // a 4 means a quarter note, 8 an eighteenth , 16 sixteenth, so on
@@ -774,7 +771,7 @@ int melody[] = {
 int notes = sizeof(melody) / sizeof(melody[0]) / 2;
 
 // this calculates the duration of a whole note in ms
-int wholenote = (60000 * 4) / tempo;
+int wholenote = (60000 * 4) / tempo_mario;
 
 int divider = 0, noteDuration = 0;
 
@@ -800,13 +797,13 @@ void Musica_Mario()
         }
 
         // we only play the note for 90% of the duration, leaving 10% as a pause
-        tone(buzzer, melody[thisNote], noteDuration * 0.9);
+        tone(BZR, melody[thisNote], noteDuration * 0.9);
 
         // Wait for the specief duration before playing the next note.
         delay(noteDuration);
 
         // stop the waveform generation before the next note.
-        noTone(buzzer);
+        noTone(BZR);
     }
 }
 

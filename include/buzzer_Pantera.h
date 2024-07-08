@@ -102,16 +102,16 @@
 #define REST 0
 
 // change this to make the song slower or faster
-int tempo = 120;
+int tempo_pantera = 120;
 
 // change this to whichever pin you want to use
 int buzzer = 11;
 
-// notes of the moledy followed by the duration.
+// notes_pantera of the moledy followed by the duration.
 // a 4 means a quarter note, 8 an eighteenth , 16 sixteenth, so on
-// !!negative numbers are used to represent dotted notes,
+// !!negative numbers are used to represent dotted notes_pantera,
 // so -4 means a dotted quarter note, that is, a quarter plus an eighteenth!!
-int melody[] = {
+int melody_pantera[] = {
 
     // Pink Panther theme
     // Score available at https://musescore.com/benedictsong/the-pink-panther
@@ -300,39 +300,39 @@ int melody[] = {
 
 // sizeof gives the number of bytes, each int value is composed of two bytes (16 bits)
 // there are two values per note (pitch and duration), so for each note there are four bytes
-int notes = sizeof(melody) / sizeof(melody[0]) / 2;
+int notes_pantera = sizeof(melody_pantera) / sizeof(melody_pantera[0]) / 2;
 
 // this calculates the duration of a whole note in ms
-int wholenote = (60000 * 4) / tempo;
+int wholenote_pantera = (60000 * 4) / tempo;
 
-int divider = 0, noteDuration = 0;
+int divider_pantera = 0, noteDuration_pantera = 0;
 
 void Musica_Pantera()
 {
-    // iterate over the notes of the melody.
-    // Remember, the array is twice the number of notes (notes + durations)
-    for (int thisNote = 0; thisNote < notes * 2; thisNote = thisNote + 2)
+    // iterate over the notes_pantera of the melody_pantera.
+    // Remember, the array is twice the number of notes_pantera (notes_pantera + durations)
+    for (int thisNote = 0; thisNote < notes_pantera * 2; thisNote = thisNote + 2)
     {
 
         // calculates the duration of each note
-        divider = melody[thisNote + 1];
-        if (divider > 0)
+        divider_pantera = melody_pantera[thisNote + 1];
+        if (divider_pantera > 0)
         {
             // regular note, just proceed
-            noteDuration = (wholenote) / divider;
+            noteDuration_pantera = (wholenote_pantera) / divider_pantera;
         }
-        else if (divider < 0)
+        else if (divider_pantera < 0)
         {
-            // dotted notes are represented with negative durations!!
-            noteDuration = (wholenote) / abs(divider);
-            noteDuration *= 1.5; // increases the duration in half for dotted notes
+            // dotted notes_pantera are represented with negative durations!!
+            noteDuration_pantera = (wholenote_pantera) / abs(divider_pantera);
+            noteDuration_pantera *= 1.5; // increases the duration in half for dotted notes_pantera
         }
 
         // we only play the note for 90% of the duration, leaving 10% as a pause
-        tone(buzzer, melody[thisNote], noteDuration * 0.9);
+        tone(buzzer, melody_pantera[thisNote], noteDuration_pantera * 0.9);
 
         // Wait for the specief duration before playing the next note.
-        delay(noteDuration);
+        delay(noteDuration_pantera);
 
         // stop the waveform generation before the next note.
         noTone(buzzer);
