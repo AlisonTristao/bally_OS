@@ -6,85 +6,70 @@
 
 #include "HBridge.h"
 #include <ESP32Encoder.h>
-#include "Encoder.h"
+
+double pwm_ant_D = 0;
+double pwm_ant_E = 0;
+double pwm_D = 0;
+double pwm_E = 0;
 
 states state = POWER_ON;
 arraySensor sensor(8, SIG, C0, C1, C2, C3, WHITE);
 
-
 HBridge motorE(AIN1, AIN2, CH1, PWM_A);
 HBridge motorD(BIN1, BIN2, CH2, PWM_B);
 
-Encoder enc_left(A0, A1);
-Encoder enc_right(B0, B1);
+ESP32Encoder encoderD;
+ESP32Encoder encoderE;
 
+void setup()
+{
+	Serial.begin(921600);
+	Serial.print("Iniciando...\n");
 
-void setup() {
-  Serial.begin(921600);
+	// init pins
+	init_pins();
+	motorD.init();
+	motorE.init();
 
-
-  ESP32Encoder encoderD;
-  ESP32Encoder encoderE;
-
-  enc_left.init();
-  enc_right.init();
-
-  encoderD.attachHalfQuad(A0, A1);
+	encoderD.attachHalfQuad(A0, A1);
 	encoderE.attachHalfQuad(B0, B1);
 
-  // init pins
-  init_pins();
-  motorD.init();
-  motorE.init();
-  motorD.applyPWM(2000);
-  motorE.applyPWM(-1000);
-  
-  // Set omterruptions
-  set_all_interruptions();
-  
-  encoderD.clearCount();
+	encoderD.clearCount();
 	encoderE.clearCount();
+	Serial.println("direito;esquerdo;PWM(%)");
+	randomSeed(analogRead(15));
+	// musica = random(0, 3);
+	/* Musica_Pantera(); */
 }
 
 void loop()
 {
-  // debug
-  //Serial.print(sensor.debub());
-  //Serial.print(" ");
-  //Serial.println(sensor.read_line());
-  Serial.print(enc_left.getCount());
-  Serial.print(" ");
-  Serial.println(enc_right.getSpeed());
+	motorD.applyPWM(100);
+	motorE.applyPWM(100);
+	tempo = millis();
+	while (abs(pwm_D - pwm_ant_D) <= 10)
+	{
+		if (millis() % 5 == 0)
+		{
+			pwm_D = encoderD.getSpeed();
+			pwm_E = encoderE.getSpeed();
+			pwm_ant_D = pwm_D;
+			pwm_ant_E = pwm_E;
+		}
 
-  Serial.print(String((double)encoderD.getSpeed()));
-  Serial.println(" " + String((double)encoderE.getSpeed()));
-  delay(100);
-
-  // wait 3 seconds
-  Serial.println(sensor.calibrate_status());
-
-  // clear count
-  enc_left.clearCount();
-  enc_right.clearCount();
-
-  // calibrate sensor
-  sensor.calibrate(30, 100, LED0);
-
-  switch (state){ 
-      
-    case POWER_ON:
-      state_1();
-      break;
-
-    case CALIBRATION:
-      state_2();
-      break;
-
-    case RUNNING:
-      state_3();
-      break;
-    
-    default:
-      break;
-	}
+		/*for (int i = 100; i > -110; i -= 10)
+		{
+			motorD.applyPWM(100);
+			// motorE.applyPWM(i);
+			delay(10);
+			pwm_D = encoderD.getSpeed();
+			pwm_E = encoderE.getSpeed();
+			// Serial.print(String((double)encoderD.getSpeed()) + ";" + String((double)encoderE.getSpeed()) + ";" + i); // printa a velocidade do motor com base no pwm inserido
+			// Serial.println(String(((int)(pwm_D - pwm_ant_D))) + " " + String(((int)(pwm_E - pwm_ant_E)))); // printa a diferença da velocidade com a mudança do pwm
+			// Serial.print(" " + String(pwm_ant_D) + " " + String(pwm_ant_E) + " " + String(pwm_D) + " " + String(pwm_E));
+			Serial.println(pwm_D);
+			pwm_ant_D = pwm_D;
+			// pwm_ant_E = pwm_E;*/
+     }
+  }
 }
