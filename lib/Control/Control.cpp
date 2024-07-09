@@ -9,17 +9,18 @@ Control::Control()
 
 }
 
-double Control::simplePID(double kp, double ki, double kd, double Erro)
+double Control::simplePID(double kp, double ki, double kd, double Erro, double sample)
 {
-    double Ts = 0.05; // tempo de amostragem
-
     /// anti windup
-    aw = (ki - 0.1) * Ts * (limit - pid);
-    k1 = (kp + ki * Ts);
-    k2 = -kp;
+    //aw = (ki - 0.1) * Ts * (limit - pid);
+    //k1 = (kp + ki * Ts);
+    //k2 = -kp;
+    integral += Erro * sample;
 
     // salva o ultimo erro
-    pid += (k1 * Erro) + (k2 * ErroPassado) + aw + ((Erro - ErroPassado) / Ts) * kd; // pid com anti-windup
+    //pid += (k1 * Erro) + (k2 * ErroPassado) + aw + ((Erro - ErroPassado) / Ts) * kd; // pid com anti-windup
+
+    pid = kp * Erro + ki * integral + kd * (Erro - ErroPassado) / sample; // pid sem anti-windup
 
     // garante que o P e o D nao sature
     if (pid >= limit)
