@@ -23,9 +23,6 @@ HBridge motorD(BIN1, BIN2, CH2, PWM_B);
 ESP32Encoder encoderD;
 ESP32Encoder encoderE;
 
-// global vars
-uint32_t i = 0;
-
 void setup(){
 	Serial.begin(921600);
 
@@ -45,7 +42,7 @@ void setup(){
 
 	// init sensor
 	sensor.init();
-	sensor.set_init_arr(4 );				// mux in the middle 
+	sensor.set_init_arr(4);				// mux in the middle 
 }
 
 void loop()
@@ -62,9 +59,9 @@ void loop()
 		if (calibrated) 	ledUp((uint8_t) map(sensor.read_line(), 1000, 8000, 0, 5));
 		break;
 	case RUNNING:
-		/* run */
-		
+		running_func();		
 		break;
+		
 	default:
 		break;
 	}
