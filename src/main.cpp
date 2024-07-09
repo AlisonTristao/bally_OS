@@ -4,6 +4,7 @@
 #include "arraySensor.h"
 #include "leds.h"
 #include "interrupt.h"
+#include "Control.h"
 
 #include "HBridge.h"
 #include <ESP32Encoder.h>
@@ -23,8 +24,17 @@ HBridge motorD(BIN1, BIN2, CH2, PWM_B);
 ESP32Encoder encoderD;
 ESP32Encoder encoderE;
 
-// global vars
-uint32_t i = 0;
+// control
+Control controlW;
+Control controlT;
+
+// control gains
+#define KpT		1
+#define KiT		1
+#define KdT		1
+#define	KpW		1
+#define KiW		1
+#define KdW		1
 
 void setup(){
 	Serial.begin(921600);
@@ -45,26 +55,56 @@ void setup(){
 
 	// init sensor
 	sensor.init();
-	sensor.set_init_arr(4 );				// mux in the middle 
+	sensor.set_init_arr(4);	// mux in the middle 
 }
 
+uint32_t i = 0;
 void loop()
 {
 	switch (state)
 	{
-	case POWER_ON:
+	case POWER_ON:{
 		/* musica e led pisca */
 		power_func();
 		break;
-	case CALIBRATION:
+	}
+
+	case CALIBRATION:{
 		/* calibrate sensors */
 		if (!calibrated) 	calibrated = calibrate(&sensor);
-		if (calibrated) 	ledUp((uint8_t) map(sensor.read_line(), 1000, 8000, 0, 5));
+		else	 			ledUp((uint8_t) map(sensor.read_line(), 1000, 8000, 0, 5));
 		break;
-	case RUNNING:
-		/* run */
+	}
+
+	case RUNNING:{
+		uint32_t timer = millis();
+
+		/* get speed of motors */
+		double speedE = encoderE.getSpeed();
+		double speedD = encoderD.getSpeed();
+
+		double erro = 500 - ((speedE+speedD)/2);
+
+		// calcular as ações de controle
+		double uT = controlT.simplePID(0.01, 0.01, 0.01, erro);
+		//int32_t uW = controlW.simplePID(KpW, KiW, KdW, 10, 0);
 		
+		motorD.applyPWM((int32_t)uT);
+		motorE.applyPWM((int32_t)uT);
+
+		//Serial.print("loop");
+		//Serial.println(i);
+		Serial.print(">pwm:");
+		Serial.print(uT);
+		Serial.print(" >e:");
+		Serial.print(erro);
+		Serial.print(" >vm:");
+		Serial.println((int)(speedE+speedD)/2);
+
+
+		while (millis() - timer < SAMPLE_MS);
 		break;
+	}
 	default:
 		break;
 	}

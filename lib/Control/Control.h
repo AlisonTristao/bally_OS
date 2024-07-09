@@ -9,22 +9,18 @@ class Control
 {
 public:
     // construtor
-    Control(double kp, double ki, double kd);
+    Control();
     virtual ~Control(){};
-    // atualiza todas constantes
-    void setConst(double kp, double ki, double kd);
     void setVerb(bool verb);
-    int32_t simplePID(double kp, double ki, double kd, double Erro, int32_t limit);
+    double simplePID(double kp, double ki, double kd, double Erro);
     int32_t simplePD(double kp, double kd, double Erro, int32_t limit);
-    // printa as configurações
-    String printConfig();
-
+    int32_t simplePI(double kp, double ki, double Erro, int32_t limit);
 private:
     uint32_t Time = 0;
-    double kp = 1, kd = 1, ki = 1, k1, k2, ka, limit;
+    double k1, k2, ka;
     double Erro = 0, ErroPassado = 0, Ie = 0;
-    bool verb = false;
-    int32_t pid, aw;
+    double pid = 0, integral, aw;
+    double limit = 100;
 };
 
 #endif

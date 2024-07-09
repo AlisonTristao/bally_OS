@@ -67,9 +67,8 @@ bool calibrate(arraySensor* sensor) {
     return calibrate;
 }
 
-void state_3()
+void running_func()
 {
-
     if (millis() >= tempo + 1000 && (right_flag || left_flag))
     {
         if (left_flag && !right_flag && counter == 0)
@@ -87,14 +86,6 @@ void state_3()
         right_flag = false;
         left_flag = false;
     }
-
-    digitalWrite(LED1, LOW);
-    digitalWrite(LED2, HIGH);
-    Serial.print(" ");
-    Serial.print(left_flag);
-    Serial.print(" ");
-    Serial.print(right_flag);
-    Serial.println(" -> CORRENDO <- ");
 }
 
 #endif

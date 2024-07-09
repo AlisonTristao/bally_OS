@@ -2,13 +2,17 @@
 #define PINS_H
 #include <Arduino.h>
 
+// filter
+#define WC_RPM     50
+
 // timers
+#define SAMPLE_MS   50
 #define DLY_LONG    500
 #define DLY_SHORT   100
 
 // bzer tone
-#define TONE_HIGH   2000
-#define TONE_LOW    1000
+#define TONE_HIGH   3000
+#define TONE_LOW    500
 
 // channels
 #define CH0         0
