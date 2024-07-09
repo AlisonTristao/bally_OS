@@ -23,6 +23,9 @@ HBridge motorD(BIN1, BIN2, CH2, PWM_B);
 ESP32Encoder encoderD;
 ESP32Encoder encoderE;
 
+// global vars
+uint32_t i = 0;
+
 void setup(){
 	Serial.begin(921600);
 
@@ -45,7 +48,6 @@ void setup(){
 	sensor.set_init_arr(4 );				// mux in the middle 
 }
 
-uint32_t i = 0;
 void loop()
 {
 	switch (state)
