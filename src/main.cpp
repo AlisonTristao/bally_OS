@@ -53,15 +53,17 @@ void loop()
 		/* musica e led pisca */
 		power_func();
 		break;
+	
 	case CALIBRATION:
 		/* calibrate sensors */
 		if (!calibrated) 	calibrated = calibrate(&sensor);
 		if (calibrated) 	ledUp((uint8_t) map(sensor.read_line(), 1000, 8000, 0, 5));
 		break;
+
 	case RUNNING:
 		running_func();		
 		break;
-		
+
 	default:
 		break;
 	}
