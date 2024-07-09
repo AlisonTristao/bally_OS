@@ -2,19 +2,20 @@
 #define STATEFLOW_H
 
 #include <Arduino.h>
+#include <arraySensor.h>
 
 enum states
 {
-    POWER_ON,    // estado 1 -> inicial / Fim corrida
-    CALIBRATION, // estado 2 -> Calibrando sensores
-    RUNNING      // estado 3 -> Corrida
+    POWER_ON,               // estado 1 -> inicial / Fim corrida
+    CALIBRATION,            // estado 2 -> Calibrando sensores
+    RUNNING                 // estado 3 -> Corrida
 };
 
-extern bool right_flag; // -> Definada no interrupt.h
-extern bool left_flag;  // -> Definada no interrupt.h
-extern int tempo;       // -> Definada no interrupt.h
+extern bool right_flag;     // -> Definada no interrupt.h
+extern bool left_flag;      // -> Definada no interrupt.h
+extern int tempo;           // -> Definada no interrupt.h
 
-extern states state; // -> Definida na MAIN
+extern states state;        // -> Definida na MAIN
 
 int counter = 0;
 
@@ -22,7 +23,7 @@ void state_machine()
 {
     if (state == RUNNING)
     {
-        state = POWER_ON; // Manter o estado em STATE4 se já estiver no final
+        state = POWER_ON;   // Manter o estado em STATE4 se já estiver no final
     }
     else
     {
@@ -30,19 +31,40 @@ void state_machine()
     }
 }
 
-void state_1()
-{
-    digitalWrite(LED2, LOW);
-    digitalWrite(LED0, HIGH);
-
-    Serial.println(" -> PARADO <- ");
-}
-
-void state_2()
-{
+void power_func() {
+    // pisca os leds em sequencia 
     digitalWrite(LED0, LOW);
     digitalWrite(LED1, HIGH);
-    Serial.println(" -> CALIBRANDO <-");
+    delay(DLY_LONG);
+    digitalWrite(LED0, HIGH);
+    digitalWrite(LED1, LOW);
+    delay(DLY_LONG);
+}
+
+bool calibrate(arraySensor* sensor) {
+    delay(DLY_LONG);
+    sensor->calibrate(20, DLY_SHORT, LED0);           // calibrate the sensor
+    Serial.println(sensor->calibrate_status()); // print the calibration
+    bool calibrate = sensor->calibration_ok();  // return the calibration status
+    if(!calibrate){                             // beeeep
+        state = POWER_ON;
+        ledcWriteTone(CH0, TONE_LOW);
+        delay(DLY_LONG);
+        ledcWriteTone(CH0, 0);
+    } else {                                    // bep bep beeeep
+        ledcWriteTone(CH0, TONE_HIGH);
+        delay(DLY_SHORT);
+        ledcWriteTone(CH0, 0);
+        delay(DLY_SHORT);
+        ledcWriteTone(CH0, TONE_HIGH);
+        delay(DLY_SHORT);
+        ledcWriteTone(CH0, 0);
+        delay(DLY_SHORT);
+        ledcWriteTone(CH0, TONE_HIGH);
+        delay(DLY_LONG);
+        ledcWriteTone(CH0, 0);
+    }
+    return calibrate;
 }
 
 void state_3()

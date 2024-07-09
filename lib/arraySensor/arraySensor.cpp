@@ -60,8 +60,8 @@ int16_t arraySensor::normalize(uint16_t value, uint8_t index){
 bool arraySensor::calibration_ok(){
     // check if the calibration is ok
     for(uint8_t i = 0; i < len; i++)
-        if(max[i] <= min[i]) return true;
-    return false;
+        if((max[i] - min[i]) <= 100) return false;
+    return true;
 }
 
 bool arraySensor::calibrate(uint8_t n_samples, uint8_t delay_ms, uint8_t led){
@@ -87,11 +87,8 @@ String arraySensor::calibrate_status(){
     // return the calibration status
     String status;
     for(uint8_t i = 0; i < len; i++){
-        status +=   "Sensor "       + 
-                    String(i)       + 
-                    ": "            + 
-                    String(min[i])  + 
-                    " - "           + 
+        status +=   String(min[i])  + 
+                    "-"           + 
                     String(max[i])  + 
                     "\n";
     }
@@ -123,6 +120,6 @@ double arraySensor::read_line(){
 String arraySensor::debub(){
     String status;
     for(uint8_t i = 0; i < len; i++)
-        status += String(normalize(read(i), i)) + "\t";
+        status += String(normalize((i), i)) + "\t";
     return status;
 }

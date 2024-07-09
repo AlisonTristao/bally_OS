@@ -17,11 +17,11 @@ private:
     // functions
     uint16_t read(uint8_t index);
     int16_t normalize(uint16_t value, uint8_t index);
-    bool calibration_ok();
 
 public:
     arraySensor(uint8_t len, uint8_t sig, uint8_t c0, uint8_t c1, uint8_t c2, uint8_t c3, bool lineColor);
     virtual ~arraySensor();
+    bool calibration_ok();
     
     // normalize array
     uint16_t *min, *max;
