@@ -45,6 +45,7 @@ void HBridge::changeDirection(movement move)
 }
 void HBridge::applyPWM(int32_t pwm)
 {
+    
     // limita o pwm
     if (pwm > +100)
         pwm = +100;

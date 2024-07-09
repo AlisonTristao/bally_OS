@@ -1,7 +1,7 @@
 #include "Control.h"
 #include <Arduino.h>
 
-#define VERB
+//#define VERB
 
 
 Control::Control()
@@ -12,15 +12,23 @@ Control::Control()
 double Control::simplePID(double kp, double ki, double kd, double Erro, double sample)
 {
     /// anti windup
-    //aw = (ki - 0.1) * Ts * (limit - pid);
-    //k1 = (kp + ki * Ts);
+    //aw = (ki - 0.1) * sample * (limit - pid);
+    //k1 = (kp + ki * sample);
     //k2 = -kp;
-    integral += Erro * sample;
+    
 
     // salva o ultimo erro
-    //pid += (k1 * Erro) + (k2 * ErroPassado) + aw + ((Erro - ErroPassado) / Ts) * kd; // pid com anti-windup
+    //pid += (k1 * Erro) + (k2 * ErroPassado) + aw + ((Erro - ErroPassado) / sample) * kd; // pid com anti-windup
 
-    pid = kp * Erro + ki * integral + kd * (Erro - ErroPassado) / sample; // pid sem anti-windup
+
+    //pid = kp * Erro + ki * integral + kd * (Erro - ErroPassado) / sample; // pid sem anti-windup
+
+    integral += Erro * sample;
+
+    if (ki*integral > limit) integral = limit/ki;
+    else if (ki*integral < -limit) integral = -limit/ki;
+
+    pid = kp * Erro + ki * integral; // pid sem anti-windup
 
     // garante que o P e o D nao sature
     if (pid >= limit)

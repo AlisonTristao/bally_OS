@@ -48,21 +48,21 @@ bool calibrate(arraySensor* sensor) {
     bool calibrate = sensor->calibration_ok();  // return the calibration status
     if(!calibrate){                             // beeeep
         state = POWER_ON;
-        ledcWriteTone(CH0, TONE_LOW);
+        ledcWriteTone(CH2, TONE_LOW);
         delay(DLY_LONG);
-        ledcWriteTone(CH0, 0);
+        ledcWriteTone(CH2, 0);
     } else {                                    // bep bep beeeep
-        ledcWriteTone(CH0, TONE_HIGH);
+        ledcWriteTone(CH2, TONE_HIGH);
         delay(DLY_SHORT);
-        ledcWriteTone(CH0, 0);
+        ledcWriteTone(CH2, 0);
         delay(DLY_SHORT);
-        ledcWriteTone(CH0, TONE_HIGH);
+        ledcWriteTone(CH2, TONE_HIGH);
         delay(DLY_SHORT);
-        ledcWriteTone(CH0, 0);
+        ledcWriteTone(CH2, 0);
         delay(DLY_SHORT);
-        ledcWriteTone(CH0, TONE_HIGH);
+        ledcWriteTone(CH2, TONE_HIGH);
         delay(DLY_LONG);
-        ledcWriteTone(CH0, 0);
+        ledcWriteTone(CH2, 0);
     }
     return calibrate;
 }

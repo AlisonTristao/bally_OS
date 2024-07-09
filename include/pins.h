@@ -100,8 +100,8 @@ void init_pins()
 
     // Buzzer
     pinMode(BZR, OUTPUT);
-    ledcSetup(CH0, 2000, 8);
-    ledcAttachPin(BZR, CH0);
+    ledcSetup(CH2, 2000, 8);
+    ledcAttachPin(BZR, CH2);
 
     // Multiplex
     pinMode(SIG, INPUT);
