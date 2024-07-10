@@ -28,16 +28,14 @@ ESP32Encoder encoderE;
 Control controlW; // VELOCIDADE ANGULAR
 Control controlT; // VELOCIDADE LINEAR
 
-Control controlE; // RODA ESQUERDA
-Control controlD; // RODA DIREITA
+Control controle0; 
 
-// control gains
-#define KpT		1
-#define KiT		1
-#define KdT		1
-#define	KpW		1
-#define KiW		1
-#define KdW		1
+double uTE = 0.0;
+double uTD = 0.0;
+
+
+int16_t PWM = 50;
+double position = 0.0, pid0 = 0.0;
 
 void setup(){
 	Serial.begin(921600);
@@ -83,35 +81,25 @@ void loop()
 		uint32_t timer = millis();
 
 		//get speed of motors 
-		double speedE = encoderE.getSpeed();
-		double speedD = encoderD.getSpeed();
+		//speedE = encoderE.getSpeed();
+		//speedD = encoderD.getSpeed();
 
-		double erroE = 2000 - speedE;
-		double erroD = 2000 - speedD;
+		// posicao da linha
+		position = (sensor.read_line() - 4000)/100;
 
-		// calcular as ações de controle
-		double uTE = controlE.simplePID(0.1, 1, 0.01, erroE, SAMPLE_MS/1000.0);
-		double uTD = controlD.simplePID(0.1, 1, 0.01, erroD, SAMPLE_MS/1000.0);
-		//int32_t uW = controlW.simplePID(KpW, KiW, KdW, 10, 0);
-		
-		motorE.applyPWM((int32_t)uTE);
-		motorD.applyPWM((int32_t)uTD);
+		pid0 = controle0.simplePID(1.3, 0.00, 1, position, SAMPLE_MS/1000.0);
+		//Serial.println(pid0);
 
-		Serial.print("loop");
-		Serial.println(i);
-		Serial.print(" >pwm_E:");
-		Serial.print((int)uTE);
-		Serial.print(" >pwm_D:");
-		Serial.print((int)uTD);
-		Serial.print(" >e_E:");
-		Serial.print((int)erroE);
-		Serial.print(" >e_D:");
-		Serial.print((int)erroD);
-		Serial.print(" >v_E:");
-		Serial.print((int)speedE);
-		Serial.print(" >v_D:");
-		Serial.println((int)speedD);
+		// velocidade toral das rodas
+		int16_t velLeft = PWM;
+		int16_t velRight = PWM;
 
+		// aplica o pid0 nas rodas
+		if(pid0 > 0) 	velRight = PWM - pid0;
+		else        	velLeft = PWM + pid0;
+
+		motorD.applyPWM((int32_t)velRight);
+		motorE.applyPWM((int32_t)velLeft);
 
 		while (millis() - timer < SAMPLE_MS);
 		break;
