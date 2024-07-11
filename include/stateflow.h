@@ -43,7 +43,7 @@ void power_func() {
 
 bool calibrate(arraySensor* sensor) {
     delay(DLY_LONG);
-    sensor->calibrate(20, DLY_SHORT, LED0);           // calibrate the sensor
+    sensor->calibrate(30, DLY_SHORT/10, LED0);  // calibrate the sensor
     Serial.println(sensor->calibrate_status()); // print the calibration
     bool calibrate = sensor->calibration_ok();  // return the calibration status
     if(!calibrate){                             // beeeep
