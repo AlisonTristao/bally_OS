@@ -3,72 +3,72 @@
 #include <Arduino.h>
 
 // filter
-#define WC_RPM     50
+#define WC_RPM 50
 
 // timers
-#define SAMPLE_MS   2
-#define DLY_LONG    500
-#define DLY_SHORT   100
+#define SAMPLE_MS 2
+#define DLY_LONG 500
+#define DLY_SHORT 100
 
 // bzer tone
-#define TONE_HIGH   3000
-#define TONE_LOW    500
+#define TONE_HIGH 3000
+#define TONE_LOW 500
 
 // channels
-#define CH0         0
-#define CH1         1
-#define CH2         2
+#define CH0 0
+#define CH1 1
+#define CH2 2
 
 // array of leds
-#define LED0        38
-#define LED1        37
-#define LED2        36
-#define LED3        35
-#define LED4        45
-#define LED5        46
+#define LED0 38
+#define LED1 37
+#define LED2 36
+#define LED3 35
+#define LED4 45
+#define LED5 46
 
 // H bridge
 // controla a direção do motor A, exemplo se AIN1 = HIGH e AIN2 = LOW o motor A gira no sentido horário.
-#define AIN1        11
-#define AIN2        10
+#define AIN1 11
+#define AIN2 10
 // controla a direção do motor B, exemplo se AIN1 = HIGH e AIN2 = LOW o motor A gira no sentido horário.
-#define BIN1        12
-#define BIN2        13
+#define BIN1 12
+#define BIN2 13
 // controla a velocidade do motor A
-#define PWM_A       9
+#define PWM_A 9
 // controla a velocidade do motor B
-#define PWM_B       14
+#define PWM_B 14
 
 // Encoders
-#define A0          21
-#define A1          47
-#define B0          20
-#define B1          19
+#define A0 21
+#define A1 47
+#define B0 20
+#define B1 19
 
 // Buttons
-#define BTN1        1
-#define BTN2        2
+#define BTN1 1
+#define BTN2 2
 
 // Buzzer
-#define BZR         6
+#define BZR 6
 
 // Multiplex
-#define SIG         18
-#define C0          39
-#define C1          40
-#define C2          41
-#define C3          42
+#define SIG 18
+#define C0 39
+#define C1 40
+#define C2 41
+#define C3 42
 
 // Side sensors
-#define LEFT        17
-#define RIGHT       8
+#define LEFT 17
+#define RIGHT 8
 
 // i2c devices
-#define SDA         4
-#define SDL         5
+#define SDA 4
+#define SDL 5
 
 // Tensao dividers
-#define BAT         7
+#define BAT 7
 
 void init_pins()
 {
