@@ -40,6 +40,10 @@ uint16_t arraySensor::read(uint8_t index){
     digitalWrite(c2, bitRead(index, 2));
     digitalWrite(c3, bitRead(index, 3));
 
+    pinMode(18, OUTPUT);
+    digitalWrite(18, HIGH);
+    pinMode(18, INPUT);
+
     // wait for the signal to stabilize
     delayMicroseconds(100);
 

@@ -6,7 +6,6 @@
 #include "interrupt.h"
 #include "Control.h"
 #include <vector>
-#include "debug.h"
 
 #include "HBridge.h"
 #include <ESP32Encoder.h>
@@ -27,14 +26,16 @@ HBridge motorD(BIN1, BIN2, CH1, PWM_B);
 // encoders
 ESP32Encoder encoderD;
 ESP32Encoder encoderE;
-double speedD, speedE, vm;
+vector<double> speedD, speedE, s_d;
 
 // control
 Control controlW; // VELOCIDADE ANGULAR
 Control controlT; // VELOCIDADE LINEAR
 
 Control controle0;
-Control controle1;
+
+double uTE = 0.0;
+double uTD = 0.0;
 
 int16_t PWM = 65;
 double position = 0.0, pid0 = 0.0;
@@ -97,16 +98,6 @@ void loop()
 	{
 		timer = millis();
 
-		// get speed of motors
-		speedD = (0.87*speedD) + (0.13*encoderD.getSpeed());
-		speedE = (0.87*speedE) + (0.13*encoderE.getSpeed());
-		vm = (speedD + speedE)/2;
-
-		// controle linear
-		PWM = controle1.Gabes_Control(1, 1000, 0, 2100-vm, SAMPLE_MS/1000.0);
-
-		Serial.println(PWM);
-
 		// posicao da linha
 		position = (sensor.read_line() - 4500) / 100;
 
@@ -135,8 +126,32 @@ void loop()
 	}
 
 	case DEBUG: {
+
 		motorD.brake();
 		motorE.brake();
+
+		/*Serial.println("INICIO");
+		for(int i = 0; i < speedD.size(); i++){
+			Serial.print("E:");
+			Serial.println((int)speedE[i]);
+			delay(10);
+			Serial.print("D:");
+			Serial.println((int)speedD[i]);
+			delay(10);
+			Serial.print("S:");
+			Serial.println((int)s_d[i]);
+			delay(10);
+		}
+		Serial.println("FIM");
+		state_machine();
+
+		digitalWrite(LED5, LOW);
+		digitalWrite(LED4, HIGH);
+		delay(DLY_LONG);
+		digitalWrite(LED5, HIGH);
+		digitalWrite(LED4, LOW);
+		delay(DLY_LONG);*/
+
 	}
 
 	default:
