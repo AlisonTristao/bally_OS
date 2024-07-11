@@ -69,7 +69,7 @@ bool calibrate(arraySensor* sensor) {
 
 void running_func()
 {
-    if (millis() >= tempo + 1000 && (right_flag || left_flag))
+    if (millis() >= tempo + 500 && (right_flag || left_flag))
     {
         if (left_flag && !right_flag && counter == 0)
         {
@@ -80,12 +80,19 @@ void running_func()
             right_flag = false;
             left_flag = false;
             counter = 0;
+            // sinalization
+            digitalWrite(LED2, right_flag);
+            digitalWrite(LED5, left_flag);
             state_machine();
         }
 
         right_flag = false;
         left_flag = false;
     }
+
+    // sinalization
+    digitalWrite(LED2, right_flag);
+    digitalWrite(LED5, left_flag);
 }
 
 #endif

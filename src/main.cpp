@@ -75,6 +75,10 @@ void loop()
 	{
 	case POWER_ON:
 	{
+		// brake the wheels
+		motorD.brake();
+		motorE.brake();
+		
 		/* musica e led pisca s*/
 		power_func();
 		break;
@@ -117,21 +121,14 @@ void loop()
 		motorD.applyPWM((int32_t)velRight);
 		motorE.applyPWM((int32_t)velLeft);
 
+		// digitalWrite(LED2, digitalRead(LEFT));
+		// digitalWrite(LED5, digitalRead(RIGHT));
+		running_func();
+
 		while (millis() - timer < SAMPLE_MS);
 		break;
 	}
 	default:
-		Serial.println("TESTE");
-		for (int i = 0; i < speedD.size(); i++)
-		{
-			Serial.println("e:" + String((int)speedE[i]));
-			delay(10);
-			Serial.println("d:" + String((int)speedD[i]));
-			delay(10);
-		}
 		break;
 	}
-
-	// digitalWrite(LED2, digitalRead(LEFT));
-	// digitalWrite(LED5, digitalRead(RIGHT));
 }
