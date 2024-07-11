@@ -99,7 +99,7 @@ void loop()
 		speedD.push_back(encoderD.getSpeed());
 
 		// posicao da linha
-		position = (sensor.read_line() - 4000) / 100;
+		position = (sensor.read_line() - 4500) / 100;
 
 		pid0 = controle0.Gabes_Control(1.3, 0.2, 0.1, position, SAMPLE_MS / 1000.0);
 		// Serial.println(pid0);
