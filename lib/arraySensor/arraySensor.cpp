@@ -66,9 +66,10 @@ bool arraySensor::calibration_ok(){
 
 bool arraySensor::calibrate(uint8_t n_samples, uint8_t delay_ms, uint8_t led){
     // calibrate the sensors
+    uint16_t value = 0;
     for(uint8_t i = 0; i < n_samples; i++){
         for(uint8_t j = 0; j < len; j++){
-            uint16_t value = read(j);
+            value = read(j);
             // line white or black
             if (value < min[j]) min[j] = value;
             if (value > max[j]) max[j] = value;
@@ -99,9 +100,10 @@ String arraySensor::calibrate_status(){
 double arraySensor::read_line(){
     double value = 0, measure = 0;
     bool line = false;
+    uint16_t val = 0;
     // read the sensor and normalize the value
     for (uint8_t i = 0; i < len; i++){
-        uint16_t val = normalize(read(i), i);
+        val = normalize(read(i), i);
         value += val * (i+1) * 1000;
         measure += val;
         // check if the line is detected
