@@ -9,6 +9,8 @@
 
 #include "HBridge.h"
 #include <ESP32Encoder.h>
+#include <BluetoothSerial.h>
+BluetoothSerial SerialBT;
 
 using namespace std;
 
@@ -22,6 +24,8 @@ arraySensor sensor(8, SIG, C0, C1, C2, C3, WHITE);
 // motors
 HBridge motorE(AIN1, AIN2, CH0, PWM_A);
 HBridge motorD(BIN1, BIN2, CH1, PWM_B);
+
+double kp = 0, ki = 0, kd = 0;
 
 // encoders
 ESP32Encoder encoderD;
@@ -45,9 +49,20 @@ int16_t velRight = 0;
 
 uint32_t timer = 0;
 
+void recebeBLUE(){
+	
+}
+
 void setup()
 {
+	SerialBT.begin("Barry");
 	Serial.begin(921600);
+
+	while(kp = 0){
+		if(BluetoothSerial.available()){
+			
+		}
+	}
 
 	// init pins
 	init_pins();
