@@ -117,8 +117,7 @@ void loop()
 		motorD.applyPWM((int32_t)velRight);
 		motorE.applyPWM((int32_t)velLeft);
 
-		while (millis() - timer < SAMPLE_MS)
-			;
+		while (millis() - timer < SAMPLE_MS);
 		break;
 	}
 	default:
