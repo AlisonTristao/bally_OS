@@ -19,7 +19,7 @@ public:
 
 private:
     uint32_t Time = 0;
-    double k1, k2, ka, kc, td, ti, ef = 0, ef_ant = 0, d_ef = 0, d_ef_ant = 0, sample_ant = 1, u = 0, u_ant = 0;
+    double k1, k2, ka, kp, kd, ki, ef = 0, ef_ant = 0, d_ef = 0, d_ef_ant = 0, sample_ant = 1, u = 0, u_ant = 0;
     double Erro = 0, ErroPassado = 0, Ie = 0;
     double pid = 0, integral = 0, aw = 0;
     double limit = 200;

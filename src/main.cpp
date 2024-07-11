@@ -135,14 +135,19 @@ void loop()
 		motorD.brake();
 		motorE.brake();
 
-		float averageSpeedE = calculateAverage(speedE);
-    	float averageSpeedD = calculateAverage(speedD);
-
-		Serial.print("E: ");
-		Serial.println((int)averageSpeedE);
-
-		Serial.print("D: ");
-		Serial.println((int)averageSpeedD);
+		//float averageSpeedE = calculateAverage(speedE);
+    	//float averageSpeedD = calculateAverage(speedD);
+		Serial.println("INICIO");
+		for(int i = 0; i < 3000; i++){
+			Serial.print("E: ");
+			Serial.println((int)speedE[i]);
+			delay(10);
+			Serial.print("D: ");
+			Serial.println((int)speedD[i]);
+			delay(10);
+		}
+		Serial.println("FIM");
+		state_machine();
 
 		digitalWrite(LED5, LOW);
 		digitalWrite(LED4, HIGH);

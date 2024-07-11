@@ -43,11 +43,11 @@ double Control::simplePID(double kp, double ki, double kd, double Erro, double s
     return pid;
 }
 
-double Control::Gabes_Control(double kp, double ki, double kd, double Erro, double sample)
+double Control::Gabes_Control(double kc, double ti, double td, double Erro, double sample)
 {
-    kc = kp;
-    td = kd / kc;
-    ti = kc / ki;
+    kp = kc;
+    kd = kc*td;
+    ki = kc/ti;
     ef = ((td / 10) / (td / 10 + sample)) * ef + (sample / (td / 10 + sample)) * Erro;
     d_ef = (ef - ef_ant);
 
