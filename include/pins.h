@@ -6,7 +6,7 @@
 #define WC_RPM     50
 
 // timers
-#define SAMPLE_MS   50
+#define SAMPLE_MS   1
 #define DLY_LONG    500
 #define DLY_SHORT   100
 

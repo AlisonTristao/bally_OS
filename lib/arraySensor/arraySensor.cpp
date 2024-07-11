@@ -41,7 +41,7 @@ uint16_t arraySensor::read(uint8_t index){
     digitalWrite(c3, bitRead(index, 3));
 
     // wait for the signal to stabilize
-    delay(1);
+    delayMicroseconds(500);
 
     // if the line is black, invert the value
     if(!lineColor) 

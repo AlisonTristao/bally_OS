@@ -87,7 +87,7 @@ void loop()
 		// posicao da linha
 		position = (sensor.read_line() - 4000)/100;
 
-		pid0 = controle0.simplePID(1.3, 0.00, 1, position, SAMPLE_MS/1000.0);
+		pid0 = controle0.simplePID(1.3, 0.00, 0.1, position, SAMPLE_MS/1000.0);
 		//Serial.println(pid0);
 
 		// velocidade toral das rodas
