@@ -27,16 +27,14 @@ HBridge motorD(BIN1, BIN2, CH1, PWM_B);
 // encoders
 ESP32Encoder encoderD;
 ESP32Encoder encoderE;
-vector<double> speedD, speedE;
+double speedD, speedE, vm;
 
 // control
 Control controlW; // VELOCIDADE ANGULAR
 Control controlT; // VELOCIDADE LINEAR
 
 Control controle0;
-
-double uTE = 0.0;
-double uTD = 0.0;
+Control controle1;
 
 int16_t PWM = 65;
 double position = 0.0, pid0 = 0.0;
@@ -100,13 +98,19 @@ void loop()
 		timer = millis();
 
 		// get speed of motors
-		speedE.push_back(encoderE.getSpeed());
-		speedD.push_back(encoderD.getSpeed());
+		speedD = (0.87*speedD) + (0.13*encoderD.getSpeed());
+		speedE = (0.87*speedE) + (0.13*encoderE.getSpeed());
+		vm = (speedD + speedE)/2;
+
+		// controle linear
+		PWM = controle1.Gabes_Control(1, 1000, 0, 2100-vm, SAMPLE_MS/1000.0);
+
+		Serial.println(PWM);
 
 		// posicao da linha
 		position = (sensor.read_line() - 4500) / 100;
 
-		pid0 = controle0.Gabes_Control(2.5, 0.01, 0.04, position, SAMPLE_MS / 1000.0);
+		pid0 = controle0.Gabes_Control(2.5, 250, 0.016, position, SAMPLE_MS / 1000.0);
 		// Serial.println(pid0);
 
 		// velocidade toral das rodas
@@ -131,33 +135,8 @@ void loop()
 	}
 
 	case DEBUG: {
-
 		motorD.brake();
 		motorE.brake();
-
-		//float averageSpeedE = calculateAverage(speedE);
-    	//float averageSpeedD = calculateAverage(speedD);
-		Serial.println("INICIO");
-		for(int i = 0; i < 3000; i++){
-			Serial.print("E: ");
-			Serial.println((int)speedE[i]);
-			delay(10);
-			Serial.print("D: ");
-			Serial.println((int)speedD[i]);
-			delay(10);
-		}
-		Serial.println("FIM");
-		state_machine();
-
-		digitalWrite(LED5, LOW);
-		digitalWrite(LED4, HIGH);
-		delay(DLY_LONG);
-		digitalWrite(LED5, HIGH);
-		digitalWrite(LED4, LOW);
-		delay(DLY_LONG);
-
-
-
 	}
 
 	default:
