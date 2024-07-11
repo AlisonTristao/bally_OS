@@ -40,6 +40,11 @@ double uTD = 0.0;
 int16_t PWM = 65;
 double position = 0.0, pid0 = 0.0;
 
+int16_t velLeft = 0;
+int16_t velRight = 0;
+
+uint32_t timer = 0;
+
 void setup()
 {
 	Serial.begin(921600);
@@ -87,7 +92,7 @@ void loop()
 
 	case RUNNING:
 	{
-		uint32_t timer = millis();
+		timer = millis();
 
 		// get speed of motors
 		speedE.push_back(encoderE.getSpeed());
@@ -100,8 +105,8 @@ void loop()
 		// Serial.println(pid0);
 
 		// velocidade toral das rodas
-		int16_t velLeft = PWM;
-		int16_t velRight = PWM;
+		velLeft = PWM;
+		velRight = PWM;
 
 		// aplica o pid0 nas rodas
 		if (pid0 > 0)
