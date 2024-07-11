@@ -6,6 +6,7 @@
 #include "interrupt.h"
 #include "Control.h"
 #include <vector>
+#include "debug.h"
 
 #include "HBridge.h"
 #include <ESP32Encoder.h>
@@ -105,7 +106,7 @@ void loop()
 		// posicao da linha
 		position = (sensor.read_line() - 4500) / 100;
 
-		pid0 = controle0.Gabes_Control(1.3, 0.2, 0.1, position, SAMPLE_MS / 1000.0);
+		pid0 = controle0.Gabes_Control(2.5, 0.01, 0.04, position, SAMPLE_MS / 1000.0);
 		// Serial.println(pid0);
 
 		// velocidade toral das rodas
@@ -128,6 +129,32 @@ void loop()
 		while (millis() - timer < SAMPLE_MS);
 		break;
 	}
+
+	case DEBUG: {
+
+		motorD.brake();
+		motorE.brake();
+
+		float averageSpeedE = calculateAverage(speedE);
+    	float averageSpeedD = calculateAverage(speedD);
+
+		Serial.print("E: ");
+		Serial.println((int)averageSpeedE);
+
+		Serial.print("D: ");
+		Serial.println((int)averageSpeedD);
+
+		digitalWrite(LED5, LOW);
+		digitalWrite(LED4, HIGH);
+		delay(DLY_LONG);
+		digitalWrite(LED5, HIGH);
+		digitalWrite(LED4, LOW);
+		delay(DLY_LONG);
+
+
+
+	}
+
 	default:
 		break;
 	}

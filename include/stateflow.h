@@ -8,7 +8,8 @@ enum states
 {
     POWER_ON,               // estado 1 -> inicial / Fim corrida
     CALIBRATION,            // estado 2 -> Calibrando sensores
-    RUNNING                 // estado 3 -> Corrida
+    RUNNING,                 // estado 3 -> Corrida
+    DEBUG
 };
 
 extern bool right_flag;     // -> Definada no interrupt.h
@@ -21,7 +22,7 @@ int counter = 0;
 
 void state_machine()
 {
-    if (state == RUNNING)
+    if (state == DEBUG)
     {
         state = POWER_ON;   // Manter o estado em STATE4 se já estiver no final
     }

@@ -16,6 +16,8 @@ void IRAM_ATTR button_isr_handler() {
     digitalWrite(LED0, HIGH);
     if (state == POWER_ON) {
         state_machine();
+    } else if (state == DEBUG) { 
+        state_machine();
     }
 
 }
