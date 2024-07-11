@@ -5,9 +5,12 @@
 #include "leds.h"
 #include "interrupt.h"
 #include "Control.h"
+#include <vector>
 
 #include "HBridge.h"
 #include <ESP32Encoder.h>
+
+using namespace std;
 
 // init satate machine
 states state = POWER_ON;
@@ -23,6 +26,7 @@ HBridge motorD(BIN1, BIN2, CH1, PWM_B);
 // encoders
 ESP32Encoder encoderD;
 ESP32Encoder encoderE;
+vector<double> speedD, speedE;
 
 // control
 Control controlW; // VELOCIDADE ANGULAR
@@ -33,8 +37,7 @@ Control controle0;
 double uTE = 0.0;
 double uTD = 0.0;
 
-
-int16_t PWM = 50;
+int16_t PWM = 65;
 double position = 0.0, pid0 = 0.0;
 
 void setup(){
@@ -81,13 +84,13 @@ void loop()
 		uint32_t timer = millis();
 
 		//get speed of motors 
-		//speedE = encoderE.getSpeed();
-		//speedD = encoderD.getSpeed();
+		speedE.push_back(encoderE.getSpeed());
+		speedD.push_back(encoderD.getSpeed());
 
 		// posicao da linha
 		position = (sensor.read_line() - 4000)/100;
 
-		pid0 = controle0.simplePID(1.3, 0.00, 1, position, SAMPLE_MS/1000.0);
+		pid0 = controle0.simplePID(1.3, 0.0, 0.1, position, SAMPLE_MS/1000.0);
 		//Serial.println(pid0);
 
 		// velocidade toral das rodas
@@ -105,6 +108,16 @@ void loop()
 		break;
 	}
 	default:
+	Serial.println("TESTE");
+		for(int i = 0; i < speedD.size(); i++){
+			Serial.println("e:" + String((int)speedE[i]));
+			delay(10);
+			Serial.println("d:" + String((int)speedD[i]));
+			delay(10);
+		}
 		break;
 	}
+
+	//digitalWrite(LED2, digitalRead(LEFT));
+    //digitalWrite(LED5, digitalRead(RIGHT));
 }
