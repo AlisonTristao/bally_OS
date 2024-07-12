@@ -9,6 +9,7 @@
 #define SAMPLE_MS 2
 #define DLY_LONG 500
 #define DLY_SHORT 100
+#define TIMER_SAMPLE_MS 20
 
 // bzer tone
 #define TONE_HIGH 3000

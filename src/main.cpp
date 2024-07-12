@@ -26,7 +26,7 @@ HBridge motorD(BIN1, BIN2, CH1, PWM_B);
 // encoders
 ESP32Encoder encoderD;
 ESP32Encoder encoderE;
-vector<double> countD, countE, sen_E, PWM_D, PWM_E, timer_gabriel, ctrl, erro, bat;
+vector<double> countD, countE, sen_E, sen_D, PWM_D, PWM_E, timer_gabriel, ctrl, erro;
 
 // control
 Control controlW; // VELOCIDADE ANGULAR
@@ -99,7 +99,7 @@ void loop()
 		// brake the wheels
 		motorD.brake();
 		motorE.brake();
-		
+		Serial.println(analogRead(BAT));
 		/* musica e led pisca s*/
 		power_func();
 		break;
@@ -162,6 +162,9 @@ void loop()
 			Serial.print("sE:");
 			Serial.println((int)sen_E[i]);
 			delay(10);
+			Serial.print("sD:");
+			Serial.println((int)sen_D[i]);
+			delay(10);
 			Serial.print("pD:");
 			Serial.println((int)PWM_D[i]);
 			delay(10);
@@ -177,9 +180,6 @@ void loop()
 			Serial.print("eR:");
 			Serial.println((int)erro[i]);
 			delay(10);
-			Serial.print("bT:");
-			Serial.println((int)bat[i]);
-			delay(10);
 		}
 		Serial.println("FIM");
 
@@ -191,13 +191,13 @@ void loop()
 		Serial.println("INICIO");
 		for(int i = 0; i < speedD.size(); i++){
 			Serial.print("E:");
-			Serial.println((int)speedE[i]);
+			Serial.println(speedE[i]);
 			delay(10);
 			Serial.print("D:");
-			Serial.println((int)speedD[i]);
+			Serial.println(speedD[i]);
 			delay(10);
 			Serial.print("S:");
-			Serial.println((int)s_d[i]);
+			Serial.println(s_d[i]);
 			delay(10);
 		}
 		Serial.println("FIM");
