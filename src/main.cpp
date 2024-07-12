@@ -44,7 +44,6 @@ int16_t velLeft = 0;
 int16_t velRight = 0;
 
 uint32_t timer = 0;
-
 double kp = 3;
 
 void setup()
@@ -54,7 +53,7 @@ void setup()
 	// init pins
 	init_pins();
 
-	uint32_t tempoo = millis();
+	/*uint32_t tempoo = millis();
 	while(digitalRead(BTN1) || digitalRead(BTN2)){
 		if(millis() - tempoo > 3000){
 			kp = 3.2;
@@ -72,7 +71,7 @@ void setup()
 			Serial.println(kp);
 			break;
 		}
-	}
+	}*/
 
 	// init interruptions
 	set_all_interruptions();
