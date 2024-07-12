@@ -60,8 +60,8 @@
 #define C3 42
 
 // Side sensors
-#define LEFT 17
-#define RIGHT 8
+#define LEFT  8 
+#define RIGHT 17
 
 // i2c devices
 #define SDA 4
