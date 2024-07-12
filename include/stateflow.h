@@ -15,6 +15,7 @@ enum states
 extern bool right_flag;     // -> Definada no interrupt.h
 extern bool left_flag;      // -> Definada no interrupt.h
 extern int tempo;           // -> Definada no interrupt.h
+extern bool timer_flag;
 
 extern states state;        // -> Definida na MAIN
 
@@ -30,6 +31,8 @@ void state_machine()
     {
         state = static_cast<states>(state + 1); // Incrementar o estado
     }
+
+    timer_flag = (state == RUNNING);
 }
 
 void power_func() {

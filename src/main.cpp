@@ -12,6 +12,11 @@
 
 using namespace std;
 
+// amostragem flag
+bool timer_flag = false;
+uint32_t time_start = 0;
+uint32_t cont = 0;
+
 // init satate machine
 states state = POWER_ON;
 bool calibrated = false; // flag to check if the sensor is calibrated
@@ -81,8 +86,8 @@ void setup()
 	motorE.init();
 
 	// init encoders
-	encoderD.attachHalfQuad(A0, A1);
-	encoderE.attachHalfQuad(B0, B1);
+	encoderD.attachHalfQuad(ENC_A0, ENC_A1);
+	encoderE.attachHalfQuad(ENC_B0, ENC_B1);
 
 	// init sensor
 	sensor.init();
@@ -99,7 +104,6 @@ void loop()
 		// brake the wheels
 		motorD.brake();
 		motorE.brake();
-		Serial.println(analogRead(BAT));
 		/* musica e led pisca s*/
 		power_func();
 		break;
@@ -153,10 +157,10 @@ void loop()
 
        Serial.println("INICIO");
 		for(int i = 0; i < countD.size(); i++){
-			Serial.print("cD:");
+			Serial.print("A:");
 			Serial.println((int)countD[i]);
 			delay(10);
-			Serial.print("cE:");
+			Serial.print("B:");
 			Serial.println((int)countE[i]);
 			delay(10);
 			Serial.print("sE:");
@@ -183,8 +187,6 @@ void loop()
 		}
 		Serial.println("FIM");
 		state_machine();
-
-		
 
 		/* antigo
 		

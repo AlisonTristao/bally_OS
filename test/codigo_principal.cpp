@@ -25,8 +25,8 @@ void setup()
 	motorD.init();
 	motorE.init();
 
-	encoderD.attachHalfQuad(A0, A1);
-	encoderE.attachHalfQuad(B0, B1);
+	encoderD.attachHalfQuad(ENC_A0, ENC_A1);
+	encoderE.attachHalfQuad(ENC_B0, ENC_B1);
 
 	encoderD.clearCount();
 	encoderE.clearCount();
