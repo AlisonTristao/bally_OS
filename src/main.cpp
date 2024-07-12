@@ -26,7 +26,7 @@ HBridge motorD(BIN1, BIN2, CH1, PWM_B);
 // encoders
 ESP32Encoder encoderD;
 ESP32Encoder encoderE;
-vector<double> speedD, speedE, s_d;
+vector<double> countD, countE, sen_E, PWM_D, PWM_E, timer_gabriel, ctrl, erro, bat;
 
 // control
 Control controlW; // VELOCIDADE ANGULAR
@@ -43,8 +43,7 @@ double position = 0.0, pid0 = 0.0;
 int16_t velLeft = 0;
 int16_t velRight = 0;
 
-uint32_t timer = 0;
-
+uint32_t timer_tempo = 0;
 double kp = 3;
 
 void setup()
@@ -54,7 +53,7 @@ void setup()
 	// init pins
 	init_pins();
 
-	uint32_t tempoo = millis();
+	/*uint32_t tempoo = millis();
 	while(digitalRead(BTN1) || digitalRead(BTN2)){
 		if(millis() - tempoo > 3000){
 			kp = 3.2;
@@ -72,7 +71,7 @@ void setup()
 			Serial.println(kp);
 			break;
 		}
-	}
+	}*/
 
 	// init interruptions
 	set_all_interruptions();
@@ -118,7 +117,7 @@ void loop()
 
 	case RUNNING:
 	{
-		timer = millis();
+		timer_tempo = millis();
 
 		// posicao da linha
 		position = (sensor.read_line() - 4500) / 100;
@@ -127,8 +126,8 @@ void loop()
 		// Serial.println(pid0);
 
 		// velocidade toral das rodas
-		velLeft = PWM;
-		velRight = PWM;
+		velLeft = PWM;  // mudar para pwmLeft
+		velRight = PWM; // mudar para pwmRight
 
 		// aplica o pid0 nas rodas
 		if (pid0 > 0)
@@ -143,7 +142,7 @@ void loop()
 		// digitalWrite(LED5, digitalRead(RIGHT));
 		running_func();
 
-		while (millis() - timer < SAMPLE_MS);
+		while (millis() - timer_tempo < SAMPLE_MS);
 		break;
 	}
 
@@ -152,7 +151,44 @@ void loop()
 		motorD.brake();
 		motorE.brake();
 
-		/*Serial.println("INICIO");
+       Serial.println("INICIO");
+		for(int i = 0; i < countD.size(); i++){
+			Serial.print("cD:");
+			Serial.println((int)countD[i]);
+			delay(10);
+			Serial.print("cE:");
+			Serial.println((int)countE[i]);
+			delay(10);
+			Serial.print("sE:");
+			Serial.println((int)sen_E[i]);
+			delay(10);
+			Serial.print("pD:");
+			Serial.println((int)PWM_D[i]);
+			delay(10);
+			Serial.print("pE:");
+			Serial.println((int)PWM_E[i]);
+			delay(10);
+			Serial.print("tG:");
+			Serial.println((int)timer_gabriel[i]);
+			delay(10);
+			Serial.print("cT:");
+			Serial.println((int)ctrl[i]);
+			delay(10);
+			Serial.print("eR:");
+			Serial.println((int)erro[i]);
+			delay(10);
+			Serial.print("bT:");
+			Serial.println((int)bat[i]);
+			delay(10);
+		}
+		Serial.println("FIM");
+
+
+		
+
+		/* antigo
+		
+		Serial.println("INICIO");
 		for(int i = 0; i < speedD.size(); i++){
 			Serial.print("E:");
 			Serial.println((int)speedE[i]);
@@ -172,7 +208,19 @@ void loop()
 		delay(DLY_LONG);
 		digitalWrite(LED5, HIGH);
 		digitalWrite(LED4, LOW);
-		delay(DLY_LONG);*/
+		delay(DLY_LONG);
+		
+		Serial.println()    countD
+        Serial.println()    countE
+        Serial.println()    sen_E
+        Serial.println()    PWM_D
+        Serial.println()    PWM_E
+        Serial.println()    timer_gabriel
+        Serial.println()    ctrl
+        Serial.println()    erro
+        Serial.println()    bat
+		
+		*/
 
 	}
 
