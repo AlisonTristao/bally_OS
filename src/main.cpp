@@ -58,26 +58,6 @@ void setup()
 	// init pins
 	init_pins();
 
-	/*uint32_t tempoo = millis();
-	while(digitalRead(BTN1) || digitalRead(BTN2)){
-		if(millis() - tempoo > 3000){
-			kp = 3.2;
-			PWM = 60;
-			Serial.println("NADA");
-			break;
-		}
-		if(!digitalRead(BTN1)) {
-			PWM = 50;
-			Serial.println(PWM);
-			break;
-		}
-		if(!digitalRead(BTN2)) {
-			kp = 3;
-			Serial.println(kp);
-			break;
-		}
-	}*/
-
 	// init interruptions
 	set_all_interruptions();
 
