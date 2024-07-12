@@ -48,12 +48,15 @@ double Control::Gabes_Control(double kc, double ti, double td, double Erro, doub
     kp = kc;
     kd = kc*td;
     ki = kc/ti;
+
+    d_erro = Erro - erro_ant;
+
     ef = ((td / 10) / (td / 10 + sample)) * ef + (sample / (td / 10 + sample)) * Erro;
     d_ef = (ef - ef_ant);
 
 
     //  u_ant   (    P    )   (          I            )   (                      D                                    ) 
-    u = u_ant + (kc * d_ef) + ((kc / ti) * sample * ef) + ((kc * td) * (((d_ef) / sample) - ((d_ef_ant) / sample_ant)));
+    u = u_ant + (kc * d_erro) + ((kc / ti) * sample * Erro) + ((kc * td) * (((d_ef) / sample) - ((d_ef_ant) / sample_ant)));
 
     if (u > limit)
     {
@@ -64,7 +67,8 @@ double Control::Gabes_Control(double kc, double ti, double td, double Erro, doub
     {
         u = -limit;
     }
-
+    
+    erro_ant = Erro;
     ef_ant = ef;
     d_ef_ant = d_ef;
     sample_ant = sample;

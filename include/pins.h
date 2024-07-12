@@ -9,6 +9,7 @@
 #define SAMPLE_MS 2
 #define DLY_LONG 500
 #define DLY_SHORT 100
+#define TIMER_SAMPLE_MS 20
 
 // bzer tone
 #define TONE_HIGH 3000
@@ -60,8 +61,8 @@
 #define C3 42
 
 // Side sensors
-#define LEFT 17
-#define RIGHT 8
+#define LEFT  8 
+#define RIGHT 17
 
 // i2c devices
 #define SDA 4
