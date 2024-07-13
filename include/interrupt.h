@@ -11,6 +11,12 @@ using namespace std;
 
 bool right_flag = false;
 bool left_flag = false;
+
+extern bool right_flag_exato;
+extern bool left_flag_exato;
+extern uint32_t tempo_exato_E;
+extern uint32_t tempo_exato_D;
+
 int tempo = 0;
 
 extern ESP32Encoder encoderD;
@@ -45,14 +51,18 @@ void IRAM_ATTR button_isr_handler2() {
 void IRAM_ATTR LEFT_interrupt() {
     if (state == RUNNING) {
         left_flag = true;
+        left_flag_exato = true;
         tempo = millis();
+        tempo_exato_E = millis();
     }
 }
 
 void IRAM_ATTR RIGHT_interrupt() {
     if (state == RUNNING) {
         right_flag = true;
+        right_flag_exato = true;
         tempo = millis();
+        tempo_exato_D = millis();
     }
 }
 
@@ -61,8 +71,8 @@ static void timer_get_values(void* arg) {
     if(!timer_flag) return;
     countD.push_back(encoderD.getCount());
     countE.push_back(encoderE.getCount());
-    sen_E.push_back(right_flag);
-    sen_D.push_back(left_flag);
+    sen_E.push_back(right_flag_exato);
+    sen_D.push_back(left_flag_exato);
     PWM_D.push_back(velRight);
     PWM_E.push_back(velLeft);
     timer_gabriel.push_back(cont++);

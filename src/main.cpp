@@ -17,6 +17,12 @@ bool timer_flag = false;
 uint32_t time_start = 0;
 uint32_t cont = 0;
 
+bool right_flag_exato = false;
+bool left_flag_exato = false;
+uint32_t tempo_exato_E = 0;
+uint32_t tempo_exato_D = 0;
+
+
 // init satate machine
 states state = POWER_ON;
 bool calibrated = false; // flag to check if the sensor is calibrated
@@ -42,14 +48,14 @@ Control controle0;
 double uTE = 0.0;
 double uTD = 0.0;
 
-int16_t PWM = 65;
+int16_t PWM = 50;
 double position = 0.0, pid0 = 0.0;
 
 int16_t velLeft = 0;
 int16_t velRight = 0;
 
 uint32_t timer_tempo = 0;
-double kp = 3;
+double kp = 1.55;
 
 void setup()
 {
@@ -74,7 +80,6 @@ void setup()
 	sensor.set_init_arr(4); // mux in the middle
 }
 
-uint32_t i = 0;
 void loop()
 {
 	switch (state)
@@ -84,6 +89,11 @@ void loop()
 		// brake the wheels
 		motorD.brake();
 		motorE.brake();
+
+		// helper to calibrate the sensor
+		digitalWrite(LED3, digitalRead(LEFT));
+		digitalWrite(LED4, digitalRead(RIGHT));
+
 		/* musica e led pisca s*/
 		power_func();
 		break;
@@ -106,7 +116,8 @@ void loop()
 		// posicao da linha
 		position = (sensor.read_line() - 4500) / 100;
 
-		pid0 = controle0.simplePID(kp, 0.01, 0.04, position, SAMPLE_MS / 1000.0);
+		pid0 = controle0.simplePID(4, 0.01, 0.05, position, SAMPLE_MS / 1000.0);
+		//pid0 = controle0.Gabes_Control(kp, 300, 0.12, position, SAMPLE_MS / 1000.0);
 		// Serial.println(pid0);
 
 		// velocidade toral das rodas
@@ -125,6 +136,16 @@ void loop()
 		// digitalWrite(LED2, digitalRead(LEFT));
 		// digitalWrite(LED5, digitalRead(RIGHT));
 		running_func();
+
+		if (millis() - tempo_exato_D > 20) {
+			right_flag_exato = false;
+			
+		}
+
+		if (millis() - tempo_exato_E > 20) {
+			left_flag_exato = false;	
+		}
+
 
 		while (millis() - timer_tempo < SAMPLE_MS);
 		break;
