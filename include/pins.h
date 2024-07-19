@@ -3,7 +3,7 @@
 #include <Arduino.h>
 
 /* --- VERSAO DO CARRINHO --- */
-#define V1
+#define V2
 
 // timers
 #define SAMPLE_MS       2
@@ -58,6 +58,7 @@
 // Buttons
 #define BTN1            1
 #define BTN2            2
+#define BTN3            0
 
 // Buzzer
 #define BZR             6

@@ -2,25 +2,25 @@
 #define MAPEAMENTO_PISTA_H
 
 #include <Arduino.h>
-#define sensor_fim_de_pista 17 //17 ou 8, tem que conferir
+#define sensor_fim_de_pista 17  //17 ou 8, tem que conferir
 
 //variaveis
-int theta[];//angulo da curva
-int W = 0;//velocidade angular
+int theta[];                    //angulo da curva
+int W = 0;                      //velocidade angular
 int erro = 0;
-int Velocidade = 0; // velocidade do carrinho;
-int posicaoX[]; //posição em X
-int posicaoY[]; //posição em Y
+int Velocidade = 0;             // velocidade do carrinho;
+int posicaoX[];                 //posição em X
+int posicaoY[];                 //posição em Y
 
-int sign(int x) {//função para retornar o sinal
+int sign(int x) {               //função para retornar o sinal
     return (x > 0) - (x < 0);
 }
 
 void mapeamento()
 {
-    int VX = 0; //velocidade em X
-    int VY = 0; //velocidade em Y
-    int i = 1; //numero da amostra
+    int VX = 0;                 //velocidade em X
+    int VY = 0;                 //velocidade em Y
+    int i = 1;                  //numero da amostra
     theta[0] = 0;
     posicaoX[0] = 0;
     posicaoY[0] = 0;
