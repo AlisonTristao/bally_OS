@@ -1,5 +1,10 @@
 #include <Arduino.h>
 #include <pins.h>
+#include <Encoder.h>
+
+// obj encoder
+Encoder encoderA(ENC_A0, ENC_A1);
+Encoder encoderB(ENC_B0, ENC_B1);
 
 void setup() {
 	Serial.begin(921600);
@@ -7,41 +12,20 @@ void setup() {
 	// init pins
 	init_pins();
 
+	Serial.println("limite de contadores: " + String(PCNT_UNIT_MAX));
+	Serial.println("loop in core: " + String(xPortGetCoreID()));
+
+	// init encoder
+	encoderA.init(250, 0);
+	encoderB.init(250, 1);
+
+	delay(1000);
 }
 
 void loop() {
-	digitalWrite(YELLOW, HIGH);
-	delay(50);
-	digitalWrite(YELLOW, LOW);
-	digitalWrite(RED, HIGH);
-	delay(50);
-	digitalWrite(RED, LOW);
-	digitalWrite(BLUE, HIGH);
-	delay(50);
-	digitalWrite(BLUE, LOW);
-	digitalWrite(GREEN, HIGH);
-	delay(50);
-	digitalWrite(GREEN, LOW);
-	delay(50);
-	tone(BZR, TONE_HIGH);
-	delay(50);
-	noTone(BZR);
-
-	// faz o inverso 
-	digitalWrite(GREEN, HIGH);
-	delay(50);
-	digitalWrite(GREEN, LOW);
-	digitalWrite(BLUE, HIGH);
-	delay(50);
-	digitalWrite(BLUE, LOW);
-	digitalWrite(RED, HIGH);
-	delay(50);
-	digitalWrite(RED, LOW);
-	digitalWrite(YELLOW, HIGH);
-	delay(50);
-	digitalWrite(YELLOW, LOW);
-	delay(50);
-	tone(BZR, TONE_HIGH);
-	delay(50);
-	noTone(BZR);
+	Serial.print("A: ");
+	//Serial.print(encoderA.getCount());
+	Serial.print(" B: ");
+	//Serial.println(encoderB.getCount());
+	delay(100);
 }
