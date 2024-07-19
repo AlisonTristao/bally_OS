@@ -2,84 +2,93 @@
 #define PINS_H
 #include <Arduino.h>
 
-// filter
-#define WC_RPM 50
+/* --- VERSAO DO CARRINHO --- */
+#define V1
 
 // timers
-#define SAMPLE_MS 2
-#define DLY_LONG 500
-#define DLY_SHORT 100
+#define SAMPLE_MS       2
+#define DLY_LONG        500
+#define DLY_SHORT       100
 #define TIMER_SAMPLE_MS 20
 
 // bzer tone
-#define TONE_HIGH 3000
-#define TONE_LOW 500
+#define TONE_HIGH       3000
+#define TONE_LOW        500
 
 // channels
-#define CH0 0
-#define CH1 1
-#define CH2 2
+#define CH0             0
+#define CH1             1
+#define CH2             2
 
 // array of leds
-#define LED0 38
-#define LED1 37
-#define LED2 36
-#define LED3 35
-#define LED4 45
-#define LED5 46
+#ifdef V1
+    #define LED0        38
+    #define LED1        37
+    #define LED2        36
+    #define LED3        35
+    #define LED4        45
+    #define LED5        46
+#else
+    #define YELLOW      38
+    #define RED         37
+    #define BLUE        36
+    #define GREEN       35
+    #define UNK0        45
+    #define UNK1        46
+#endif
 
 // H bridge
 // controla a direção do motor A, exemplo se AIN1 = HIGH e AIN2 = LOW o motor A gira no sentido horário.
-#define AIN1 11
-#define AIN2 10
+#define AIN1            11
+#define AIN2            10
 // controla a direção do motor B, exemplo se AIN1 = HIGH e AIN2 = LOW o motor A gira no sentido horário.
-#define BIN1 12
-#define BIN2 13
+#define BIN1            12
+#define BIN2            13
 // controla a velocidade do motor A
-#define PWM_A 9
+#define PWM_A           9
 // controla a velocidade do motor B
-#define PWM_B 14
+#define PWM_B           14
 
 // Encoders
-#define ENC_A0 21
-#define ENC_A1 47
-#define ENC_B0 20
-#define ENC_B1 19
+#define ENC_A0          21
+#define ENC_A1          47
+#define ENC_B0          20
+#define ENC_B1          19
 
 // Buttons
-#define BTN1 1
-#define BTN2 2
+#define BTN1            1
+#define BTN2            2
 
 // Buzzer
-#define BZR 6
+#define BZR             6
 
 // Multiplex
-#define SIG 18
-#define C0 39
-#define C1 40
-#define C2 41
-#define C3 42
+#define SIG             18
+#define C0              39
+#define C1              40
+#define C2              41
+#define C3              42
 
 // Side sensors
-#define LEFT  8 
-#define RIGHT 17
+#define LEFT            8 
+#define RIGHT           17
 
 // i2c devices
-#define SDA 4
-#define SDL 5
+#define SDA             4
+#define SDL             5
 
 // Tensao dividers
-#define BAT 7
+#define BAT             7
 
 void init_pins()
 {
     // array of leds
-    pinMode(LED0, OUTPUT);
-    pinMode(LED1, OUTPUT);
-    pinMode(LED2, OUTPUT);
-    pinMode(LED3, OUTPUT);
-    pinMode(LED4, OUTPUT);
-    pinMode(LED5, OUTPUT);
+    pinMode(38, OUTPUT);
+    pinMode(37, OUTPUT);
+    pinMode(36, OUTPUT);
+    pinMode(35, OUTPUT);
+    pinMode(45, OUTPUT);
+    pinMode(46, OUTPUT);
 
     // H bridge
     pinMode(AIN1, OUTPUT);

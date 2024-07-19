@@ -12,6 +12,11 @@
 
 using namespace std;
 
+bool flag_flag = false;					// > 11000 <-> 15000 <-> 35000	<-> 37000
+
+int cccc = 0;
+bool last_flag = 0;
+
 // amostragem flag
 bool timer_flag = false;
 uint32_t time_start = 0;
@@ -21,7 +26,6 @@ bool right_flag_exato = false;
 bool left_flag_exato = false;
 uint32_t tempo_exato_E = 0;
 uint32_t tempo_exato_D = 0;
-
 
 // init satate machine
 states state = POWER_ON;
@@ -45,17 +49,13 @@ Control controlT; // VELOCIDADE LINEAR
 
 Control controle0;
 
-double uTE = 0.0;
-double uTD = 0.0;
-
-int16_t PWM = 50;
+int16_t PWM = 87;
 double position = 0.0, pid0 = 0.0;
 
 int16_t velLeft = 0;
 int16_t velRight = 0;
 
 uint32_t timer_tempo = 0;
-double kp = 1.55;
 
 void setup()
 {
@@ -63,6 +63,8 @@ void setup()
 
 	// init pins
 	init_pins();
+
+	Serial.println(PWM);
 
 	// init interruptions
 	set_all_interruptions();
@@ -116,7 +118,7 @@ void loop()
 		// posicao da linha
 		position = (sensor.read_line() - 4500) / 100;
 
-		pid0 = controle0.simplePID(4, 0.01, 0.05, position, SAMPLE_MS / 1000.0);
+		pid0 = controle0.simplePID(5, 0.00, 0.2, position, SAMPLE_MS / 1000.0);
 		//pid0 = controle0.Gabes_Control(kp, 300, 0.12, position, SAMPLE_MS / 1000.0);
 		// Serial.println(pid0);
 
@@ -125,10 +127,8 @@ void loop()
 		velRight = PWM; // mudar para pwmRight
 
 		// aplica o pid0 nas rodas
-		if (pid0 > 0)
-			velRight = PWM - pid0;
-		else
-			velLeft = PWM + pid0;
+		velRight = PWM - pid0;
+		velLeft = PWM + pid0;
 
 		motorD.applyPWM((int32_t)velRight);
 		motorE.applyPWM((int32_t)velLeft);
@@ -145,7 +145,6 @@ void loop()
 		if (millis() - tempo_exato_E > 20) {
 			left_flag_exato = false;	
 		}
-
 
 		while (millis() - timer_tempo < SAMPLE_MS);
 		break;
