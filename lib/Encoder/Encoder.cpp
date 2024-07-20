@@ -76,8 +76,8 @@ bool Encoder::init(uint16_t filter) {
 	enc_config.pulse_gpio_num   = pinB;                 // make prior control into signal
 	enc_config.ctrl_gpio_num    = pinA;                 // and prior signal into control
 	enc_config.channel          = PCNT_CHANNEL_1;       // channel 1
-	enc_config.lctrl_mode       = PCNT_MODE_REVERSE;    // Rising A on HIGH B = CW Step 
-	enc_config.hctrl_mode       = PCNT_MODE_KEEP;       // Rising A on LOW B = CCW Step 
+	enc_config.lctrl_mode       = PCNT_MODE_REVERSE;    // Rising B on HIGH A = CW Step 
+	enc_config.hctrl_mode       = PCNT_MODE_KEEP;       // Rising B on LOW A = CCW Step 
 
     // initialize PCNT unit
 	pcnt_unit_config(&enc_config);
