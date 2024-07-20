@@ -156,6 +156,7 @@ void Encoder::overflow() {
 void Encoder::clearPCNT() {
 	// clear the PCNT
 	pcnt_counter_clear(unit);
+	counter = 0;
 }
 
 void Encoder::pausePCNT() {
