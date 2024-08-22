@@ -1,69 +1,98 @@
 #include "Flags.h"
 
-// initialize static members
-bool Flags::btn1 = false;
-bool Flags::btn2 = false;
-bool Flags::btn3 = false;
-bool Flags::left = false;
-bool Flags::right = false;
+// flags
+FlagsByte Flags::flags;
 
-uint32_t Flags::btn1Time = 0;
-uint32_t Flags::btn2Time = 0;
-uint32_t Flags::btn3Time = 0;
-uint32_t Flags::leftTime = 0;
-uint32_t Flags::rightTime = 0;
+// timer for filtering the interruptions (default)
+uint32_t Flags::filterTime = 100;
+
+void Flags::setFilterTime(uint32_t time) {
+    filterTime = time;
+    delay(time);
+}
 
 // ---- handle the interrupt service routines ----
-void IRAM_ATTR Flags::isrBtn1() {
-    if (millis() - btn1Time >= filterTime) {
-        btn1Time = millis(); 
-        btn1 = true;
+void IRAM_ATTR Flags::isrFlag0() {
+    if (millis() - flags.time[0] >= filterTime) {
+        flags.time[0] = millis(); 
+        flags.flag0 = true;
     }
 }
 
-void IRAM_ATTR Flags::isrBtn2() {
-    if (millis() - btn2Time >= filterTime) {
-        btn2Time = millis(); 
-        btn2 = true;
+void IRAM_ATTR Flags::isrFlag1() {
+    if (millis() - flags.time[1] >= filterTime) {
+        flags.time[1] = millis(); 
+        flags.flag1 = true;
     }
 }
 
-void IRAM_ATTR Flags::isrBtn3() {
-    if (millis() - btn3Time >= filterTime) {
-        btn3Time = millis(); 
-        btn3 = true;
+void IRAM_ATTR Flags::isrFlag2() {
+    if (millis() - flags.time[2] >= filterTime) {
+        flags.time[2] = millis(); 
+        flags.flag2 = true;
     }
 }
 
-void IRAM_ATTR Flags::isrLeft() {
-    if (millis() - leftTime >= filterTime) {
-        leftTime = millis(); 
-        left = true;
+void IRAM_ATTR Flags::isrFlag3() {
+    if (millis() - flags.time[3] >= filterTime) {
+        flags.time[3] = millis(); 
+        flags.flag3 = true;
     }
 }
 
-void IRAM_ATTR Flags::isrRight() {
-    if (millis() - rightTime >= filterTime) {
-        rightTime = millis(); 
-        right = true;
+void IRAM_ATTR Flags::isrFlag4() {
+    if (millis() - flags.time[4] >= filterTime) {
+        flags.time[4] = millis(); 
+        flags.flag4 = true;
+    }
+}
+
+void IRAM_ATTR Flags::isrFlag5() {
+    if (millis() - flags.time[5] >= filterTime) {
+        flags.time[5] = millis(); 
+        flags.flag5 = true;
+    }
+}
+
+void IRAM_ATTR Flags::isrFlag6() {
+    if (millis() - flags.time[6] >= filterTime) {
+        flags.time[6] = millis(); 
+        flags.flag6 = true;
+    }
+}
+
+void IRAM_ATTR Flags::isrFlag7() {
+    if (millis() - flags.time[7] >= filterTime) {
+        flags.time[7] = millis(); 
+        flags.flag7 = true;
     }
 }
 
 // check if any flag has been up for longer than a specified filterTime
 void Flags::checkFlagsDuration() {
     uint32_t currentTime = millis();
-
-    if (btn1 && (currentTime - btn1Time >= filterTime))   btn1 = false;
-    if (btn2 && (currentTime - btn2Time >= filterTime))   btn2 = false;
-    if (btn3 && (currentTime - btn3Time >= filterTime))   btn3 = false;
-    if (left && (currentTime - leftTime >= filterTime))   left = false;
-    if (right && (currentTime - rightTime >= filterTime)) right = false;
+    flags.flag0 = currentTime - flags.time[0] <= filterTime;
+    flags.flag1 = currentTime - flags.time[1] <= filterTime;
+    flags.flag2 = currentTime - flags.time[2] <= filterTime;
+    flags.flag3 = currentTime - flags.time[3] <= filterTime;
+    flags.flag4 = currentTime - flags.time[4] <= filterTime;
+    flags.flag5 = currentTime - flags.time[5] <= filterTime;
+    flags.flag6 = currentTime - flags.time[6] <= filterTime;
+    flags.flag7 = currentTime - flags.time[7] <= filterTime;
 }
 
 void Flags::printFlags() {
-    Serial.print("btn1: "); Serial.print(btn1); Serial.print("\t");
-    Serial.print("btn2: "); Serial.print(btn2); Serial.print("\t");
-    Serial.print("btn3: "); Serial.print(btn3); Serial.print("\t");
-    Serial.print("left: "); Serial.print(left); Serial.print("\t");
-    Serial.print("right: "); Serial.println(right);
+    Serial.printf("%d%d%d%d%d%d%d%d\t%d\n",     flags.flag0,
+                                                flags.flag1,
+                                                flags.flag2,
+                                                flags.flag3,
+                                                flags.flag4,
+                                                flags.flag5,
+                                                flags.flag6,
+                                                flags.flag7,
+                                                flags.allFlags);
+}
+
+uint8_t Flags::getFlags() {
+    return flags.allFlags;
 }

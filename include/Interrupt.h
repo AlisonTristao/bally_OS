@@ -14,11 +14,11 @@ static IRAM_ATTR void timer_ISR(void* arg) {
 
 void IRAM_ATTR configure_interruptions(void *param){
     // set the buttons interruptions
-    attachInterrupt(digitalPinToInterrupt(BTN1), Flags::isrBtn1, FALLING);
-    attachInterrupt(digitalPinToInterrupt(BTN2), Flags::isrBtn2, FALLING);
-    attachInterrupt(digitalPinToInterrupt(BTN3), Flags::isrBtn3, FALLING);
-    attachInterrupt(digitalPinToInterrupt(LEFT), Flags::isrLeft, RISING);
-    attachInterrupt(digitalPinToInterrupt(RIGHT), Flags::isrRight, RISING);
+    attachInterrupt(digitalPinToInterrupt(BTN1), Flags::isrFlag0, FALLING);
+    attachInterrupt(digitalPinToInterrupt(BTN2), Flags::isrFlag1, FALLING);
+    attachInterrupt(digitalPinToInterrupt(BTN3), Flags::isrFlag2, FALLING);
+    attachInterrupt(digitalPinToInterrupt(LEFT), Flags::isrFlag3, RISING);
+    attachInterrupt(digitalPinToInterrupt(RIGHT), Flags::isrFlag4, RISING);
 
     // set the timer interruptions
     esp_timer_create_args_t timer_args = {
@@ -27,7 +27,7 @@ void IRAM_ATTR configure_interruptions(void *param){
       .name = "timer_get_values"
     };
     esp_timer_create(&timer_args, &timer_get_handle);
-    esp_timer_start_periodic(timer_get_handle, SAMPLE_MS*1000);
+    esp_timer_start_periodic(timer_get_handle, SAMPLE_MICROS);
 
     // delete this task
     vTaskDelete(NULL);

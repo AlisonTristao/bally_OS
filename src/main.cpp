@@ -2,9 +2,6 @@
 #include <Config.h>
 #include <Interrupt.h>
 
-// tempo de filtro das interrupcoes
-uint32_t Flags::filterTime = DLY_LONG;
-
 void setup() {
 	Serial.begin(921600);
 
@@ -14,12 +11,11 @@ void setup() {
 	// init interruptions in parallel processing
 	init_interruptions();
 
+	
 
 }
 
-void loop() {
-	// printa o nucleo que esta rodando
-	Flags::checkFlagsDuration();
+void loop() {	
 	Flags::printFlags();
-	delay(100);
-}
+	routine();
+} 

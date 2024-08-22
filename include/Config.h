@@ -1,7 +1,11 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 #include <Arduino.h>
+#include <Flags.h>
 #include <Wire.h>
+
+// timer for loop
+uint64_t timerLoop = 0;
 
 // esp32 core
 #define PRIMARY_CORE    1   // void loop
@@ -15,7 +19,8 @@
 #define LOG_LIVE            // print log messages in real time
 
 // timers
-#define SAMPLE_MS       500
+#define SAMPLE_MICROS   500000
+#define LOOP_MICROS     500000
 #define DLY_LONG        500
 #define DLY_SHORT       50
 
@@ -125,14 +130,36 @@ void configure_pins(){
 }
 
 bool init_structure() {
-    // init pins direction, settings, i2c communication...
     try {
-        configure_pins();
+        // init pins direction, settings, i2c communication...
+        configure_pins();                               
+
+        // set the filter time for flags
+	    Flags::setFilterTime(DLY_LONG); 
+
         return true;
     } catch(const std::exception& e) {
         // LOGGER ERROR
         return false;
     }
+    return NULL;
+}
+
+bool routine(){
+    try {
+        // check the flags duration    
+        Flags::checkFlagsDuration();  
+
+        // make sure the time is equal
+        while (micros() - timerLoop <= LOOP_MICROS);    
+        timerLoop = micros();
+        
+        return true;
+    } catch(const std::exception& e) {
+        // LOGGER ERROR
+        return false;
+    }
+    return NULL;
 }
 
 #endif
