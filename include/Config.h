@@ -1,15 +1,23 @@
-#ifndef PINS_H
-#define PINS_H
+#ifndef CONFIG_H
+#define CONFIG_H
 #include <Arduino.h>
+#include <Wire.h>
 
-/* --- VERSAO DO CARRINHO --- */
-#define V2
+// esp32 core
+#define PRIMARY_CORE    1   // void loop
+#define SECONDARY_CORE  0   // parallel processing 
+
+// logger configuration
+#define LOG_ALL             // register all logs
+#define LOG_CONF            // register configuration logs
+#define LOG_OPER            // register operational logs
+#define LOG_ERRO            // register error logs
+#define LOG_LIVE            // print log messages in real time
 
 // timers
-#define SAMPLE_MS       2
+#define SAMPLE_MS       500
 #define DLY_LONG        500
-#define DLY_SHORT       100
-#define TIMER_SAMPLE_MS 20
+#define DLY_SHORT       50
 
 // bzer tone
 #define TONE_HIGH       3000
@@ -21,35 +29,22 @@
 #define CH2             2
 
 // array of leds
-#ifdef V1
-    #define LED0        38
-    #define LED1        37
-    #define LED2        36
-    #define LED3        35
-    #define LED4        45
-    #define LED5        46
-#else
-    #define YELLOW      38
-    #define RED         37
-    #define BLUE        36
-    #define GREEN       35
-    #define UNK0        45
-    #define UNK1        46
-#endif
+#define YELLOW          38
+#define RED             37
+#define BLUE            36
+#define GREEN           35
+#define UNK0            45
+#define UNK1            46
 
 // H bridge
-// controla a direção do motor A, exemplo se AIN1 = HIGH e AIN2 = LOW o motor A gira no sentido horário.
 #define AIN1            11
 #define AIN2            10
-// controla a direção do motor B, exemplo se AIN1 = HIGH e AIN2 = LOW o motor A gira no sentido horário.
 #define BIN1            12
 #define BIN2            13
-// controla a velocidade do motor A
 #define PWM_A           9
-// controla a velocidade do motor B
 #define PWM_B           14
 
-// Encoders
+// Encoders 
 #define ENC_A0          21
 #define ENC_A1          47
 #define ENC_B0          20
@@ -76,13 +71,12 @@
 
 // i2c devices
 #define SDA             4
-#define SDL             5
+#define SCL             5
 
 // Tensao dividers
 #define BAT             7
 
-void init_pins()
-{
+void configure_pins(){
     // array of leds
     pinMode(38, OUTPUT);
     pinMode(37, OUTPUT);
@@ -111,8 +105,6 @@ void init_pins()
 
     // Buzzer
     pinMode(BZR, OUTPUT);
-    ledcSetup(CH2, 2000, 8);
-    ledcAttachPin(BZR, CH2);
 
     // Multiplex
     pinMode(SIG, INPUT);
@@ -127,6 +119,20 @@ void init_pins()
 
     // Bat
     pinMode(BAT, INPUT);
+
+    // i2c communication
+    Wire.begin(SDA, SCL);
+}
+
+bool init_structure() {
+    // init pins direction, settings, i2c communication...
+    try {
+        configure_pins();
+        return true;
+    } catch(const std::exception& e) {
+        // LOGGER ERROR
+        return false;
+    }
 }
 
 #endif
