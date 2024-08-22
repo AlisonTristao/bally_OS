@@ -3,6 +3,13 @@
 
 #include <Arduino.h>
 
+// autor: Alison Tristão
+// email: AlisonTristao@hotmail.com
+
+/********************/
+/*  Class Of Flags  */
+/********************/  
+
 // struct to store 8 flags in a single byte
 struct FlagsByte {
     union {

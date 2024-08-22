@@ -1,5 +1,5 @@
 #include <Arduino.h>
-#include <pins.h>
+#include <Config.h>
 #include <Encoder.h>
 
 // obj encoder
@@ -10,7 +10,7 @@ void setup() {
 	Serial.begin(921600);
 
 	// init pins
-	init_pins();
+	init_structure();
 
 	// max enconder in the esp32
 	Serial.println("limite de contadores: " + String(PCNT_UNIT_MAX));

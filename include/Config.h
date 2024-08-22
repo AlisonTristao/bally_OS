@@ -24,14 +24,11 @@ uint64_t timerLoop = 0;
 #define DLY_LONG        500
 #define DLY_SHORT       50
 
-// bzer tone
-#define TONE_HIGH       3000
-#define TONE_LOW        500
-
 // channels
 #define CH0             0
 #define CH1             1
 #define CH2             2
+#define CH3             3
 
 // array of leds
 #define YELLOW          38
