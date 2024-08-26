@@ -1,11 +1,29 @@
 #ifndef CONFIG_H
 #define CONFIG_H
+
+// native libraries
 #include <Arduino.h>
-#include <Flags.h>
 #include <Wire.h>
 
-// timer for loop
-uint64_t timerLoop = 0;
+// static libraries
+#include <Flags.h>
+#include <Logger.h>
+#include <StateMachine.h>
+
+// custom libraries
+#include <ArraySensor.h>
+#include <Encoder.h>
+#include <HBridge.h>
+
+// state machine header
+#include <Setup.h>  
+#include <Wait.h>
+#include <Calibrate.h>
+#include <Map.h>
+#include <Run.h>
+#include <Finish.h>
+#include <Telemetry.h>
+#include <Error.h>
 
 // esp32 core
 #define PRIMARY_CORE    1   // void loop
@@ -80,12 +98,12 @@ uint64_t timerLoop = 0;
 
 void configure_pins(){
     // array of leds
-    pinMode(38, OUTPUT);
-    pinMode(37, OUTPUT);
-    pinMode(36, OUTPUT);
-    pinMode(35, OUTPUT);
-    pinMode(45, OUTPUT);
-    pinMode(46, OUTPUT);
+    pinMode(YELLOW, OUTPUT);
+    pinMode(RED, OUTPUT);
+    pinMode(BLUE, OUTPUT);
+    pinMode(GREEN, OUTPUT);
+    pinMode(UNK0, OUTPUT);
+    pinMode(UNK1, OUTPUT);
 
     // H bridge
     pinMode(AIN1, OUTPUT);
@@ -126,37 +144,12 @@ void configure_pins(){
     Wire.begin(SDA, SCL);
 }
 
-bool init_structure() {
-    try {
-        // init pins direction, settings, i2c communication...
-        configure_pins();                               
+void init_structure() {
+    // init pins direction, settings, i2c communication...
+    configure_pins();                               
 
-        // set the filter time for flags
-	    Flags::setFilterTime(DLY_LONG); 
-
-        return true;
-    } catch(const std::exception& e) {
-        // LOGGER ERROR
-        return false;
-    }
-    return NULL;
-}
-
-bool routine(){
-    try {
-        // check the flags duration    
-        Flags::checkFlagsDuration();  
-
-        // make sure the time is equal
-        while (micros() - timerLoop <= LOOP_MICROS);    
-        timerLoop = micros();
-        
-        return true;
-    } catch(const std::exception& e) {
-        // LOGGER ERROR
-        return false;
-    }
-    return NULL;
+    // set the filter time for flags
+    Signals_IN::setFilterTime(DLY_LONG); 
 }
 
 #endif

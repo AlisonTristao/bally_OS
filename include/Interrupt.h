@@ -14,11 +14,13 @@ static IRAM_ATTR void timer_ISR(void* arg) {
 
 void IRAM_ATTR configure_interruptions(void *param){
     // set the buttons interruptions
-    attachInterrupt(digitalPinToInterrupt(BTN1), Flags::isrFlag0, FALLING);
-    attachInterrupt(digitalPinToInterrupt(BTN2), Flags::isrFlag1, FALLING);
-    attachInterrupt(digitalPinToInterrupt(BTN3), Flags::isrFlag2, FALLING);
-    attachInterrupt(digitalPinToInterrupt(LEFT), Flags::isrFlag3, RISING);
-    attachInterrupt(digitalPinToInterrupt(RIGHT), Flags::isrFlag4, RISING);
+    attachInterrupt(digitalPinToInterrupt(BTN1), Signals_IN::isrBtn0, FALLING);
+    attachInterrupt(digitalPinToInterrupt(BTN2), Signals_IN::isrBtn1, FALLING);
+    attachInterrupt(digitalPinToInterrupt(BTN3), Signals_IN::isrBtn2, FALLING);
+
+    // set the side sensors interruptions
+    attachInterrupt(digitalPinToInterrupt(LEFT), Signals_IN::isrsideSensor0, RISING);
+    attachInterrupt(digitalPinToInterrupt(RIGHT), Signals_IN::isrsideSensor1, RISING);
 
     // set the timer interruptions
     esp_timer_create_args_t timer_args = {
