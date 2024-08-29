@@ -1,17 +1,26 @@
 #ifndef FLAGS_H
 #define FLAGS_H
 
-#include <Arduino.h>
-
 // autor: Alison Tristão
 // email: AlisonTristao@hotmail.com
+
+// native libraries
+#include <Arduino.h>
+
+#define BIT_0 0
+#define BIT_1 1
+#define BIT_2 2
+#define BIT_3 3
+#define BIT_4 4
+#define BIT_5 5
+#define BIT_6 6
+#define BIT_7 7
 
 /********************/
 /*  Class Of Flags  */
 /********************/  
 
-template<int N>
-struct FlagsByteTemplate {
+struct FlagsByte {
     union {
         uint8_t allFlags = 0;   // one byte to store all flags
         struct { 
@@ -25,14 +34,8 @@ struct FlagsByteTemplate {
             bool flag7 : 1;
         };
     };
-    uint32_t time[N] = {};  // timer for each flag if necessary
+    uint32_t time[8] = {};  // timer for each flag if necessary
 };
-
-// signal to in
-using FlagsByte = FlagsByteTemplate<8>;
-
-// signal to out
-using LedsByte = FlagsByteTemplate<0>; 
 
 class Signals_IN {
     public:
@@ -76,23 +79,6 @@ class Signals_IN {
 
         // timer for filtering the interruptions
         static uint32_t filterTime;
-};
-
-class Signals_OUT {
-    public:
-        // get and set the leds
-        static void setLeds(uint8_t byte);
-        static LedsByte getLeds();
-
-        // get and set the buzzer
-        static void setBuzzer(uint16_t freq);
-        static uint16_t getBuzzer();
-    private:
-        // leds
-        static LedsByte leds;
-
-        // buzzer
-        static uint16_t buzzer;
 };
 
 #endif // FLAGS_H

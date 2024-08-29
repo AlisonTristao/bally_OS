@@ -27,26 +27,35 @@ enum name {
 
 class StateMachine{
     public:
-        StateMachine(name state, bool (*action)());
+        StateMachine(name state, bool (*action)(), name (*next_state)(uint8_t buttons));
         ~StateMachine(){};
 
         // return the value of state
         uint8_t getValue();
 
-        // function to execute the state
-        bool (*action)();
-
         // run the state machine
         static bool run();
 
-        // array of StateMachine
-        static StateMachine* arr_states[NUMBER_OF_STATES];
+        // verify if the next state 
+        static name next(uint8_t buttons);
+
+        // set the state machine to a specific state
         static uint8_t current_state;
     private:
+        // index of the state
         union{
             name state;
             uint8_t number;
         };
+
+        // function to execute the state
+        bool (*action)();
+
+        // next state function
+        name (*next_state)(uint8_t buttons);
+
+        // array of StateMachine
+        static StateMachine* arr_states[NUMBER_OF_STATES];
 };
 
 #endif

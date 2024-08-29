@@ -1,5 +1,5 @@
-#ifndef CONFIG_H
-#define CONFIG_H
+#ifndef SETTINGS_H
+#define SETTINGS_H
 
 // native libraries
 #include <Arduino.h>
@@ -10,37 +10,24 @@
 #include <Logger.h>
 #include <StateMachine.h>
 
-// custom libraries
-#include <ArraySensor.h>
-#include <Encoder.h>
-#include <HBridge.h>
-
-// state machine header
-#include <Setup.h>  
-#include <Wait.h>
-#include <Calibrate.h>
-#include <Map.h>
-#include <Run.h>
-#include <Finish.h>
-#include <Telemetry.h>
-#include <Error.h>
-
 // esp32 core
 #define PRIMARY_CORE    1   // void loop
 #define SECONDARY_CORE  0   // parallel processing 
 
+// sampling activation
+// -> SAMPLING_ACTIVE
+#define SAMPLING_ACTIVE
+
 // logger configuration
-#define LOG_ALL             // register all logs
-#define LOG_CONF            // register configuration logs
-#define LOG_OPER            // register operational logs
-#define LOG_ERRO            // register error logs
-#define LOG_LIVE            // print log messages in real time
+// -> LOG_ALL             // register all logs
+// -> LOG_CONF            // register configuration logs
+// -> LOG_OPER            // register operational logs
+// -> LOG_ERRO            // register error logs
+// -> LOG_VERBOSE         // print log messages in real time
 
 // timers
-#define SAMPLE_MICROS   500000
-#define LOOP_MICROS     500000
-#define DLY_LONG        500
-#define DLY_SHORT       50
+#define SAMPLE_MICROS   1000000
+#define DELAY_FLAGS     250
 
 // channels
 #define CH0             0
@@ -96,7 +83,16 @@
 // Tensao dividers
 #define BAT             7
 
-void configure_pins(){
+void setLeds(uint8_t bit_arr){
+    digitalWrite(YELLOW, bit_arr & (1 << BIT_3));
+    digitalWrite(RED, bit_arr & (1 << BIT_2));
+    digitalWrite(BLUE, bit_arr & (1 << BIT_1));
+    digitalWrite(GREEN, bit_arr & (1 << BIT_0));
+    //digitalWrite(UNK0, bit_arr & (1 << BIT_4));
+    //digitalWrite(UNK1, bit_arr & (1 << BIT_5));
+}
+
+bool configure_pins(){
     // array of leds
     pinMode(YELLOW, OUTPUT);
     pinMode(RED, OUTPUT);
@@ -141,15 +137,12 @@ void configure_pins(){
     pinMode(BAT, INPUT);
 
     // i2c communication
-    Wire.begin(SDA, SCL);
+    return Wire.begin(SDA, SCL);
 }
 
-void init_structure() {
+bool init_structure() {
     // init pins direction, settings, i2c communication...
-    configure_pins();                               
-
-    // set the filter time for flags
-    Signals_IN::setFilterTime(DLY_LONG); 
+    return configure_pins();                               
 }
 
 #endif

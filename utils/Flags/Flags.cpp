@@ -7,13 +7,7 @@ uint32_t Signals_IN::filterTime = 100;
 FlagsByte Signals_IN::buttons;
 
 // flags for the side sensors
-FlagsByte Signals_IN::sideSensors;
-
-// set leds to output
-LedsByte Signals_OUT::leds;
-
-// set buzzer to output
-uint16_t Signals_OUT::buzzer;
+FlagsByte Signals_IN::sideSensors ;
 
 void Signals_IN::setFilterTime(uint32_t time) {
     filterTime = time;
@@ -164,20 +158,4 @@ uint8_t Signals_IN::getButtons() {
 
 uint8_t Signals_IN::getSideSensors() {
     return sideSensors.allFlags;
-}
-
-void Signals_OUT::setLeds(uint8_t byte) {
-    leds.allFlags = byte;
-}
-
-void Signals_OUT::setBuzzer(uint16_t freq) {
-    buzzer = freq;
-}
-
-LedsByte Signals_OUT::getLeds() {
-    return leds;
-}
-
-uint16_t Signals_OUT::getBuzzer() {
-    return buzzer;
 }

@@ -1,21 +1,53 @@
-#include <Arduino.h>
-#include <Config.h>
-#include <Interrupt.h>
+#ifndef SETUP_H
+#define SETUP_H
+
+// header
+#include <Settings.h>
+#include <ParallelProcessing.h>
+
+// verify if the setup function was already called
+bool configure_ok = false;
 
 bool setup_function() {
-    try {
-        Serial.begin(921600);
+    // configure only once
+    if(configure_ok) 
+        return true;
 
-        // init pins direction, settings, i2c communication...
-        init_structure();
+    // init serial communication
+    Serial.begin(921600);
 
-        // init interruptions in parallel processing
-        init_interruptions();
-
-    } catch (const std::exception& e) {
-        // LOGGER ERROR
+    // init pins direction, settings, i2c communication...
+    if(!init_structure()) 
         return false;
+
+    // init interruptions in parallel processing
+    if(!init_interruptions()) 
+        return false;
+
+    // all ok
+    configure_ok = true;
+    return configure_ok;
+}
+
+name next_state_setup(uint8_t buttons){
+    // if button 1 is pressed
+    if(buttons & (1 << BIT_0))
+        return WAIT; 
+
+    // if button 2 is pressed
+    /*if(buttons & (1 << BTN2)){
+        // LOGGER conf
+        return CALIBRATE;
     }
 
-    return true;
+    // if button 3 is pressed
+    if(buttons & (1 << BTN3)){
+        // LOGGER conf
+        // return ERROR;
+    }*/
+
+    // stay in the same state
+    return SETUP;
 }
+
+#endif
