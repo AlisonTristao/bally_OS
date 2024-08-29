@@ -46,10 +46,19 @@ void setup() {
 							SECONDARY_CORE);		// secondary core
 }
 
+// timer to print
+uint32_t timer_print = 0;
+
 void loop() {
 	// run state machine
-	if(!StateMachine::run()) StateMachine::current_state = ERROR;
+	StateMachine::run(); //) StateMachine::current_state = ERROR;
 
 	// sample delay... (wait for the whatchdog to be ready) 
 	delay(1);
+
+	if(millis() - timer_print > 500){
+		// print the state machine
+		Serial.println(StateMachine::current_state);
+		timer_print = millis();
+	}
 } 

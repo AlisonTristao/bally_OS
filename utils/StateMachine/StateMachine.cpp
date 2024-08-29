@@ -38,14 +38,14 @@ bool StateMachine::run(){
     return result;
 }
 
-name StateMachine::next(uint8_t buttons){
+void StateMachine::next(uint8_t buttons){
     // return if function not defined
     if(!arr_states[current_state]){
         // LOGGER erro
-        return NONE;
+        return;
     }
     
-    return arr_states[current_state]->next_state(buttons);
+    current_state = arr_states[current_state]->next_state(buttons);
 }
 
 

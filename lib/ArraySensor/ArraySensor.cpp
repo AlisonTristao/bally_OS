@@ -1,13 +1,19 @@
 #include "ArraySensor.h"
 
-ArraySensor::ArraySensor(uint8_t len, uint8_t sig, uint8_t c0, uint8_t c1, uint8_t c2, uint8_t c3, bool lineColor){
-    this->lineColor = lineColor;
+ArraySensor::ArraySensor(uint8_t len, uint8_t sig, uint8_t c0, uint8_t c1, uint8_t c2, uint8_t c3){
     this->len = len;
     this->sig = sig;
     this->c0 = c0;
     this->c1 = c1;
     this->c2 = c2;
     this->c3 = c3;
+    // init arrays
+    min = new uint16_t[len];
+    max = new uint16_t[len];
+    for(uint8_t i = 0; i < len; i++){
+        min[i] = 4095;
+        max[i] = 0;
+    }
 }
 
 ArraySensor::~ArraySensor(){
@@ -18,16 +24,6 @@ ArraySensor::~ArraySensor(){
 
 void ArraySensor::set_init_arr(uint8_t init_arr){
     this->init_arr = init_arr;
-}
-
-void ArraySensor::init(){
-    // init arrays
-    min = new uint16_t[len];
-    max = new uint16_t[len];
-    for(uint8_t i = 0; i < len; i++){
-        min[i] = 4095;
-        max[i] = 0;
-    }
 }
 
 uint16_t ArraySensor::read(uint8_t index){
@@ -41,8 +37,7 @@ uint16_t ArraySensor::read(uint8_t index){
     digitalWrite(c3, bitRead(index, 3));
 
     // if the line is black, invert the value
-    if(!lineColor)  return 4095 - analogRead(sig);
-    else            return analogRead(sig);
+    return 4095 - analogRead(sig);
 }
 
 int16_t ArraySensor::normalize(uint16_t value, uint8_t index){
@@ -62,7 +57,7 @@ bool ArraySensor::calibration_ok(){
     return true;
 }
 
-bool ArraySensor::calibrate(uint8_t n_samples, uint8_t delay_ms, uint8_t led){
+bool ArraySensor::calibrate(uint8_t n_samples, uint8_t delay_ms){
     // calibrate the sensors
     uint16_t value = 0;
     for(uint8_t i = 0; i < n_samples; i++){
@@ -72,10 +67,7 @@ bool ArraySensor::calibrate(uint8_t n_samples, uint8_t delay_ms, uint8_t led){
             if (value < min[j]) min[j] = value;
             if (value > max[j]) max[j] = value;
         }
-        // feedback
-        digitalWrite(led, HIGH);
         delay(delay_ms);
-        digitalWrite(led, LOW);
     }
 
     // check if the calibration is ok
@@ -87,7 +79,7 @@ String ArraySensor::calibrate_status(){
     String status;
     for(uint8_t i = 0; i < len; i++){
         status +=   String(min[i])  + 
-                    "-"           + 
+                    "-"             + 
                     String(max[i])  + 
                     "\n";
     }
@@ -122,4 +114,43 @@ String ArraySensor::debub(){
     for(uint8_t i = 0; i < len; i++)
         status += String(normalize((i), i)) + "\t";
     return status;
+}
+
+void ArraySensor::saveCalibration() {
+    preferences.begin("calibration", false);
+    char key[10]; // Buffer para armazenar as chaves
+
+    for (uint8_t i = 0; i < len; i++) {
+        snprintf(key, sizeof(key), "min%d", i);
+        preferences.putUInt(key, min[i]);
+
+        snprintf(key, sizeof(key), "max%d", i);
+        preferences.putUInt(key, max[i]);
+    }
+
+    preferences.end();
+}
+
+bool ArraySensor::loadCalibration() {
+    preferences.begin("calibration", true);
+    char key[10]; // Buffer para armazenar as chaves
+
+    for (uint8_t i = 0; i < len; i++) {
+        snprintf(key, sizeof(key), "min%d", i);
+        min[i] = preferences.getUInt(key, 0xFFFF);
+
+        snprintf(key, sizeof(key), "max%d", i);
+        max[i] = preferences.getUInt(key, 0x0000);
+    }
+
+    preferences.end();
+
+    // Verifique se a calibração foi carregada corretamente
+    for (uint8_t i = 0; i < len; i++) {
+        if (min[i] == 0xFFFF || max[i] == 0x0000) {
+            return false; // Valores padrão indicam calibração ausente
+        }
+    }
+
+    return true;
 }

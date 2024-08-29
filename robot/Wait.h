@@ -9,11 +9,11 @@ bool wait_function() {
 name next_state_wait(uint8_t buttons){
     // if button 1 is pressed
     if(buttons & (1 << BIT_2))
-        return CALIBRATE; 
+        return MAP; 
 
     // if button 2 is pressed
     if(buttons & (1 << BIT_1))
-        return MAP;
+        return CALIBRATE;
 
     // if button 3 is pressed
     if(buttons & (1 << BIT_0))

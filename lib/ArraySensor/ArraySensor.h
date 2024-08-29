@@ -1,53 +1,52 @@
 #ifndef ARRAYSENSOR_H
 #define ARRAYSENSOR_H
+
 #include <Arduino.h>
+#include <Preferences.h>
 
-// autor: Alison Tristão
-// email: AlisonTristao@hotmail.com
+// Autor: Alison Tristão
+// Email: AlisonTristao@hotmail.com
 
-// line colors
-#define BLACK 1
-#define WHITE 0
+class ArraySensor {
+private:
+    uint8_t sig, c0, c1, c2, c3, len, init_arr;
+    double lastPosition;
 
-/********************/
-/*  Class Of Array  */
-/********************/  
+    // Leitura e normalização do sensor
+    uint16_t read(uint8_t index);
+    int16_t normalize(uint16_t value, uint8_t index);
 
-class ArraySensor{
-    private:
-        // mux and condigure pins
-        uint8_t sig, c0, c1, c2, c3, len, init_arr;
-        bool lineColor;
-        double lastPosition;
+    // Normalização de arrays
+    uint16_t *min, *max;
 
-        // read sensor of array and normalize the value
-        uint16_t read(uint8_t index);
-        int16_t normalize(uint16_t value, uint8_t index);
+    // Instância de Preferences para salvar dados persistentes
+    Preferences preferences;
 
-        // normalize array
-        uint16_t *min, *max;
-    public:
-        ArraySensor(uint8_t len, uint8_t sig, uint8_t c0, uint8_t c1, uint8_t c2, uint8_t c3, bool lineColor);
-        virtual ~ArraySensor();
-        bool calibration_ok();
+public:
+    ArraySensor(uint8_t len, uint8_t sig, uint8_t c0, uint8_t c1, uint8_t c2, uint8_t c3);
+    virtual ~ArraySensor();
+    bool calibration_ok();
 
-        // init variables
-        void init();
+    // Configura o array inicial do mux
+    void set_init_arr(uint8_t init_arr);
 
-        // set the initial array of the mux
-        void set_init_arr(uint8_t init_arr);
+    // Calibra o sensor
+    bool calibrate(uint8_t n_samples, uint8_t delay_ms);
 
-        // calibrate the sensor
-        bool calibrate(uint8_t n_samples, uint8_t delay_ms, uint8_t led);
-        
-        // get the line position
-        String calibrate_status();
+    // Obtém o status da calibração
+    String calibrate_status();
 
-        // calculate the line position
-        double read_line();
+    // Lê a posição da linha
+    double read_line();
 
-        // debug
-        String debub();
+    // Salva os valores de calibração
+    void saveCalibration();
+
+    // Carrega os valores de calibração
+    bool loadCalibration();
+
+    // Debug
+    String debub();
 };
 
 #endif // ARRAYSENSOR_H

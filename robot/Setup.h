@@ -13,8 +13,8 @@ bool setup_function() {
     if(configure_ok) 
         return true;
 
-    // init serial communication
-    Serial.begin(921600);
+    // init communication 
+    Serial.begin(921600);  
 
     // init pins direction, settings, i2c communication...
     if(!init_structure()) 

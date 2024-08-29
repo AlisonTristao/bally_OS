@@ -16,7 +16,7 @@
 
 // sampling activation
 // -> SAMPLING_ACTIVE
-#define SAMPLING_ACTIVE
+//#define SAMPLING_ACTIVE
 
 // logger configuration
 // -> LOG_ALL             // register all logs
@@ -24,6 +24,12 @@
 // -> LOG_OPER            // register operational logs
 // -> LOG_ERRO            // register error logs
 // -> LOG_VERBOSE         // print log messages in real time
+
+// array sensor configuration
+#define LEN_SENSOR      8
+#define INIT_MUX        4   
+#define SAMPLES         30      // calibration samples
+#define DELAY_SAMPLE    100     // delay between samples
 
 // timers
 #define SAMPLE_MICROS   1000000

@@ -37,7 +37,7 @@ class StateMachine{
         static bool run();
 
         // verify if the next state 
-        static name next(uint8_t buttons);
+        static void next(uint8_t buttons);
 
         // set the state machine to a specific state
         static uint8_t current_state;

@@ -59,7 +59,7 @@ bool init_interruptions(){
 
     // wait for the task to finish
     uint32_t timer = millis();
-    while(result_interrupt || (millis() - timer) <= 1000)
+    while(!result_interrupt && (millis() - timer) <= 1000)
         delay(1);
 
     // all ok
@@ -86,7 +86,7 @@ void routine(void *param){
 		// verify if the state machine needs to be updated
 		if(millis() - timer_state_machine > DELAY_FLAGS){
 			// update state machine
-			StateMachine::current_state = StateMachine::next(Signals_IN::getButtons());
+			StateMachine::next(Signals_IN::getButtons());
 			timer_state_machine = millis();
 		}
 
