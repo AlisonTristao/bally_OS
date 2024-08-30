@@ -76,6 +76,7 @@ void routine(void *param){
 	// timer of state machine actualization
 	uint32_t timer_state_machine = millis();
 	
+    // main loop of the parallel processing
 	while(true) {	
 		// check flags duration
 		Signals_IN::checkFlagsDuration();

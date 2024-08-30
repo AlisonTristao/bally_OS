@@ -10,7 +10,7 @@
 #include <Logger.h>
 #include <StateMachine.h>
 
-// esp32 core
+// esp32 core 
 #define PRIMARY_CORE    1   // void loop
 #define SECONDARY_CORE  0   // parallel processing 
 

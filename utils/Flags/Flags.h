@@ -39,45 +39,71 @@ struct FlagsByte {
 
 class Signals_IN {
     public:
-        // handle the interrupt service routines
-        static void IRAM_ATTR isrBtn0();
-        static void IRAM_ATTR isrBtn1();
-        static void IRAM_ATTR isrBtn2();
-        static void IRAM_ATTR isrBtn3();
-        static void IRAM_ATTR isrBtn4();
-        static void IRAM_ATTR isrBtn5();
-        static void IRAM_ATTR isrBtn6();
-        static void IRAM_ATTR isrBtn7();
+        /*
+            @brief set the flag of the button to up
+        */
+        static void IRAM_ATTR   isrBtn0(), 
+                                isrBtn1(), 
+                                isrBtn2(),
+                                isrBtn3(),
+                                isrBtn4(),
+                                isrBtn5(),
+                                isrBtn6(),
+                                isrBtn7();
 
-        // handle the interrupt service routines
-        static void IRAM_ATTR isrsideSensor0();
-        static void IRAM_ATTR isrsideSensor1();
-        static void IRAM_ATTR isrsideSensor2();
-        static void IRAM_ATTR isrsideSensor3();
-        static void IRAM_ATTR isrsideSensor4();
-        static void IRAM_ATTR isrsideSensor5();
-        static void IRAM_ATTR isrsideSensor6();
-        static void IRAM_ATTR isrsideSensor7();
+        /*
+            @brief set the flag of the side sensor to up
+        */
+        static void IRAM_ATTR   isrsideSensor0(),
+                                isrsideSensor1(),
+                                isrsideSensor2(),
+                                isrsideSensor3(),
+                                isrsideSensor4(),
+                                isrsideSensor5(),
+                                isrsideSensor6(),
+                                isrsideSensor7();
 
-        // check if any flag has been up for longer than a specified duration
+        /*
+            @brief check the flags duration
+        
+            if the flag is up for more than the filter time, the flag is set to down
+        */
         static void checkFlagsDuration();
 
-        // return number of flags of the buttons
+        /*
+            @brief get all boolean flags using a byte
+
+            @return the buttons flags
+        */
         static uint8_t getButtons();
 
-        // return number of flags of the side sensors
+        /*
+            @brief get all boolean flags using a byte
+
+            @return the side sensors flags
+        */
         static uint8_t getSideSensors();
 
-        // set the filter time
+        /*
+            @brief set the filter time for the flags to be down
+
+            @param time: time to filter the interruptions
+        */
         static void setFilterTime(uint32_t time);
     private:
-        // buttons flags
+        /*
+            @brief struct to store the flags of the buttons and make boolean union with byte
+        */
         static FlagsByte buttons;
 
-        // side sensors flags
+        /*
+            @brief struct to store the flags of the side sensors and make boolean union with byte
+        */
         static FlagsByte sideSensors;
 
-        // timer for filtering the interruptions
+        /*
+            @brief time to filter the interruptions
+        */
         static uint32_t filterTime;
 };
 

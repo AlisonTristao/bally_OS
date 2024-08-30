@@ -118,7 +118,7 @@ String ArraySensor::debub(){
 
 void ArraySensor::saveCalibration() {
     preferences.begin("calibration", false);
-    char key[10]; // Buffer para armazenar as chaves
+    char key[10]; // Buffer to store the keys
 
     for (uint8_t i = 0; i < len; i++) {
         snprintf(key, sizeof(key), "min%d", i);
@@ -133,7 +133,7 @@ void ArraySensor::saveCalibration() {
 
 bool ArraySensor::loadCalibration() {
     preferences.begin("calibration", true);
-    char key[10]; // Buffer para armazenar as chaves
+    char key[10]; // Buffer to store the keys
 
     for (uint8_t i = 0; i < len; i++) {
         snprintf(key, sizeof(key), "min%d", i);
@@ -145,10 +145,10 @@ bool ArraySensor::loadCalibration() {
 
     preferences.end();
 
-    // Verifique se a calibração foi carregada corretamente
+    // check if the calibration is valid
     for (uint8_t i = 0; i < len; i++) {
         if (min[i] == 0xFFFF || max[i] == 0x0000) {
-            return false; // Valores padrão indicam calibração ausente
+            return false; // calibration is not valid
         }
     }
 
