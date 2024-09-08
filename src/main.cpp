@@ -22,8 +22,6 @@
 #include <Telemetry.h>
 #include <Error.h>
 
-// aloo
-
 // state machine
 StateMachine state1(SETUP, setup_function, next_state_setup);
 StateMachine state2(WAIT, wait_function, next_state_wait);	
