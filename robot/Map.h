@@ -14,8 +14,15 @@ bool map_function() {
 
 name next_state_map(uint8_t buttons){
     // if button 1 is pressed
-    if(buttons & (1 << BIT_0))
-        return FINISH; 
+    if(buttons & (1 << BIT_0)){
+        
+        // log message
+        #if defined(LOG_ALL) || defined(LOG_INFO)
+            Logger::IN_LOG("states: Map -> Finish", logType::INFO);
+        #endif
+        
+        return FINISH;
+    }
 
     // if button 2 is pressed
     /*if(buttons & (1 << BIT_1))

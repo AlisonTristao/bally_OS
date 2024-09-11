@@ -3,6 +3,9 @@
 
 #include <Arduino.h>
 
+// static variables
+#include <Logger.h>
+
 // autor: Alison Tristão
 // email: AlisonTristao@hotmail.com
 

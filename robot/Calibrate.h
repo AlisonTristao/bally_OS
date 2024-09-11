@@ -20,10 +20,17 @@ bool calibrate_function() {
     sensor.set_init_arr(INIT_MUX);
 
     // calibrate the sensors
-    if (!sensor.calibrate(SAMPLES, DELAY_SAMPLE)) 
-        return false;
-    else                            
-        sensor.saveCalibration();
+    bool calib = sensor.calibrate(SAMPLES, DELAY_SAMPLE);             
+    if(calib) sensor.saveCalibration();
+
+    // log message
+    #if defined(LOG_ALL) || defined(LOG_INFO)
+        Logger::IN_LOG(("Calibrate function called: " + String(!calib ? "failed" : "success")), logType::INFO);
+        Logger::IN_LOG("Values:\n\n" + sensor.calibrate_status(), logType::INFO);
+    #endif
+
+    // error 
+    if(!calib) return false;
 
     // all ok
     calibrate_ok = true;
@@ -34,6 +41,12 @@ bool calibrate_function() {
 name next_state_calibrate(uint8_t buttons){
     // if button 1 is pressed
     if(buttons & (1 << BIT_0)){
+
+        // log message
+        #if defined(LOG_ALL) || defined(LOG_INFO)
+            Logger::IN_LOG("states: Calibrate -> Wait", logType::INFO);
+        #endif
+
         calibrate_ok = false;
         return WAIT; 
     }

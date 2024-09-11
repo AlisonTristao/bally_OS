@@ -24,6 +24,11 @@ bool setup_function() {
     if(!init_interruptions()) 
         return false;
 
+    // log message
+    #if defined(LOG_ALL) || defined(LOG_INFO)
+        Logger::IN_LOG("Setup function called", logType::INFO);
+    #endif
+
     // all ok
     configure_ok = true;
     return configure_ok;
@@ -31,8 +36,14 @@ bool setup_function() {
 
 name next_state_setup(uint8_t buttons){
     // if button 1 is pressed
-    if(buttons & (1 << BIT_0))
+    if(buttons & (1 << BIT_0)){
+        // log message
+        #if defined(LOG_ALL) || defined(LOG_INFO)
+            Logger::IN_LOG("states: Setup -> Wait", logType::INFO);
+        #endif
+
         return WAIT; 
+    }
 
     // if button 2 is pressed
     /*if(buttons & (1 << BTN2)){

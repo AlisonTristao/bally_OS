@@ -14,8 +14,15 @@ bool error_function() {
 
 name next_state_error(uint8_t buttons){
     // if button 1 is pressed
-    if(buttons & (1 << BIT_0))
+    if(buttons & (1 << BIT_0)){
+        
+        // log message
+        #if defined(LOG_ALL) || defined(LOG_INFO)
+            Logger::IN_LOG("states: Error -> Telemetry", logType::INFO);
+        #endif
+    
         return TELEMETRY; 
+    }
 
     // if button 2 is pressed
     /*if(buttons & (1 << BIT_1))

@@ -10,20 +10,22 @@
 #include <Logger.h>
 #include <StateMachine.h>
 
-// esp32 core 
-#define PRIMARY_CORE    1   // void loop
-#define SECONDARY_CORE  0   // parallel processing 
-
 // sampling activation
 // -> SAMPLING_ACTIVE
-//#define SAMPLING_ACTIVE
+#define SAMPLING_ACTIVE
 
 // logger configuration
 // -> LOG_ALL             // register all logs
-// -> LOG_CONF            // register configuration logs
-// -> LOG_OPER            // register operational logs
+// -> LOG_INFO            // register configuration logs
+// -> LOG_TELEMETRY       // register operational logs
 // -> LOG_ERRO            // register error logs
+// -> LOG_DEBUG           // register debug logs
 // -> LOG_VERBOSE         // print log messages in real time
+#define LOG_TELEMETRY
+
+// esp32 core 
+#define PRIMARY_CORE    1   // void loop
+#define SECONDARY_CORE  0   // parallel processing 
 
 // array sensor configuration
 #define LEN_SENSOR      8
@@ -143,7 +145,15 @@ bool configure_pins(){
     pinMode(BAT, INPUT);
 
     // i2c communication
-    return Wire.begin(SDA, SCL);
+    bool i2c = Wire.begin(SDA, SCL);
+    
+    // log message
+    #if defined(LOG_ALL) || defined(LOG_INFO)
+        Logger::IN_LOG("Pins configured", logType::INFO);
+    #endif
+    
+    // all pins configured
+    return i2c;
 }
 
 bool init_structure() {

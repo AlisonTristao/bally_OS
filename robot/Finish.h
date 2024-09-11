@@ -14,12 +14,26 @@ bool finish_function() {
 
 name next_state_finish(uint8_t buttons){
     // if button 1 is pressed
-    if(buttons & (1 << BIT_0))
+    if(buttons & (1 << BIT_0)){
+        
+        // log message
+        #if defined(LOG_ALL) || defined(LOG_INFO)
+            Logger::IN_LOG("states: Finish -> Telemetry", logType::INFO);
+        #endif
+    
         return TELEMETRY; 
+    }
 
     // if button 2 is pressed
-    if(buttons & (1 << BIT_1))
+    if(buttons & (1 << BIT_1)){
+     
+        // log message
+        #if defined(LOG_ALL) || defined(LOG_INFO)
+            Logger::IN_LOG("states: Finish -> Wait", logType::INFO);
+        #endif
+     
         return WAIT;
+    }
 
     // if button 3 is pressed
     /*if(buttons & (1 << BIT_2))

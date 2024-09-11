@@ -23,14 +23,14 @@
 #include <Error.h>
 
 // state machine
-StateMachine state1(SETUP, setup_function, next_state_setup);
-StateMachine state2(WAIT, wait_function, next_state_wait);	
-StateMachine state3(CALIBRATE, calibrate_function, next_state_calibrate);
-StateMachine state4(MAP, map_function, next_state_map);
-StateMachine state5(RUN, run_function, next_state_run);
-StateMachine state6(FINISH, finish_function, next_state_finish);
-StateMachine state7(TELEMETRY, telemetry_function, next_state_telemetry);
-StateMachine state8(ERROR, error_function, next_state_error);
+StateMachine state1(SETUP, 		setup_function, 	next_state_setup);
+StateMachine state2(WAIT, 		wait_function, 		next_state_wait);	
+StateMachine state3(CALIBRATE, 	calibrate_function, next_state_calibrate);
+StateMachine state4(MAP, 		map_function, 		next_state_map);
+StateMachine state5(RUN, 		run_function, 		next_state_run);
+StateMachine state6(FINISH, 	finish_function, 	next_state_finish);
+StateMachine state7(TELEMETRY, 	telemetry_function, next_state_telemetry);
+StateMachine state8(ERROR, 		error_function, 	next_state_error);
 
 void setup() {
 	// init state machine
@@ -44,6 +44,7 @@ void setup() {
 							2, 						// priority
 							NULL, 					// not used
 							SECONDARY_CORE);		// secondary core
+
 }
 
 // timer to print
@@ -51,14 +52,8 @@ uint32_t timer_print = 0;
 
 void loop() {
 	// run state machine
-	StateMachine::run(); //) StateMachine::current_state = ERROR;
+	if(!StateMachine::run()) StateMachine::current_state = ERROR;
 
 	// sample delay... (wait for the whatchdog to be ready) 
 	delay(1);
-
-	if(millis() - timer_print > 500){
-		// print the state machine
-		Serial.println(StateMachine::current_state);
-		timer_print = millis();
-	}
-} 
+}
