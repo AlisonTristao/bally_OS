@@ -14,7 +14,7 @@ bool telemetry_function() {
 
     // return if live is active
     #ifdef LOG_VERBOSE
-        return false;
+        return true;
     #endif
 
     // log message out

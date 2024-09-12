@@ -17,7 +17,7 @@ bool calibrate_function() {
 
     // create the sensor object
     ArraySensor sensor(LEN_SENSOR, SIG, C0, C1, C2, C3);
-    sensor.set_init_arr(INIT_MUX);
+    sensor.init(INIT_MUX);
 
     // calibrate the sensors
     bool calib = sensor.calibrate(SAMPLES, DELAY_SAMPLE);             

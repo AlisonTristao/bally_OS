@@ -80,7 +80,7 @@ public:
     /*
         @brief set the initial array to read the sensors using a multiplexer
     */
-    void set_init_arr(uint8_t init_arr);
+    void init(uint8_t init_arr = 0);
 
     /*
         @brief calibrate the sensors

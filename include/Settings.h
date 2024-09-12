@@ -36,6 +36,7 @@
 // timers
 #define SAMPLE_MICROS   1000000
 #define DELAY_FLAGS     250
+#define CONTROL_TIME_MS 1
 
 // channels
 #define CH0             0

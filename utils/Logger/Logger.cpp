@@ -20,15 +20,12 @@ void Logger::IN_LOG(String msg, logType type) {
 
 // print message
 void Logger::OUT_LOGGER(logType type) {
-    // header
-    Serial.println("\n--- ROBOT LOG ---");
-
     // print all messages
     for (auto m : messages) {
         if (m.type == type)
             Serial.printf("[%d] %s\n", m.timer, m.msg.c_str());
         else if (type == logType::NONE)
-            Serial.printf("[%07d] %s\n", m.timer, m.msg.c_str());
+            Serial.printf("[%7d] %s\n", m.timer, m.msg.c_str());
     }
 }
 
@@ -40,12 +37,9 @@ void Logger::CLEAR_LOG() {
 
 // print all messages
 void Logger::OUT_LOGGER_LIVE() {
-    // header
-    if(last_index == 0) Serial.println("\n--- ROBOT LOG ---");
-
     // print all messages
     for (uint32_t i = last_index; i < messages.size(); i++) {
-        Serial.printf("[%07d] %s\n", messages[i].timer, messages[i].msg.c_str());
+        Serial.printf("[%7d] %s\n", messages[i].timer, messages[i].msg.c_str());
     }
 
     // update last index

@@ -22,7 +22,7 @@ ArraySensor::~ArraySensor(){
     delete[] max;
 }
 
-void ArraySensor::set_init_arr(uint8_t init_arr){
+void ArraySensor::init(uint8_t init_arr){
     this->init_arr = init_arr;
 }
 
@@ -132,7 +132,8 @@ void ArraySensor::saveCalibration() {
 }
 
 bool ArraySensor::loadCalibration() {
-    preferences.begin("calibration", true);
+    
+    if(!preferences.begin("calibration", true)) return false;
     char key[10]; // Buffer to store the keys
 
     for (uint8_t i = 0; i < len; i++) {

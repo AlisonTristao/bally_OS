@@ -11,6 +11,7 @@
 #include <ArraySensor.h>
 #include <Encoder.h>
 #include <HBridge.h>
+#include <Control.h>
 
 // state machine header
 #include <Setup.h>  
