@@ -3,6 +3,9 @@
 // timer for filtering the interruptions (default)
 uint32_t Signals_IN::filterTime = 100;
 
+// flags for the leds
+FlagsByte Signals_IN::leds;
+
 // flags for the buttons
 FlagsByte Signals_IN::buttons;
 
@@ -127,6 +130,63 @@ void IRAM_ATTR Signals_IN::isrsideSensor7() {
     }
 }
 
+// define the leds flag true and save the time
+void IRAM_ATTR Signals_IN::setLed0on() {
+    if (millis() - leds.time[0] >= filterTime) {
+        leds.time[0] = millis(); 
+        leds.flag0 = true;
+    }
+}
+
+void IRAM_ATTR Signals_IN::setLed1on() {
+    if (millis() - leds.time[1] >= filterTime) {
+        leds.time[1] = millis(); 
+        leds.flag1 = true;
+    }
+}
+
+void IRAM_ATTR Signals_IN::setLed2on() {
+    if (millis() - leds.time[2] >= filterTime) {
+        leds.time[2] = millis(); 
+        leds.flag2 = true;
+    }
+}
+
+void IRAM_ATTR Signals_IN::setLed3on() {
+    if (millis() - leds.time[3] >= filterTime) {
+        leds.time[3] = millis(); 
+        leds.flag3 = true;
+    }
+}
+
+void IRAM_ATTR Signals_IN::setLed4on() {
+    if (millis() - leds.time[4] >= filterTime) {
+        leds.time[4] = millis(); 
+        leds.flag4 = true;
+    }
+}
+
+void IRAM_ATTR Signals_IN::setLed5on() {
+    if (millis() - leds.time[5] >= filterTime) {
+        leds.time[5] = millis(); 
+        leds.flag5 = true;
+    }
+}
+
+void IRAM_ATTR Signals_IN::setLed6on() {
+    if (millis() - leds.time[6] >= filterTime) {
+        leds.time[6] = millis(); 
+        leds.flag6 = true;
+    }
+}
+
+void IRAM_ATTR Signals_IN::setLed7on() {
+    if (millis() - leds.time[7] >= filterTime) {
+        leds.time[7] = millis(); 
+        leds.flag7 = true;
+    }
+}
+
 // ---- check if any flag has been up for longer than a specified duration ----
 void Signals_IN::checkFlagsDuration() {
     uint32_t currentTime = millis();
@@ -150,6 +210,16 @@ void Signals_IN::checkFlagsDuration() {
     sideSensors.flag5 = currentTime - sideSensors.time[5] <= filterTime;
     sideSensors.flag6 = currentTime - sideSensors.time[6] <= filterTime;
     sideSensors.flag7 = currentTime - sideSensors.time[7] <= filterTime;
+
+    // check if any flag has been up for longer than a specified filterTime
+    leds.flag0 = currentTime - leds.time[0] <= filterTime;
+    leds.flag1 = currentTime - leds.time[1] <= filterTime;
+    leds.flag2 = currentTime - leds.time[2] <= filterTime;
+    leds.flag3 = currentTime - leds.time[3] <= filterTime;
+    leds.flag4 = currentTime - leds.time[4] <= filterTime;
+    leds.flag5 = currentTime - leds.time[5] <= filterTime;
+    leds.flag6 = currentTime - leds.time[6] <= filterTime;
+    leds.flag7 = currentTime - leds.time[7] <= filterTime;
 }
 
 uint8_t Signals_IN::getButtons() {
@@ -158,4 +228,8 @@ uint8_t Signals_IN::getButtons() {
 
 uint8_t Signals_IN::getSideSensors() {
     return sideSensors.allFlags;
+}
+
+uint8_t Signals_IN::getLeds() {
+    return leds.allFlags;
 }

@@ -63,6 +63,15 @@ class Signals_IN {
                                 isrsideSensor6(),
                                 isrsideSensor7();
 
+        static void IRAM_ATTR   setLed0on(),
+                                setLed1on(),
+                                setLed2on(),
+                                setLed3on(),
+                                setLed4on(),
+                                setLed5on(),
+                                setLed6on(),
+                                setLed7on();
+
         /*
             @brief check the flags duration
         
@@ -85,6 +94,13 @@ class Signals_IN {
         static uint8_t getSideSensors();
 
         /*
+            @brief get all boolean flags using a byte
+
+            @return the leds flags
+        */
+        static uint8_t getLeds();
+
+        /*
             @brief set the filter time for the flags to be down
 
             @param time: time to filter the interruptions
@@ -100,6 +116,11 @@ class Signals_IN {
             @brief struct to store the flags of the side sensors and make boolean union with byte
         */
         static FlagsByte sideSensors;
+
+        /*
+            @brief struct to store the flags of the leds and make boolean union with byte
+        */
+        static FlagsByte leds;
 
         /*
             @brief time to filter the interruptions

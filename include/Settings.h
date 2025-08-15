@@ -3,7 +3,9 @@
 
 // native libraries
 #include <Arduino.h>
-#include <Wire.h>
+
+// header
+#include <EspNow.h>
 
 // static libraries
 #include <Flags.h>
@@ -21,7 +23,8 @@
 // -> LOG_ERRO            // register error logs
 // -> LOG_DEBUG           // register debug logs
 // -> LOG_VERBOSE         // print log messages in real time
-#define LOG_TELEMETRY
+#define LOG_ALL
+#define LOG_VERBOSE
 
 // esp32 core 
 #define PRIMARY_CORE    1   // void loop
@@ -159,7 +162,15 @@ bool configure_pins(){
 
 bool init_structure() {
     // init pins direction, settings, i2c communication...
-    return configure_pins();                               
+    if (!configure_pins())
+        return false;
+
+    // init wifi
+    if (!configure_wifi())
+        return false;
+
+    // all ok
+    return true;
 }
 
 #endif

@@ -34,6 +34,9 @@ StateMachine state7(TELEMETRY, 	telemetry_function, next_state_telemetry);
 StateMachine state8(ERROR, 		error_function, 	next_state_error);
 
 void setup() {
+	// init log register
+	Logger::IN_LOG("Welcome! the car is starting...", logType::INFO);
+
 	// init state machine
 	StateMachine::current_state = SETUP;
 

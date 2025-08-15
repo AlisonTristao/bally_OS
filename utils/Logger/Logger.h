@@ -3,6 +3,9 @@
 
 #include <Arduino.h>
 #include <vector>
+#include <Settings.h>
+
+bool send_data(const uint8_t* data, size_t len);
 
 // types of logs 
 enum class logType {
@@ -47,6 +50,12 @@ class Logger {
             @param: type -> type of the message
         */
         static void OUT_LOGGER_LIVE();
+
+        /*
+            @brief: convert logType to string
+            @param: type -> type of the message
+        */
+        static String logTypeToString(logType type);
     private:
         // messages vector
         static std::vector<message> messages;

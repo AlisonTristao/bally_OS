@@ -94,8 +94,8 @@ void routine(void *param){
 		Signals_IN::checkFlagsDuration();
 
         // set leds according to the state machine
-        setLeds(StateMachine::current_state);
-		
+        setLeds(Signals_IN::getLeds());
+
 		// verify if the state machine needs to be updated
 		if(millis() - timer_state_machine > DELAY_FLAGS){
 			// update state machine

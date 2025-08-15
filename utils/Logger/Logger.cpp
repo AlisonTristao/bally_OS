@@ -35,11 +35,24 @@ void Logger::CLEAR_LOG() {
     messages.clear();
 }
 
+String Logger::logTypeToString(logType type) {
+    switch (type) {
+        case logType::NONE:         return "NONE";
+        case logType::INFO:         return "INFO";
+        case logType::TELEMETRY:    return "TELEMETRY";
+        case logType::ERROR:        return "ERROR";
+        case logType::DEBUG:        return "DEBUG";
+        default:                    return "UNKNOWN";
+    }
+}
+
 // print all messages
 void Logger::OUT_LOGGER_LIVE() {
     // print all messages
     for (uint32_t i = last_index; i < messages.size(); i++) {
-        Serial.printf("[%7d] %s\n", messages[i].timer, messages[i].msg.c_str());
+        // espnow send
+        String message_str = "[" + String(messages[i].timer) + "] " + logTypeToString(messages[i].type) + ": " + messages[i].msg;
+        send_data((const uint8_t *)message_str.c_str(), message_str.length());
     }
 
     // update last index
