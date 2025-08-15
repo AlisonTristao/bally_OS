@@ -39,9 +39,9 @@ struct FlagsByte {
 
 class Signals_IN {
     public:
-        /*
-            @brief set the flag of the button to up
-        */
+        /**
+         * @brief set the flag of the button to up
+         */
         static void IRAM_ATTR   isrBtn0(), 
                                 isrBtn1(), 
                                 isrBtn2(),
@@ -51,9 +51,9 @@ class Signals_IN {
                                 isrBtn6(),
                                 isrBtn7();
 
-        /*
-            @brief set the flag of the side sensor to up
-        */
+        /**
+         * @brief set the flag of the side sensor to up
+         */
         static void IRAM_ATTR   isrsideSensor0(),
                                 isrsideSensor1(),
                                 isrsideSensor2(),
@@ -72,59 +72,53 @@ class Signals_IN {
                                 setLed6on(),
                                 setLed7on();
 
-        /*
-            @brief check the flags duration
-        
-            if the flag is up for more than the filter time, the flag is set to down
-        */
+        /**
+         * @brief check the flags duration - if the flag is up for more than the filter time, the flag is set to down
+         */
         static void checkFlagsDuration();
 
-        /*
-            @brief get all boolean flags using a byte
-
-            @return the buttons flags
-        */
+        /**
+         * @brief get all boolean flags using a byte
+         * @return the buttons flags
+         */
         static uint8_t getButtons();
 
-        /*
-            @brief get all boolean flags using a byte
-
-            @return the side sensors flags
-        */
+        /**
+         * @brief get all boolean flags using a byte
+         * @return the side sensors flags
+         */
         static uint8_t getSideSensors();
 
-        /*
-            @brief get all boolean flags using a byte
-
-            @return the leds flags
-        */
+        /**
+         * @brief get all boolean flags using a byte
+         * @return the leds flags
+         */
         static uint8_t getLeds();
 
-        /*
-            @brief set the filter time for the flags to be down
-
-            @param time: time to filter the interruptions
-        */
+        /**
+         * @brief set the filter time for the flags to be down
+         * @param time: time to filter the interruptions
+         */
         static void setFilterTime(uint32_t time);
     private:
-        /*
-            @brief struct to store the flags of the buttons and make boolean union with byte
-        */
+        /**
+         * @brief struct to store the flags of the buttons and make boolean union with byte
+         */
         static FlagsByte buttons;
 
-        /*
-            @brief struct to store the flags of the side sensors and make boolean union with byte
-        */
+        /**
+         * @brief struct to store the flags of the side sensors and make boolean union with byte
+         */
         static FlagsByte sideSensors;
 
-        /*
-            @brief struct to store the flags of the leds and make boolean union with byte
-        */
+        /**
+         * @brief struct to store the flags of the leds and make boolean union with byte
+         */
         static FlagsByte leds;
 
-        /*
-            @brief time to filter the interruptions
-        */
+        /**
+         * @brief time to filter the interruptions
+         */
         static uint32_t filterTime;
 };
 

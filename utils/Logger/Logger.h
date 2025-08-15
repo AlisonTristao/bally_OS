@@ -26,34 +26,34 @@ struct message {
 // logger class
 class Logger {
     public:
-        /*
-            @brief: insert a message into the logger
-            @param: msg -> message to be inserted
-            @param: type -> type of the message
-        */
+        /**
+         * @brief: insert a message into the logger
+         * @param: msg -> message to be inserted
+         * @param: type -> type of the message
+         */
         static void IN_LOG(String msg, logType type);
 
-        /*
-            @brief: print all messages inserted
-            @param: type -> type of the message
+        /**
+         * @brief: print all messages inserted
+         * @param: type -> type of the message
         */
         static void OUT_LOGGER(logType type);
 
-        /*
-            @brief: clear all messages inserted 
-            @param: type -> type of the message
-        */
+        /**
+         * @brief: clear all messages inserted
+         * @param: type -> type of the message
+         */
         static void CLEAR_LOG();
 
-        /*
-            @brief: print last message inserted 
-            @param: type -> type of the message
-        */
+        /**
+         * @brief: print last message inserted
+         * @param: type -> type of the message
+         */
         static void OUT_LOGGER_LIVE();
 
-        /*
-            @brief: convert logType to string
-            @param: type -> type of the message
+        /**
+         * @brief: convert logType to string
+         * @param: type -> type of the message
         */
         static String logTypeToString(logType type);
     private:

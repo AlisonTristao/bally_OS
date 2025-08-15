@@ -30,40 +30,36 @@ enum name {
 
 class StateMachine{
     public:
-        /*
-            @brief constructor of the state machine
-
-            @param state: the state of the state machine
-            @param action: the function to be executed in the state
-            @param next_state: the function to verify the next state
-        */
+        /**
+         * @brief constructor of the state machine
+         * @param state: the state of the state machine
+         * @param action: the function to be executed in the state
+         * @param next_state: the function to verify the next state
+         */
         StateMachine(name state, bool (*action)(), name (*next_state)(uint8_t buttons));
         ~StateMachine(){};
 
-        /*
-            @brief get the value of the state
-
-            @return the value of the state
-        */
+        /**
+         * @brief get the value of the state
+         * @return the value of the state
+         */
         uint8_t getValue();
 
-        /*
-            @brief run the current state
-
-            @return true if the action was executed successfully
-        */
+        /**
+         * @brief run the current state
+         * @return true if the action was executed successfully
+         */
         static bool run();
 
-        /*
-            @brief change the state machine to the next state
-
-            @param buttons: the buttons pressed
-        */
+        /**
+         * @brief change the state machine to the next state
+         * @param buttons: the buttons pressed
+         */
         static void next(uint8_t buttons);
 
-        /*
-            @brief current state of the state machine
-        */
+        /**
+         * @brief current state of the state machine
+         */
         static uint8_t current_state;
     private:
         // index of the state
@@ -72,27 +68,23 @@ class StateMachine{
             uint8_t number;
         };
 
-        /*
-            @brief function to be executed in the state
-
-            @return true if the action was executed successfully
-        */
+        /**
+         * @brief function to be executed in the state
+         * @return true if the action was executed successfully
+         */
         bool (*action)();
 
-        /*
-            @brief function to verify the next state
-
-            @param buttons: the buttons pressed
-
-            @return the next state
-        */
+        /**
+         * @brief function to verify the next state
+         * @param buttons: the buttons pressed
+         * @return the next state
+         */
         name (*next_state)(uint8_t buttons);
 
-        /*
-            @brief array of states 
-
-            @note the index of the array is the state
-        */
+        /**
+         * @brief array of states
+         * @note the index of the array is the state
+         */
         static StateMachine* arr_states[NUMBER_OF_STATES];
 };
 
