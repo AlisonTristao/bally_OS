@@ -109,7 +109,7 @@ double ArraySensor::read_line(){
     return lastPosition;
 }
 
-String ArraySensor::debub(){
+String ArraySensor::debug(){
     String status;
     for(uint8_t i = 0; i < len; i++)
         status += String(normalize((i), i)) + "\t";

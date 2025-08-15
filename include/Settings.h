@@ -1,6 +1,16 @@
 #ifndef SETTINGS_H
 #define SETTINGS_H
 
+// logger configuration
+// -> LOG_ALL             // register all logs
+// -> LOG_INFO            // register configuration logs
+// -> LOG_TELEMETRY       // register operational logs
+// -> LOG_ERRO            // register error logs
+// -> LOG_DEBUG           // register debug logs
+// -> LOG_VERBOSE         // print log messages in real time
+#define LOG_ALL
+#define LOG_VERBOSE
+
 // native libraries
 #include <Arduino.h>
 
@@ -15,16 +25,6 @@
 // sampling activation
 // -> SAMPLING_ACTIVE
 #define SAMPLING_ACTIVE
-
-// logger configuration
-// -> LOG_ALL             // register all logs
-// -> LOG_INFO            // register configuration logs
-// -> LOG_TELEMETRY       // register operational logs
-// -> LOG_ERRO            // register error logs
-// -> LOG_DEBUG           // register debug logs
-// -> LOG_VERBOSE         // print log messages in real time
-#define LOG_ALL
-#define LOG_VERBOSE
 
 // esp32 core 
 #define PRIMARY_CORE    1   // void loop
