@@ -87,12 +87,6 @@ public:
     String calibrate_status();
 
     /**
-     * @brief read the sensors and return the position of the line
-     * @return the position of the line
-     */
-    double read_line();
-
-    /**
      * @brief calculate the position of the line using the normalized values of the sensors and a gaussian mean
      * @return the position of the line with values between 0 and 1000 * len of sensors
      */

@@ -6,16 +6,27 @@ std::vector<message> Logger::messages;
 // index of the last message printed
 uint32_t Logger::last_index = 0;
 
-// log message
-void Logger::IN_LOG(String msg, logType type) {
-    // create message
-    message m;
-    m.timer = millis();
-    m.msg = msg;
-    m.type = type;
+void Logger::IN_LOG_impl(const String& msg, logType type, unsigned long ts) {
+    if (msg.length() == 0) return;
 
-    // add message to vector
+    // get the len of the message
+    const size_t n = (msg.length() > MAX_MESSAGE_SIZE + 1) ? MAX_MESSAGE_SIZE + 1 : msg.length();
+
+    // create message struct
+    message m;
+    m.timer = ts;
+    m.type  = type;
+
+    // add data to message
+    memset(m.msg, 0, sizeof(m.msg));
+    strncpy(m.msg, msg.c_str(), n);
+    m.msg[n] = '\0';
+
+    // save the message in the vector
     messages.push_back(m);
+
+    // call recursively for the rest (if any)
+    if (msg.length() > n) IN_LOG_impl(msg.substring(n), type, ts);
 }
 
 // print message
@@ -23,9 +34,9 @@ void Logger::OUT_LOGGER(logType type) {
     // print all messages
     for (auto m : messages) {
         if (m.type == type)
-            Serial.printf("[%d] %s\n", m.timer, m.msg.c_str());
+            Serial.printf("[%d] %s\n", m.timer, m.msg);
         else if (type == logType::NONE)
-            Serial.printf("[%7d] %s\n", m.timer, m.msg.c_str());
+            Serial.printf("[%7d] %s\n", m.timer, m.msg);
     }
 }
 
@@ -35,25 +46,11 @@ void Logger::CLEAR_LOG() {
     messages.clear();
 }
 
-String Logger::logTypeToString(logType type) {
-    switch (type) {
-        case logType::NONE:         return "NONE";
-        case logType::INFO:         return "INFO";
-        case logType::TELEMETRY:    return "TELEMETRY";
-        case logType::ERROR:        return "ERROR";
-        case logType::DEBUG:        return "DEBUG";
-        default:                    return "UNKNOWN";
-    }
-}
-
 // print all messages
 void Logger::OUT_LOGGER_LIVE() {
-    // print all messages
-    for (uint32_t i = last_index; i < messages.size(); i++) {
-        // espnow send
-        String message_str = "[" + String(messages[i].timer) + "] " + logTypeToString(messages[i].type) + ": " + messages[i].msg;
-        send_data((const uint8_t *)message_str.c_str(), message_str.length());
-    }
+    // send all new messages to espnow
+    for (uint32_t i = last_index; i < messages.size(); i++)
+        send_data((const uint8_t *) &messages[i], sizeof(messages[i]));
 
     // update last index
     last_index = messages.size();
