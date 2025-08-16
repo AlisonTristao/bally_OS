@@ -5,7 +5,7 @@
 // -> LOG_ALL             // register all logs
 // -> LOG_INFO            // register configuration logs
 // -> LOG_TELEMETRY       // register operational logs
-// -> LOG_ERRO            // register error logs
+// -> LOG_ERROR           // register error logs
 // -> LOG_DEBUG           // register debug logs
 // -> LOG_VERBOSE         // print log messages in real time
 #define LOG_ALL
@@ -13,6 +13,9 @@
 
 // native libraries
 #include <Arduino.h>
+
+// wrapper commands
+#include <Wrapper.h>
 
 // header
 #include <EspNow.h>
@@ -167,6 +170,10 @@ bool init_structure() {
 
     // init wifi
     if (!configure_wifi())
+        return false;
+
+    // init shell
+    if (!start_shell())
         return false;
 
     // all ok

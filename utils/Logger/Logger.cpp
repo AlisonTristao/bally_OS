@@ -6,7 +6,7 @@ std::vector<message> Logger::messages;
 // index of the last message printed
 uint32_t Logger::last_index = 0;
 
-void Logger::IN_LOG_impl(const String& msg, logType type, unsigned long ts) {
+void Logger::IN_LOG_impl(const String& msg, logType type, uint32_t ts) {
     if (msg.length() == 0) return;
 
     // get the len of the message
@@ -29,7 +29,12 @@ void Logger::IN_LOG_impl(const String& msg, logType type, unsigned long ts) {
     if (msg.length() > n) IN_LOG_impl(msg.substring(n), type, ts);
 }
 
-// print message
+void Logger::IN_CMD_impl(const String& cmd) {
+    String result = shell.run_line_command(string(cmd.c_str())).c_str();
+    Logger::IN_LOG(result, logType::CMD);
+}
+
+// print messages
 void Logger::OUT_LOGGER(logType type) {
     // print all messages
     for (auto m : messages) {

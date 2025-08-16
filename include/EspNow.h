@@ -54,7 +54,7 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *data, int len) {
     
     // save the string to logger (convert the buffer to string)
     #if defined(LOG_ALL) || defined(LOG_INFO)
-        Logger::IN_LOG(String(buffer), logType::INFO);
+        Logger::IN_CMD(String(buffer));
     #endif
 
     delete[] buffer;
