@@ -1,9 +1,6 @@
 #ifndef PARALLELPROCESSING_H
 #define PARALLELPROCESSING_H
 
-// header of the state machine with a sample function
-#include <Run.h>
-
 // native libraries
 #include <Arduino.h>
 #include "esp_timer.h"
@@ -14,6 +11,9 @@
 // static libraries
 #include <Flags.h>
 #include <Logger.h>
+
+// header of the state machine with a sample function
+#include <Run.h>
 
 // handle of timer
 esp_timer_handle_t timer_get_handle;
@@ -48,7 +48,7 @@ void configure_interruptions(void *param){
 
     // log message
     #if defined(LOG_ALL) || defined(LOG_INFO)
-        Logger::IN_LOG("Interruptions configured", logType::INFO);
+        Logger::insert_log("Interruptions configured", logType::INFO);
     #endif
 
     // delete this task
@@ -80,14 +80,14 @@ void routine(void *param){
 	
     // log message  
     #if defined(LOG_ALL) || defined(LOG_INFO)
-        Logger::IN_LOG("Parallel processing initialized", logType::INFO);
+        Logger::insert_log("Parallel processing initialized", logType::INFO);
     #endif
 
     // main loop of the parallel processing
 	while(true) {	
         // logger print live
         #ifdef LOG_VERBOSE
-            Logger::OUT_LOGGER_LIVE();
+            Logger::send_logger_register_live();
         #endif
 
 		// check flags duration
@@ -104,7 +104,7 @@ void routine(void *param){
 
             // log message
             #ifdef LOG_DEBUG
-                Logger::IN_LOG("Butoes: " + String(Signals_IN::getButtons()) + "\t" + 
+                Logger::insert_log("Butoes: " + String(Signals_IN::getButtons()) + "\t" + 
                                     "Sensores laterais: " + String(Signals_IN::getSideSensors()) , logType::INFO);
             #endif
 		}

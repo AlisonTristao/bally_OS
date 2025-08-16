@@ -14,16 +14,17 @@
 // native libraries
 #include <Arduino.h>
 
-// wrapper commands
-#include <Wrapper.h>
-
 // header
+#include <Pinout.h>
 #include <EspNow.h>
 
 // static libraries
 #include <Flags.h>
 #include <Logger.h>
 #include <StateMachine.h>
+
+// wrapper
+#include <Wrapper.h>
 
 // sampling activation
 // -> SAMPLING_ACTIVE
@@ -33,70 +34,10 @@
 #define PRIMARY_CORE    1   // void loop
 #define SECONDARY_CORE  0   // parallel processing 
 
-// array sensor configuration
-#define LEN_SENSOR      8
-#define INIT_MUX        4   
-#define SAMPLES         30      // calibration samples
-#define DELAY_SAMPLE    100     // delay between samples
-
 // timers
 #define SAMPLE_MICROS   1000000
 #define DELAY_FLAGS     250
 #define CONTROL_TIME_MS 1
-
-// channels
-#define CH0             0
-#define CH1             1
-#define CH2             2
-#define CH3             3
-
-// array of leds
-#define YELLOW          38
-#define RED             37
-#define BLUE            36
-#define GREEN           35
-#define UNK0            45
-#define UNK1            46
-
-// H bridge
-#define AIN1            11
-#define AIN2            10
-#define BIN1            12
-#define BIN2            13
-#define PWM_A           9
-#define PWM_B           14
-
-// Encoders 
-#define ENC_A0          21
-#define ENC_A1          47
-#define ENC_B0          20
-#define ENC_B1          19
-
-// Buttons
-#define BTN1            1
-#define BTN2            2
-#define BTN3            0
-
-// Buzzer
-#define BZR             6
-
-// Multiplex
-#define SIG             18
-#define C0              39
-#define C1              40
-#define C2              41
-#define C3              42
-
-// Side sensors
-#define LEFT            8 
-#define RIGHT           17
-
-// i2c devices
-#define SDA             4
-#define SCL             5
-
-// Tensao dividers
-#define BAT             7
 
 void setLeds(uint8_t bit_arr){
     digitalWrite(YELLOW, bit_arr & (1 << BIT_3));
@@ -156,7 +97,7 @@ bool configure_pins(){
     
     // log message
     #if defined(LOG_ALL) || defined(LOG_INFO)
-        Logger::IN_LOG("Pins configured", logType::INFO);
+        Logger::insert_log("Pins configured", logType::INFO);
     #endif
     
     // all pins configured

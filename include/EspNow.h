@@ -22,7 +22,7 @@ void readMacAddress(){
     uint8_t baseMac[6];
     esp_err_t ret = esp_wifi_get_mac(WIFI_IF_STA, baseMac);
     if (ret == ESP_OK) {
-        Logger::IN_LOG("This MAC Address: " +
+        Logger::insert_log("This MAC Address: " +
                         String(baseMac[0], HEX) + ":" +
                         String(baseMac[1], HEX) + ":" +
                         String(baseMac[2], HEX) + ":" +
@@ -30,7 +30,7 @@ void readMacAddress(){
                         String(baseMac[4], HEX) + ":" +
                         String(baseMac[5], HEX), logType::INFO);
     } else {
-        Logger::IN_LOG("Failed to read MAC address", logType::ERROR);
+        Logger::insert_log("Failed to read MAC address", logType::ERROR);
     }
 }
 
@@ -54,7 +54,7 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *data, int len) {
     
     // save the string to logger (convert the buffer to string)
     #if defined(LOG_ALL) || defined(LOG_INFO)
-        Logger::IN_CMD(String(buffer));
+        Logger::insert_cmd(String(buffer));
     #endif
 
     delete[] buffer;
@@ -75,7 +75,7 @@ bool configure_wifi() {
         return false;
 
     #if defined(LOG_ALL) || defined(LOG_INFO)
-        Logger::IN_LOG("WiFi configured", logType::INFO);
+        Logger::insert_log("WiFi configured", logType::INFO);
     #endif
 
     // starts ESP-NOW
@@ -83,7 +83,7 @@ bool configure_wifi() {
         return false;
 
     #if defined(LOG_ALL) || defined(LOG_INFO)
-        Logger::IN_LOG("ESP-NOW initialized successfully", logType::INFO);
+        Logger::insert_log("ESP-NOW initialized successfully", logType::INFO);
     #endif
 
     // callback to send and received commands
@@ -101,7 +101,7 @@ bool configure_wifi() {
         return false;
 
     #if defined(LOG_ALL) || defined(LOG_INFO)
-        Logger::IN_LOG("Peer added successfully", logType::INFO);
+        Logger::insert_log("Peer added successfully", logType::INFO);
     #endif
 
     // register the mac address

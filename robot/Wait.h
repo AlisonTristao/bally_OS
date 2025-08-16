@@ -15,7 +15,7 @@ name next_state_wait(uint8_t buttons){
 
         // log message
         #if defined(LOG_ALL) || defined(LOG_INFO)
-            Logger::IN_LOG("states: Wait -> Map", logType::INFO);
+            Logger::insert_log("states: Wait -> Map", logType::INFO);
         #endif
 
         return MAP;    
@@ -26,7 +26,7 @@ name next_state_wait(uint8_t buttons){
         
         // log message
         #if defined(LOG_ALL) || defined(LOG_INFO)
-            Logger::IN_LOG("states: Wait -> Calibrate", logType::INFO);
+            Logger::insert_log("states: Wait -> Calibrate", logType::INFO);
         #endif
 
         return CALIBRATE;
@@ -36,7 +36,7 @@ name next_state_wait(uint8_t buttons){
 
         // log message
         #if defined(LOG_ALL) || defined(LOG_INFO)
-            Logger::IN_LOG("states: Wait -> Run", logType::INFO);
+            Logger::insert_log("states: Wait -> Run", logType::INFO);
         #endif
 
         return RUN;

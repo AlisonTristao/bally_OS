@@ -4,6 +4,7 @@
 // header
 #include <Settings.h>
 #include <ParallelProcessing.h>
+#include <StaticObjects.h>
 
 // verify if the setup function was already called
 bool configure_ok = false;
@@ -24,9 +25,12 @@ bool setup_function() {
     if(!init_interruptions()) 
         return false;
 
+    // init static objects
+    StaticObjects::init_objects();
+
     // log message
     #if defined(LOG_ALL) || defined(LOG_INFO)
-        Logger::IN_LOG("Setup function called", logType::INFO);
+        Logger::insert_log("Setup function called", logType::INFO);
     #endif
 
     // all ok
@@ -39,7 +43,7 @@ name next_state_setup(uint8_t buttons){
     if(buttons & (1 << BIT_0)){
         // log message
         #if defined(LOG_ALL) || defined(LOG_INFO)
-            Logger::IN_LOG("states: Setup -> Wait", logType::INFO);
+            Logger::insert_log("states: Setup -> Wait", logType::INFO);
         #endif
 
         return WAIT; 

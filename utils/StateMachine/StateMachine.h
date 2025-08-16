@@ -1,13 +1,13 @@
 #ifndef STATEMACHINE_H
 #define STATEMACHINE_H
 
+// autor: Alison Tristão
+// email: AlisonTristao@hotmail.com
+
 #include <Arduino.h>
 
 // static variables
 #include <Logger.h>
-
-// autor: Alison Tristão
-// email: AlisonTristao@hotmail.com
 
 // StateMachine name
 enum name {

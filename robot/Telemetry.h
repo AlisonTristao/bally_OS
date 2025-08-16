@@ -19,16 +19,16 @@ bool telemetry_function() {
 
     // log message out
     #if defined(LOG_ALL) 
-        Logger::OUT_LOGGER(logType::NONE);
+        Logger::send_logger_register(logType::NONE);
     #else
         #if defined(LOG_TELEMETRY)
-            Logger::OUT_LOGGER(logType::TELEMETRY);
+            Logger::send_logger_register(logType::TELEMETRY);
         #elif defined(LOG_ERROR)
-            Logger::OUT_LOGGER(logType::ERROR);
+            Logger::send_logger_register(logType::ERROR);
         #elif defined(LOG_DEBUG)
-            Logger::OUT_LOGGER(logType::DEBUG);
+            Logger::send_logger_register(logType::DEBUG);
         #elif defined(LOG_INFO)
-            Logger::OUT_LOGGER(logType::INFO);
+            Logger::send_logger_register(logType::INFO);
         #endif
     #endif
 
@@ -43,7 +43,7 @@ name next_state_telemetry(uint8_t buttons){
 
         // log message
         #if defined(LOG_ALL) || defined(LOG_INFO)
-            Logger::IN_LOG("states: Telemetry -> Wait", logType::INFO);
+            Logger::insert_log("states: Telemetry -> Wait", logType::INFO);
         #endif
 
         return WAIT; 
@@ -54,7 +54,7 @@ name next_state_telemetry(uint8_t buttons){
         
         // log message
         #if defined(LOG_ALL) || defined(LOG_INFO)
-            Logger::IN_LOG("states: Telemetry -> Finish", logType::INFO);
+            Logger::insert_log("states: Telemetry -> Finish", logType::INFO);
         #endif
         
         return FINISH;

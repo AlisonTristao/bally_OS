@@ -18,7 +18,7 @@ name next_state_map(uint8_t buttons){
         
         // log message
         #if defined(LOG_ALL) || defined(LOG_INFO)
-            Logger::IN_LOG("states: Map -> Finish", logType::INFO);
+            Logger::insert_log("states: Map -> Finish", logType::INFO);
         #endif
         
         return FINISH;

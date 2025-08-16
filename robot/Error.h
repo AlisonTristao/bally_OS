@@ -18,7 +18,7 @@ name next_state_error(uint8_t buttons){
         
         // log message
         #if defined(LOG_ALL) || defined(LOG_INFO)
-            Logger::IN_LOG("states: Error -> Telemetry", logType::INFO);
+            Logger::insert_log("states: Error -> Telemetry", logType::INFO);
         #endif
     
         return TELEMETRY; 

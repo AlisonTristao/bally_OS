@@ -2,16 +2,16 @@
 #include <Settings.h>
 #include <ParallelProcessing.h>
 
-// static libraries
-#include <Flags.h>
-#include <Logger.h>
-#include <StateMachine.h>
-
 // custom libraries
 #include <ArraySensor.h>
 #include <Encoder.h>
 #include <HBridge.h>
 #include <Control.h>
+
+// static libraries
+#include <Flags.h>
+#include <Logger.h>
+#include <StateMachine.h>
 
 // state machine header
 #include <Setup.h>  
@@ -35,7 +35,7 @@ StateMachine state8(ERROR, 		error_function, 	next_state_error);
 
 void setup() {
 	// init log register
-	Logger::IN_LOG("Welcome! the car is starting...", logType::INFO);
+	Logger::insert_log("Welcome! the car is starting...", logType::INFO);
 
 	// init state machine
 	StateMachine::current_state = SETUP;

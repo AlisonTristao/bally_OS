@@ -1,17 +1,17 @@
 #ifndef LOGGER_H
 #define LOGGER_H
 
+// autor: Alison Tristão
+// email: AlisonTristao@hotmail.com
+
 #include <Arduino.h>
 #include <vector>
-#include <Settings.h>
 #include <TinyShell.h>
+#include <StaticObjects.h>
 
 // maximum message size
 #define MAX_MESSAGE_SIZE 230
 bool send_data(const uint8_t* data, size_t len);
-
-// CMD
-extern TinyShell shell;
 
 // types of logs 
 enum class logType {
@@ -38,35 +38,35 @@ class Logger {
             @param: msg -> message to be inserted
             @param: type -> type of the message
         */
-        static void IN_LOG(const String& msg, logType type) {
-            IN_LOG_impl(msg, type, millis());
+        static void insert_log(const String& msg, logType type) {
+            insert_log_impl(msg, type, millis());
         }
 
         /** 
          * @brief: register a command
          * @param: cmd -> command to be registered
         */
-        static void IN_CMD(const String& cmd) {
-            IN_CMD_impl(cmd);
+        static void insert_cmd(const String& cmd) {
+            insert_cmd_impl(cmd);
         }
 
         /*
             @brief: print all messages inserted
             @param: type -> type of the message
         */
-        static void OUT_LOGGER(logType type);
+        static void send_logger_register(logType type);
 
         /*
             @brief: clear all messages inserted 
             @param: type -> type of the message
         */
-        static void CLEAR_LOG();
+        static void clear_logger();
 
         /*
             @brief: print last message inserted 
             @param: type -> type of the message
         */
-        static void OUT_LOGGER_LIVE();
+        static void send_logger_register_live();
 
         /*
             @brief: convert logType to string
@@ -81,10 +81,10 @@ class Logger {
         static uint32_t last_index;
 
         // log message
-        static void IN_LOG_impl(const String& msg, logType type, uint32_t ts);
+        static void insert_log_impl(const String& msg, logType type, uint32_t ts);
 
         // log commands
-        static void IN_CMD_impl(const String& cmd);
+        static void insert_cmd_impl(const String& cmd);
 };
 
 #endif // LOGGER_H

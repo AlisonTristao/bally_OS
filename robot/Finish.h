@@ -18,7 +18,7 @@ name next_state_finish(uint8_t buttons){
         
         // log message
         #if defined(LOG_ALL) || defined(LOG_INFO)
-            Logger::IN_LOG("states: Finish -> Telemetry", logType::INFO);
+            Logger::insert_log("states: Finish -> Telemetry", logType::INFO);
         #endif
     
         return TELEMETRY; 
@@ -29,7 +29,7 @@ name next_state_finish(uint8_t buttons){
      
         // log message
         #if defined(LOG_ALL) || defined(LOG_INFO)
-            Logger::IN_LOG("states: Finish -> Wait", logType::INFO);
+            Logger::insert_log("states: Finish -> Wait", logType::INFO);
         #endif
      
         return WAIT;

@@ -25,8 +25,8 @@ bool calibrate_function() {
 
     // log message
     #if defined(LOG_ALL) || defined(LOG_INFO)
-        Logger::IN_LOG(("Calibrate function called: " + String(!calib ? "failed" : "success")), logType::INFO);
-        Logger::IN_LOG("Values:\n\n" + sensor.calibrate_status(), logType::INFO);
+        Logger::insert_log(("Calibrate function called: " + String(!calib ? "failed" : "success")), logType::INFO);
+        Logger::insert_log("Values:\n\n" + sensor.calibrate_status(), logType::INFO);
     #endif
 
     // error 
@@ -44,7 +44,7 @@ name next_state_calibrate(uint8_t buttons){
 
         // log message
         #if defined(LOG_ALL) || defined(LOG_INFO)
-            Logger::IN_LOG("states: Calibrate -> Wait", logType::INFO);
+            Logger::insert_log("states: Calibrate -> Wait", logType::INFO);
         #endif
 
         calibrate_ok = false;

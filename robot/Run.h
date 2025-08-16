@@ -47,11 +47,11 @@ bool create_objects_run() {
     // log message
     #if defined(LOG_ALL) || defined(LOG_INFO)
         if(obj_created_run){
-            Logger::IN_LOG("calibration loaded", logType::INFO);
-            Logger::IN_LOG("Values:\n" + sensor.calibrate_status(), logType::INFO);
+            Logger::insert_log("calibration loaded", logType::INFO);
+            Logger::insert_log("Values:\n" + sensor.calibrate_status(), logType::INFO);
         }else{
             return obj_created_run;
-            Logger::IN_LOG("calibration not loaded", logType::ERROR);
+            Logger::insert_log("calibration not loaded", logType::ERROR);
         }
     #endif
 
@@ -103,7 +103,7 @@ name next_state_run(uint8_t buttons){
     
         // log message
         #if defined(LOG_ALL) || defined(LOG_INFO)
-            Logger::IN_LOG("states: Run -> Finish", logType::INFO);
+            Logger::insert_log("states: Run -> Finish", logType::INFO);
         #endif
         
         // brake motors
@@ -128,7 +128,7 @@ name next_state_run(uint8_t buttons){
 static IRAM_ATTR void sampleISR(void* arg) {
     #if defined(LOG_ALL) || defined(LOG_TELEMETRY)
         if(!(StateMachine::current_state == RUN)) return;
-        Logger::IN_LOG(
+        Logger::insert_log(
                             String(position)            + ";" +
                             String(enc_l.getCount())    + ";" +
                             String(enc_r.getCount())    + ";" +
