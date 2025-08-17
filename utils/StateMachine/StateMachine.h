@@ -15,7 +15,7 @@ enum name {
     SETUP       = 1,
     WAIT        = 2,
     CALIBRATE   = 3,
-    MAP         = 4,
+    DEBUG       = 4,
     RUN         = 5,
     FINISH      = 6,
     TELEMETRY   = 7,

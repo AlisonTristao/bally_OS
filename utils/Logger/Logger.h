@@ -5,10 +5,10 @@
 // email: AlisonTristao@hotmail.com
 
 #include <Arduino.h>
-#include <vector>
 
 // maximum message size
 #define MAX_MESSAGE_SIZE 230
+#define MAX_MESSAGES 1024
 
 // wrapper function to send data and cmd 
 bool send_data(const uint8_t* data, size_t len);
@@ -77,8 +77,9 @@ class Logger {
         */
         static String logTypeToString(logType type);
     private:
-        // messages vector
-        static std::vector<message> messages;
+        // messages array
+        static message messages[MAX_MESSAGES];
+        static uint32_t message_count;
 
         // save the index of the last message printed
         static uint32_t last_index;
@@ -88,6 +89,9 @@ class Logger {
 
         // log commands
         static void insert_cmd_impl(const String& cmd);
+
+        // wait for the logger to be free
+        static bool mutex;
 };
 
 #endif // LOGGER_H

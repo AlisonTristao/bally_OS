@@ -35,7 +35,7 @@
 #define SECONDARY_CORE  0   // parallel processing 
 
 // timers
-#define SAMPLE_MICROS   1000000
+#define SAMPLE_MICROS   100000
 #define DELAY_FLAGS     250
 #define CONTROL_TIME_MS 1
 

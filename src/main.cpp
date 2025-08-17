@@ -17,7 +17,7 @@
 #include <Setup.h>  
 #include <Wait.h>
 #include <Calibrate.h>
-#include <Map.h>
+#include <Debug.h>
 #include <Run.h>
 #include <Finish.h>
 #include <Telemetry.h>
@@ -27,7 +27,7 @@
 StateMachine state1(SETUP, 		setup_function, 	next_state_setup);
 StateMachine state2(WAIT, 		wait_function, 		next_state_wait);	
 StateMachine state3(CALIBRATE, 	calibrate_function, next_state_calibrate);
-StateMachine state4(MAP, 		map_function, 		next_state_map);
+StateMachine state4(DEBUG, 		debug_function, 		next_state_debug);
 StateMachine state5(RUN, 		run_function, 		next_state_run);
 StateMachine state6(FINISH, 	finish_function, 	next_state_finish);
 StateMachine state7(TELEMETRY, 	telemetry_function, next_state_telemetry);

@@ -108,6 +108,12 @@ public:
      * @return the normalized values of the sensors
      */
     String debug();
+
+    /**
+     * @brief return the values of the sensors
+     * @return the values of the sensors
+     */
+    String raw();
 };
 
 #endif // ARRAYSENSOR_H

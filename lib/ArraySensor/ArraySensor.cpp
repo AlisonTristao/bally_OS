@@ -112,7 +112,14 @@ double ArraySensor::read_line(){
 String ArraySensor::debug(){
     String status;
     for(uint8_t i = 0; i < len; i++)
-        status += String(normalize((i), i)) + "\t";
+        status += String(normalize((read(i)), i)) + "\t";
+    return status;
+}
+
+String ArraySensor::raw(){
+    String status;
+    for(uint8_t i = 0; i < len; i++)
+        status += String(read(i)) + "\t";
     return status;
 }
 

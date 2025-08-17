@@ -22,10 +22,10 @@ name next_state_wait(uint8_t buttons){
 
         // log message
         #if defined(LOG_ALL) || defined(LOG_INFO)
-            Logger::insert_log("states: Wait -> Map", logType::INFO);
+            Logger::insert_log("states: Wait -> Debug", logType::INFO);
         #endif
 
-        return MAP;    
+        return DEBUG;    
     }
 
     // if button 2 is pressed
