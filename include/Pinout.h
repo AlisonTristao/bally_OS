@@ -16,10 +16,10 @@
 #define UNK1            46
 
 // -------------------- H Bridge --------------------
-#define AIN1            11
-#define AIN2            10
-#define BIN1            12
-#define BIN2            13
+#define AIN1            13
+#define AIN2            12
+#define BIN1            11
+#define BIN2            10
 #define PWM_A           9
 #define PWM_B           14
 

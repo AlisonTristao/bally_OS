@@ -65,7 +65,7 @@ uint8_t wrapper_test() {
     return RESULT_OK;  // return 0 to indicate success
 }
 
-uint8_t apply_pwm(int32_t pwm_left, int32_t pwm_right) {
+uint8_t apply_pwm(int32_t pwm_right, int32_t pwm_left) {
     // apply PWM to motors
     StaticObjects::motor_left.applyPWM(pwm_left);
     StaticObjects::motor_right.applyPWM(pwm_right);

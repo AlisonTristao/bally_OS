@@ -49,9 +49,6 @@ void Logger::send_logger(logType type) {
 
 // clear logger
 void Logger::clear_logger() {
-    // wait for the logger to be free
-    while(!mutex);
-
     // lock
     mutex = false;
 
@@ -68,16 +65,9 @@ void Logger::clear_logger() {
 
 // print all messages
 void Logger::send_logger_live() {
-    // wait for the logger to be free
-    while(!mutex);
-
-    // lock
-    mutex = false;
-
     // send all messages after last_index
-    for (; last_index < message_count; ++last_index) 
+    for (; last_index < message_count; ++last_index) {
+        if (!mutex) return;
         send_data(reinterpret_cast<const uint8_t*>(&messages[last_index]), sizeof(messages[last_index]));
-
-    // unlock
-    mutex = true;
+    }
 }
