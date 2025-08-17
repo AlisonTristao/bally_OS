@@ -60,13 +60,6 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *data, int len) {
     delete[] buffer;
 }
 
-bool send_data(const uint8_t *data, size_t len) {
-    // send data using esp_now
-    uint8_t peer_mac[] = MAC_ADDR; // Use the defined MAC address
-    esp_err_t result = esp_now_send(peer_mac, data, len);
-    return result == ESP_OK;
-}
-
 bool configure_wifi() {
     // turn on the wifi
     WiFi.mode(WIFI_STA);

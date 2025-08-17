@@ -21,7 +21,7 @@ bool StateMachine::run(){
     // return if function not defined
     if(!arr_states[current_state]){
         // log message
-        Logger::insert_log("State not defined", logType::ERROR);
+        log_error_state_machine("State not defined");
         return false;
     }
 
@@ -31,14 +31,14 @@ bool StateMachine::run(){
         result = arr_states[current_state]->action();
     } catch(const std::exception& e) {
         // LOGGER erro
-        Logger::insert_log("Error in the state machine", logType::ERROR);
-        Logger::insert_log(e.what(), logType::ERROR);
+        log_error_state_machine("Error in the state machine");
+        log_error_state_machine(e.what());
         return false;
     }
 
     if(!result){
         // LOGGER erro
-        Logger::insert_log("State function returned false", logType::ERROR);
+        log_error_state_machine("State function returned false");
         return false;
     }
 
@@ -50,7 +50,7 @@ void StateMachine::next(uint8_t buttons){
     // return if function not defined
     if(!arr_states[current_state]){
         // LOGGER erro
-        Logger::insert_log("State not defined", logType::ERROR);
+        log_error_state_machine("State not defined");
         return;
     }
     

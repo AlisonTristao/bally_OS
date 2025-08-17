@@ -6,8 +6,8 @@
 
 #include <Arduino.h>
 
-// static variables
-#include <Logger.h>
+// wrapper function to log error messages
+void log_error_state_machine(const char* message);
 
 // StateMachine name
 enum name {

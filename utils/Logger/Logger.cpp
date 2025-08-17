@@ -30,31 +30,25 @@ void Logger::insert_log_impl(const String& msg, logType type, uint32_t ts) {
 }
 
 void Logger::insert_cmd_impl(const String& cmd) {
-    String result = StaticObjects::shell.run_line_command(string(cmd.c_str())).c_str();
-    Logger::insert_log(result, logType::CMD);
+    run_command(cmd);
 }
 
 // print messages
-void Logger::send_logger_register(logType type) {
-    // send all messages to espnow
-    for (auto m : messages) {
-        if (m.type == type)
-            send_data((const uint8_t *) &m, sizeof(m));
-    }
+void Logger::send_logger(logType type) {
+    for (size_t i = 0; i < messages.size(); ++i)
+        if (messages[i].type == type || type == logType::NONE)
+            send_data(reinterpret_cast<const uint8_t*>(&messages[i]), sizeof(messages[i]));
 }
 
-// clear log
+// clear logger
 void Logger::clear_logger() {
     // clear all messages
     messages.clear();
 }
 
 // print all messages
-void Logger::send_logger_register_live() {
-    // send all new messages to espnow
-    for (uint32_t i = last_index; i < messages.size(); i++)
-        send_data((const uint8_t *) &messages[i], sizeof(messages[i]));
-
-    // update last index
-    last_index = messages.size();
+void Logger::send_logger_live() {
+    // send all messages after last_index
+    for (; last_index < messages.size(); ++last_index)
+        send_data(reinterpret_cast<const uint8_t*>(&messages[last_index]), sizeof(messages[last_index]));
 }

@@ -5,7 +5,8 @@
 // email: AlisonTristao@hotmail.com
 
 #include <Arduino.h>
-#include <Pinout.h>  
+#include <Pinout.h> 
+ 
 // custom libraries
 #include <ArraySensor.h>
 #include <Encoder.h>

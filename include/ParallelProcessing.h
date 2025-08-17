@@ -7,6 +7,7 @@
 
 // header 
 #include <Settings.h>
+#include <Wrapper.h>
 
 // static libraries
 #include <Flags.h>
@@ -87,7 +88,7 @@ void routine(void *param){
 	while(true) {	
         // logger print live
         #ifdef LOG_VERBOSE
-            Logger::send_logger_register_live();
+            Logger::send_logger_live();
         #endif
 
 		// check flags duration

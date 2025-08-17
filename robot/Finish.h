@@ -1,12 +1,13 @@
 #ifndef FINISH_H
 #define FINISH_H
 
-bool finish_function() {
-    /**********************************
-    
-        Finish the robot here
+// static objects
+#include <StaticObjects.h>
 
-    ***********************************/
+bool finish_function() {
+    // stop the robot
+    StaticObjects::motor_left.brake();
+    StaticObjects::motor_right.brake();
 
     // finish the robot
     return true;

@@ -12,23 +12,18 @@ bool telemetry_function() {
     if (telemetry_ok)
         return true;
 
-    // return if live is active
-    #ifdef LOG_VERBOSE
-        return true;
-    #endif
-
     // log message out
     #if defined(LOG_ALL) 
-        Logger::send_logger_register(logType::NONE);
+        Logger::send_logger(logType::NONE);
     #else
         #if defined(LOG_TELEMETRY)
-            Logger::send_logger_register(logType::TELEMETRY);
+            Logger::send_logger(logType::TELEMETRY);
         #elif defined(LOG_ERROR)
-            Logger::send_logger_register(logType::ERROR);
+            Logger::send_logger(logType::ERROR);
         #elif defined(LOG_DEBUG)
-            Logger::send_logger_register(logType::DEBUG);
+            Logger::send_logger(logType::DEBUG);
         #elif defined(LOG_INFO)
-            Logger::send_logger_register(logType::INFO);
+            Logger::send_logger(logType::INFO);
         #endif
     #endif
 
@@ -46,6 +41,7 @@ name next_state_telemetry(uint8_t buttons){
             Logger::insert_log("states: Telemetry -> Wait", logType::INFO);
         #endif
 
+        telemetry_ok = false;
         return WAIT; 
     }
 
@@ -56,7 +52,8 @@ name next_state_telemetry(uint8_t buttons){
         #if defined(LOG_ALL) || defined(LOG_INFO)
             Logger::insert_log("states: Telemetry -> Finish", logType::INFO);
         #endif
-        
+
+        telemetry_ok = false;
         return FINISH;
     }
     

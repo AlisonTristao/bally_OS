@@ -7,6 +7,9 @@
 // custom libraries
 #include <ArraySensor.h>
 
+// static library
+#include <StaticObjects.h>
+
 // verify if the calibrate function was already called
 bool calibrate_ok = false;
 
@@ -15,18 +18,14 @@ bool calibrate_function() {
     if (calibrate_ok)
         return true;    
 
-    // create the sensor object
-    ArraySensor sensor(LEN_SENSOR, SIG, C0, C1, C2, C3);
-    sensor.init(INIT_MUX);
-
     // calibrate the sensors
-    bool calib = sensor.calibrate(SAMPLES, DELAY_SAMPLE);             
-    if(calib) sensor.saveCalibration();
+    bool calib = StaticObjects::array_sensor.calibrate(SAMPLES, DELAY_SAMPLE);
+    if(calib) StaticObjects::array_sensor.saveCalibration();
 
     // log message
     #if defined(LOG_ALL) || defined(LOG_INFO)
         Logger::insert_log(("Calibrate function called: " + String(!calib ? "failed" : "success")), logType::INFO);
-        Logger::insert_log("Values:\n\n" + sensor.calibrate_status(), logType::INFO);
+        Logger::insert_log("Values:\n\n" + StaticObjects::array_sensor.calibrate_status(), logType::INFO);
     #endif
 
     // error 

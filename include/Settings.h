@@ -14,6 +14,9 @@
 // native libraries
 #include <Arduino.h>
 
+// wrapper
+#include <Wrapper.h>
+
 // header
 #include <Pinout.h>
 #include <EspNow.h>
@@ -22,9 +25,6 @@
 #include <Flags.h>
 #include <Logger.h>
 #include <StateMachine.h>
-
-// wrapper
-#include <Wrapper.h>
 
 // sampling activation
 // -> SAMPLING_ACTIVE

@@ -6,12 +6,15 @@
 
 #include <Arduino.h>
 #include <vector>
-#include <TinyShell.h>
-#include <StaticObjects.h>
 
 // maximum message size
 #define MAX_MESSAGE_SIZE 230
+
+// wrapper function to send data and cmd 
 bool send_data(const uint8_t* data, size_t len);
+
+// wrapper function to run commands
+void run_command(const String& cmd);
 
 // types of logs 
 enum class logType {
@@ -54,7 +57,7 @@ class Logger {
             @brief: print all messages inserted
             @param: type -> type of the message
         */
-        static void send_logger_register(logType type);
+        static void send_logger(logType type);
 
         /*
             @brief: clear all messages inserted 
@@ -66,7 +69,7 @@ class Logger {
             @brief: print last message inserted 
             @param: type -> type of the message
         */
-        static void send_logger_register_live();
+        static void send_logger_live();
 
         /*
             @brief: convert logType to string

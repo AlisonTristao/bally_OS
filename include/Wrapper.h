@@ -1,10 +1,51 @@
 #ifndef WRAPPER_H
 #define WRAPPER_H
 
+// native libraries
 #include <Arduino.h>
+
+// header
+#include <EspNow.h>
+
+// static libraries
 #include <TinyShell.h>
 #include <Logger.h>
 #include <StaticObjects.h>
+#include <StateMachine.h>
+
+// wrapper function to log error messages
+void log_error_state_machine(const char* message) {
+    Logger::insert_log(message, logType::ERROR);
+}
+
+// wrapper functions for shell commands
+void run_command(const String& cmd) {
+    // run the command using TinyShell
+    String result = StaticObjects::shell.run_line_command(cmd.c_str()).c_str();
+
+    // log the command result
+    #if defined(LOG_ALL) || defined(LOG_CMD)
+        Logger::insert_log(result, logType::CMD);
+    #endif
+}
+
+// wrapper function to send data and cmd
+bool send_data(const uint8_t *data, size_t len) {
+    // send data using esp_now
+    uint8_t peer_mac[] = MAC_ADDR; // Use the defined MAC address
+    esp_err_t result = esp_now_send(peer_mac, data, len);
+    return result == ESP_OK;
+}
+
+static IRAM_ATTR void sampleISR(void* arg) {
+    #if defined(LOG_ALL) || defined(LOG_TELEMETRY)
+        if(!(StateMachine::current_state == RUN)) return;
+        Logger::insert_log(
+                            String(StaticObjects::encoder_left.getCount())    + ";" +
+                            String(StaticObjects::encoder_right.getCount()),
+                            logType::TELEMETRY);
+    #endif
+}
 
 uint8_t wrapper_h() {
     // get help

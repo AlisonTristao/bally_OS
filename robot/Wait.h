@@ -4,7 +4,14 @@
 // header
 #include <Settings.h>
 
+// static libraries
+#include <StaticObjects.h>
+
 bool wait_function() {
+    // motor pwm 0
+    StaticObjects::motor_left.applyPWM(0);
+    StaticObjects::motor_right.applyPWM(0);
+
     // wait for the next state
     return true;
 }
