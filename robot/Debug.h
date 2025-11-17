@@ -7,12 +7,12 @@
 
 bool debug_function() {
     // encoder left and encoder right
-    string enc_l = String(StaticObjects::encoder_left.getCount()).c_str();
-    string enc_r = String(StaticObjects::encoder_right.getCount()).c_str();
+    //string enc_l = String(StaticObjects::encoder_left.getCount()).c_str();
+    //string enc_r = String(StaticObjects::encoder_right.getCount()).c_str();
 
     // log message
     #if defined(LOG_ALL) || defined(LOG_INFO)
-        Logger::insert_log((enc_l + " " + enc_r).c_str(), logType::INFO);
+        Logger::insert_log((StaticObjects::array_sensor.debug()).c_str(), logType::INFO);
     #endif
 
     delay(10);

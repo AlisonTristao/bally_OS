@@ -16,7 +16,10 @@ private:
     /**
      * @brief pins of the sensor and multiplexer
      */
-    uint8_t sig, c0, c1, c2, c3, len, init_arr;
+    //uint8_t sig, c0, c1, c2, c3, len, init_arr;
+    // using no mux
+    uint8_t* arr;
+    uint8_t len;
 
     /**
      * @brief saves the last position of the line when line not found
@@ -58,7 +61,7 @@ public:
      * @param c2: control pin 2
      * @param c3: control pin 3
      */
-    ArraySensor(uint8_t len, uint8_t sig, uint8_t c0, uint8_t c1, uint8_t c2, uint8_t c3);
+    ArraySensor(uint8_t* arr, uint8_t len);
     virtual ~ArraySensor();
 
     /**
@@ -66,11 +69,6 @@ public:
      * @return true if the calibration is ok
      */
     bool calibration_ok();
-
-    /**
-     * @brief set the initial array to read the sensors using a multiplexer
-     */
-    void init(uint8_t init_arr = 0);
 
     /**
      * @brief calibrate the sensors - read the sensors and save the min and max values

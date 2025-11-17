@@ -24,13 +24,13 @@ bool result_interrupt = false;
 
 void configure_interruptions(void *param){
     // set the buttons interruptions
-    attachInterrupt(digitalPinToInterrupt(BTN1), Signals_IN::isrBtn0, FALLING);
+    /*attachInterrupt(digitalPinToInterrupt(BTN1), Signals_IN::isrBtn0, FALLING);
     attachInterrupt(digitalPinToInterrupt(BTN2), Signals_IN::isrBtn1, FALLING);
     attachInterrupt(digitalPinToInterrupt(BTN3), Signals_IN::isrBtn2, FALLING);
 
     // set the side sensors interruptions
     attachInterrupt(digitalPinToInterrupt(LEFT), Signals_IN::isrsideSensor0, RISING);
-    attachInterrupt(digitalPinToInterrupt(RIGHT), Signals_IN::isrsideSensor1, RISING);
+    attachInterrupt(digitalPinToInterrupt(RIGHT), Signals_IN::isrsideSensor1, RISING);*/
 
     // set the timer interruptions
     #ifdef SAMPLING_ACTIVE
@@ -95,7 +95,7 @@ void routine(void *param){
 		Signals_IN::checkFlagsDuration();
 
         // set leds according to the state machine
-        setLeds(Signals_IN::getLeds());
+        //setLeds(Signals_IN::getLeds());
 
 		// verify if the state machine needs to be updated
 		if(millis() - timer_state_machine > DELAY_FLAGS){

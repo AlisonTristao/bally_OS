@@ -11,7 +11,7 @@
 #include <Control.h>
 
 // pwm maximo 
-int16_t PWM = 87;
+int16_t PWM = 55;
 
 uint32_t timer_ms = 0;
 
@@ -25,7 +25,7 @@ bool run_function() {
     double position = (StaticObjects::array_sensor.read_line() - 4500)/100;
 
     // calcula o controle das rodas
-    double pd_w = StaticObjects::control.simplePD(5, 0.2, position, CONTROL_TIME_MS/1000.0);
+    double pd_w = StaticObjects::control.simplePD(4.0, 0.20, position, CONTROL_TIME_MS/1000.0);
 
     // velocidade total das rodas
     double velLeft  = PWM;  // mudar para pwmLeft
@@ -34,6 +34,11 @@ bool run_function() {
     // aplica o double pd_w nas rodas
     velRight = PWM - pd_w;
     velLeft  = PWM + pd_w;
+
+    // sat
+    if(velLeft > 2*PWM)        velLeft = 2*PWM;
+    if(velLeft < -2*PWM)       velLeft = -2*PWM;    
+    
 
     StaticObjects::motor_left.applyPWM((int32_t)velLeft);
     StaticObjects::motor_right.applyPWM((int32_t)velRight);

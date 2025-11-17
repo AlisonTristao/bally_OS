@@ -16,6 +16,7 @@ bool setup_function() {
 
     // init communication 
     Serial.begin(921600);  
+    delay(100);
 
     // init pins direction, settings, i2c communication...
     if(!init_structure()) 
@@ -40,7 +41,7 @@ bool setup_function() {
 
 name next_state_setup(uint8_t buttons){
     // if button 1 is pressed
-    if(buttons & (1 << BIT_0)){
+    if(buttons & (1 << BIT_0) || configure_ok){
         // log message
         #if defined(LOG_ALL) || defined(LOG_INFO)
             Logger::insert_log("states: Setup -> Wait", logType::INFO);

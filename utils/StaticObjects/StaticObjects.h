@@ -20,8 +20,8 @@ class StaticObjects {
 public:
     // static objects
     static ArraySensor array_sensor;
-    static Encoder encoder_left;
-    static Encoder encoder_right;
+    //static Encoder encoder_left;
+    //static Encoder encoder_right;
     static HBridge motor_left;
     static HBridge motor_right;
     static Control control;
@@ -29,9 +29,9 @@ public:
 
     static void init_objects() {
         // initialize all static objects
-        array_sensor.init(INIT_MUX);
-        encoder_left.init();
-        encoder_right.init();
+        //array_sensor.init(INIT_MUX);
+        //encoder_left.init();
+        //encoder_right.init();
         motor_left.init();
         motor_right.init();
     }

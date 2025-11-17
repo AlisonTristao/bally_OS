@@ -28,7 +28,7 @@
 
 // sampling activation
 // -> SAMPLING_ACTIVE
-#define SAMPLING_ACTIVE
+//#define SAMPLING_ACTIVE
 
 // esp32 core 
 #define PRIMARY_CORE    1   // void loop
@@ -39,23 +39,23 @@
 #define DELAY_FLAGS     250
 #define CONTROL_TIME_MS 1
 
-void setLeds(uint8_t bit_arr){
+/*void setLeds(uint8_t bit_arr){
     digitalWrite(YELLOW, bit_arr & (1 << BIT_3));
     digitalWrite(RED, bit_arr & (1 << BIT_2));
     digitalWrite(BLUE, bit_arr & (1 << BIT_1));
     digitalWrite(GREEN, bit_arr & (1 << BIT_0));
     //digitalWrite(UNK0, bit_arr & (1 << BIT_4));
     //digitalWrite(UNK1, bit_arr & (1 << BIT_5));
-}
+}*/
 
 bool configure_pins(){
     // array of leds
-    pinMode(YELLOW, OUTPUT);
+    /*pinMode(YELLOW, OUTPUT);
     pinMode(RED, OUTPUT);
     pinMode(BLUE, OUTPUT);
     pinMode(GREEN, OUTPUT);
     pinMode(UNK0, OUTPUT);
-    pinMode(UNK1, OUTPUT);
+    pinMode(UNK1, OUTPUT);*/
 
     // H bridge
     pinMode(AIN1, OUTPUT);
@@ -66,7 +66,7 @@ bool configure_pins(){
     pinMode(PWM_B, OUTPUT);
 
     // Encoders
-    pinMode(ENC_A0, INPUT);
+    /*pinMode(ENC_A0, INPUT);
     pinMode(ENC_A1, INPUT);
     pinMode(ENC_B0, INPUT);
     pinMode(ENC_B1, INPUT);
@@ -101,7 +101,8 @@ bool configure_pins(){
     #endif
     
     // all pins configured
-    return i2c;
+    return i2c;*/
+    return true;
 }
 
 bool init_structure() {

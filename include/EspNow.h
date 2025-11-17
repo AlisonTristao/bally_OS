@@ -21,6 +21,8 @@ void readMacAddress(){
     // logger the mac address
     uint8_t baseMac[6];
     esp_err_t ret = esp_wifi_get_mac(WIFI_IF_STA, baseMac);
+    Serial.print("MAC Address: ");
+    Serial.printf("%02X:%02X:%02X:%02X:%02X:%02X\n", baseMac[0], baseMac[1], baseMac[2], baseMac[3], baseMac[4], baseMac[5]);
     if (ret == ESP_OK) {
         Logger::insert_log("This MAC Address: " +
                         String(baseMac[0], HEX) + ":" +

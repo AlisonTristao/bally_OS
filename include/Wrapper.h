@@ -40,10 +40,10 @@ bool send_data(const uint8_t *data, size_t len) {
 static IRAM_ATTR void sampleISR(void* arg) {
     #if defined(LOG_ALL) || defined(LOG_TELEMETRY)
         if(!(StateMachine::current_state == RUN)) return;
-        Logger::insert_log(
+        /*Logger::insert_log(
                             String(StaticObjects::encoder_left.getCount())    + ";" +
                             String(StaticObjects::encoder_right.getCount()),
-                            logType::TELEMETRY);
+                            logType::TELEMETRY);*/
     #endif
 }
 
@@ -77,12 +77,26 @@ uint8_t apply_pwm(int32_t pwm_right, int32_t pwm_left) {
     return RESULT_OK;  // return 0 to indicate success
 }
 
+uint8_t set_state_control(uint8_t state) {
+    StateMachine::current_state = state;
+
+    // log the state change
+    #if defined(LOG_ALL) || defined(LOG_INFO)
+        Logger::insert_log("State machine changed to state: " + String(state), logType::INFO);
+    #endif
+
+    return RESULT_OK;  // return 0 to indicate success
+}
+
 bool start_shell() {
     StaticObjects::shell.create_module("help", "Module for help and information");
     StaticObjects::shell.add(wrapper_h, "h", "List all modules", "help");
 
     StaticObjects::shell.create_module("HB", "Module for H-Bridge control");
     StaticObjects::shell.add(apply_pwm, "apply_pwm", "Apply PWM to motors", "HB");
+
+    StaticObjects::shell.create_module("state_machine", "Module for state control");
+    StaticObjects::shell.add(set_state_control, "set_state", "Set the current state of the state machine", "state_machine");
 
     #if defined(LOG_ALL) || defined(LOG_INFO)
         Logger::insert_log("Shell started", logType::CMD);

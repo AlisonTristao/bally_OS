@@ -1,12 +1,10 @@
 #include "ArraySensor.h"
 
-ArraySensor::ArraySensor(uint8_t len, uint8_t sig, uint8_t c0, uint8_t c1, uint8_t c2, uint8_t c3){
+ArraySensor::ArraySensor(uint8_t* arr, uint8_t len){
     this->len = len;
-    this->sig = sig;
-    this->c0 = c0;
-    this->c1 = c1;
-    this->c2 = c2;
-    this->c3 = c3;
+    this->arr = new uint8_t[len];
+    for(uint8_t i = 0; i < len; i++)
+        this->arr[i] = arr[i];
     // init arrays
     min = new uint16_t[len];
     max = new uint16_t[len];
@@ -22,22 +20,9 @@ ArraySensor::~ArraySensor(){
     delete[] max;
 }
 
-void ArraySensor::init(uint8_t init_arr){
-    this->init_arr = init_arr;
-}
-
 uint16_t ArraySensor::read(uint8_t index){
-    // set the index of the sensor
-    index = index + init_arr;
-
-    // set the mux to read the sensor
-    digitalWrite(c0, bitRead(index, 0));
-    digitalWrite(c1, bitRead(index, 1));
-    digitalWrite(c2, bitRead(index, 2));
-    digitalWrite(c3, bitRead(index, 3));
-
     // if the line is black, invert the value
-    return 4095 - analogRead(sig);
+    return 4095 - analogRead(arr[index]);
 }
 
 int16_t ArraySensor::normalize(uint16_t value, uint8_t index){
@@ -112,7 +97,7 @@ double ArraySensor::read_line(){
 String ArraySensor::debug(){
     String status;
     for(uint8_t i = 0; i < len; i++)
-        status += String(normalize((read(i)), i)) + "\t";
+        status += String(read(i)) + "\t";
     return status;
 }
 
