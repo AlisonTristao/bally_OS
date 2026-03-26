@@ -57,3 +57,5 @@ Essa organização garante que as funcionalidades críticas sejam executadas com
 # Fluxo da Máquina de Estados  
 
 ![Fluxo da Máquina de Estados](StateMachine_flux.png)
+
+25032026
