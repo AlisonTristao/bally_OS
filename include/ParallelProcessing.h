@@ -74,7 +74,7 @@ void routine(void *param){
     delay(DELAY_FLAGS);
 
 	// set the filter time for flags 
-	Signals_IN::setFilterTime(DELAY_FLAGS); 
+    ROBOT::setFlagFilterTime(DELAY_FLAGS); 
 
 	// timer of state machine actualization
 	uint32_t timer_state_machine = millis();
@@ -88,25 +88,23 @@ void routine(void *param){
 	while(true) {	
         // logger print live
         #ifdef LOG_VERBOSE
-            Logger::send_logger_live();
+            ROBOT::sendLoggerLive();
         #endif
 
 		// check flags duration
-		Signals_IN::checkFlagsDuration();
+		ROBOT::checkFlagsDuration();
 
         // set leds according to the state machine
         //setLeds(Signals_IN::getLeds());
 
-		// verify if the state machine needs to be updated
+        // keep periodic debug prints without changing state here
 		if(millis() - timer_state_machine > DELAY_FLAGS){
-			// update state machine
-			StateMachine::next(Signals_IN::getButtons());
 			timer_state_machine = millis();
 
             // log message
             #ifdef LOG_DEBUG
-                Logger::insert_log("Butoes: " + String(Signals_IN::getButtons()) + "\t" + 
-                                    "Sensores laterais: " + String(Signals_IN::getSideSensors()) , logType::INFO);
+                Logger::insert_log("Butoes: " + String(ROBOT::getButtons()) + "\t" + 
+                                    "Sensores laterais: " + String(ROBOT::getSideSensors()) , logType::INFO);
             #endif
 		}
 		// sample delay... (wait for the whatchdog to be ready) 

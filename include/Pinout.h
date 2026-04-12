@@ -23,6 +23,12 @@
 #define BIN2            39
 #define PWM_B           40
 
+// -------------------- RGB LED (ESP32-S3 SPI) --------------------
+#define LED_RGB_MOSI    11      // SPI MOSI
+#define LED_RGB_MISO    13      // SPI MISO (optional)
+#define LED_RGB_SCK     12      // SPI SCK
+#define LED_RGB_CS      10      // SPI Chip Select
+
 // -------------------- Encoders --------------------
 /*#define ENC_A0          21
 #define ENC_A1          47

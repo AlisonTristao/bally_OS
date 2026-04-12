@@ -1,21 +1,35 @@
 #ifndef ESPNOW_H
 #define ESPNOW_H
 
-// native libraries
+// ==================== SYSTEM & FRAMEWORK ====================
 #include <esp_now.h>
 #include <esp_wifi.h>
-#include <Wire.h>
 #include <WiFi.h>
+#include <Wire.h>
+#include <Arduino.h>
 
-// header
+// ==================== PROJECT HEADERS ====================
 #include <Settings.h>
+#include <Pinout.h>
 
-// static libraries
+// ==================== UTILITIES & LOGGING ====================
 #include <Flags.h>
 #include <Logger.h>
 
+// ==================== EXTERNAL LIBRARIES ====================
+#include <EspNowManager.h>
+
+// ==================== ROBOT MODULES ====================
+#include <RGBLed.h>
+
 // espnow mac address to send
 #define MAC_ADDR {0xDC, 0xDA, 0x0C, 0x30, 0xAA, 0x5C}
+
+// Global ESP-NOW manager instance
+EspNowManager espNowManager;
+
+// Global RGB LED instance
+RGBLed rgbLed;
 
 void readMacAddress(){
     // logger the mac address
@@ -38,31 +52,41 @@ void readMacAddress(){
 
 // 📤 Callback de envio
 void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
-    // led sinalization
-    if (status == ESP_NOW_SEND_SUCCESS)
-        Signals_IN::setLed0on();
-    else
-        Signals_IN::setLed2on();
+    (void)mac_addr;
+
+    // Keep callback side-effect free for telemetry logger flow.
+    if (status == ESP_NOW_SEND_SUCCESS) {
+        rgbLed.setGreen();
+    } else {
+        rgbLed.setRed();
+    }
 }
 
-void OnDataRecv(const uint8_t *mac_addr, const uint8_t *data, int len) {
-    // led sinalization
-    Signals_IN::setLed3on();
+// 📥 Callback de recebimento
+void OnDataRecv(const uint8_t *mac_addr, const EspNowManager::message& incomingData) {
+    (void)mac_addr;
 
-    // messege received 
-    char *buffer = new char[len + 1];  // +1 para o terminador '\0'
-    memcpy(buffer, data, len);
-    buffer[len] = '\0';
-    
-    // save the string to logger (convert the buffer to string)
-    #if defined(LOG_ALL) || defined(LOG_INFO)
+    rgbLed.setBlue();
+
+    char buffer[EspNowManager::MESSAGE_TEXT_SIZE + 1] = {0};
+    memcpy(buffer, incomingData.msg, EspNowManager::MESSAGE_TEXT_SIZE);
+    buffer[EspNowManager::MESSAGE_TEXT_SIZE] = '\0';
+
+    // Keep command path compatible with existing shell flow.
+    if (incomingData.type == EspNowManager::logType::INFO || incomingData.type == EspNowManager::logType::NONE) {
         Logger::insert_cmd(String(buffer));
-    #endif
-
-    delete[] buffer;
+    }
 }
 
 bool configure_wifi() {
+    // Initialize RGB LED first
+    if (!rgbLed.begin()) {
+        Logger::insert_log("Failed to initialize RGB LED", logType::ERROR);
+        return false;
+    }
+    
+    rgbLed.setYellow(); // Indicar que está inicializando
+
     // turn on the wifi
     WiFi.mode(WIFI_STA);
 
@@ -74,25 +98,20 @@ bool configure_wifi() {
     #endif
 
     // starts ESP-NOW
-    if (esp_now_init() != ESP_OK)
+    if (!espNowManager.begin(0, false))
         return false;
 
     #if defined(LOG_ALL) || defined(LOG_INFO)
         Logger::insert_log("ESP-NOW initialized successfully", logType::INFO);
     #endif
 
-    // callback to send and received commands
-    esp_now_register_send_cb(OnDataSent);
-    esp_now_register_recv_cb(OnDataRecv);
+    // register callbacks for send and receive
+    espNowManager.setReceiveCallback(OnDataRecv);
+    espNowManager.setSendCallback(OnDataSent);
 
     // add the peer 
-    esp_now_peer_info_t peerInfo;
     uint8_t peerAddress[] = MAC_ADDR;
-    memcpy(peerInfo.peer_addr, peerAddress, 6);
-    peerInfo.channel = 0;
-    peerInfo.encrypt = false;
-
-    if (esp_now_add_peer(&peerInfo) != ESP_OK) 
+    if (!espNowManager.addDevice(peerAddress, "peer", "Remote peer"))
         return false;
 
     #if defined(LOG_ALL) || defined(LOG_INFO)
@@ -101,6 +120,9 @@ bool configure_wifi() {
 
     // register the mac address
     readMacAddress();
+    
+    // Signal that WiFi is ready
+    rgbLed.setGreen();
 
     // all ok
     return true;
