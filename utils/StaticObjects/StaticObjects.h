@@ -1,40 +1,66 @@
-#ifndef STATIC_OBJECTS
-#define STATIC_OBJECTS
+#ifndef ROBOT_STATIC_OBJECTS_H
+#define ROBOT_STATIC_OBJECTS_H
 
-// autor: Alison Tristão
-// email: AlisonTristao@hotmail.com
-
+// ==================== SYSTEM ====================
 #include <Arduino.h>
+
+// ==================== PROJECT HEADERS ====================
 #include <Pinout.h> 
- 
-// custom libraries
+
+// ==================== CUSTOM MODULES ====================
 #include <ArraySensor.h>
 #include <Encoder.h>
 #include <HBridge.h>
 #include <Control.h>
+
+// ==================== EXTERNAL LIBRARIES ====================
 #include <TinyShell.h> 
+
+// ==================== UTILITIES ====================
+#include <Flags.h>
+#include <Logger.h>
+#include <StateMachine.h>
 
 using namespace std;
 
-class StaticObjects {
+// ==================== ROBOT CORE CLASS ====================
+class ROBOT {
 public:
-    // static objects
-    static ArraySensor array_sensor;
-    //static Encoder encoder_left;
-    //static Encoder encoder_right;
-    static HBridge motor_left;
-    static HBridge motor_right;
-    static Control control;
-    static TinyShell shell;
+    static void init();
 
-    static void init_objects() {
-        // initialize all static objects
-        //array_sensor.init(INIT_MUX);
-        //encoder_left.init();
-        //encoder_right.init();
-        motor_left.init();
-        motor_right.init();
-    }
+    static void applyStateOutputs(uint8_t state);
+
+    static void stopMotors();
+    static void brakeMotors();
+    static void applyMotorPWM(int32_t pwmLeft, int32_t pwmRight);
+
+    static double readLine();
+    static bool calibrateSensors(uint8_t samples, uint8_t delayMs);
+    static void saveCalibration();
+    static String calibrateStatus();
+    static String debugSensors();
+
+    static double controlSimplePD(double kp, double kd, double error, double sample);
+
+    static void log(const String& msg, logType type);
+    static void logStateMachineError(const char* message);
+    static void sendLogger(logType type);
+    static void sendLoggerLive();
+
+    static void setFlagFilterTime(uint32_t timeMs);
+    static void checkFlagsDuration();
+    static uint8_t getButtons();
+    static uint8_t getSideSensors();
+
+    static TinyShell& shell();
+    static String runLineCommand(const String& cmd);
+
+private:
+    static ArraySensor array_sensor_;
+    static HBridge motor_left_;
+    static HBridge motor_right_;
+    static Control control_;
+    static TinyShell shell_;
 };
 
 #endif

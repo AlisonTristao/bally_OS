@@ -6,9 +6,6 @@
 
 #include <Arduino.h>
 
-// wrapper function to log error messages
-void log_error_state_machine(const char* message);
-
 // StateMachine name
 enum name {
     NONE        = 0,
@@ -30,14 +27,23 @@ enum name {
 
 class StateMachine{
     public:
+        using ErrorCallback = void (*)(const char* message);
+        using StateOutputCallback = void (*)(uint8_t state);
+        using InputCallback = uint8_t (*)();
+
         /**
          * @brief constructor of the state machine
          * @param state: the state of the state machine
-         * @param action: the function to be executed in the state
-         * @param next_state: the function to verify the next state
+         * @param action: state action that returns the next state
+         * @param next_state: state transition function based on inputs (buttons)
          */
-        StateMachine(name state, bool (*action)(), name (*next_state)(uint8_t buttons));
+        StateMachine(name state, name (*action)(), name (*next_state)(uint8_t buttons) = nullptr);
         ~StateMachine(){};
+
+        /**
+         * @brief sets callback for state machine errors
+         */
+        static void setErrorCallback(ErrorCallback callback);
 
         /**
          * @brief get the value of the state
@@ -52,10 +58,11 @@ class StateMachine{
         static bool run();
 
         /**
-         * @brief change the state machine to the next state
-         * @param buttons: the buttons pressed
+         * @brief apply transition to next state with validation
+         * @param next_state target state returned by state action
+         * @return true if transition is valid and applied
          */
-        static void next(uint8_t buttons);
+        static bool next(name next_state);
 
         /**
          * @brief current state of the state machine
@@ -70,14 +77,12 @@ class StateMachine{
 
         /**
          * @brief function to be executed in the state
-         * @return true if the action was executed successfully
+         * @return next state after action execution
          */
-        bool (*action)();
+        name (*action)();
 
         /**
-         * @brief function to verify the next state
-         * @param buttons: the buttons pressed
-         * @return the next state
+         * @brief optional transition function using input bitmask
          */
         name (*next_state)(uint8_t buttons);
 
@@ -86,6 +91,14 @@ class StateMachine{
          * @note the index of the array is the state
          */
         static StateMachine* arr_states[NUMBER_OF_STATES];
+
+        static ErrorCallback errorCallback_;
+        static StateOutputCallback stateOutputCallback_;
+        static InputCallback inputCallback_;
+
+        static void defaultErrorCallback(const char* message);
+        static uint8_t defaultInputCallback();
+        static void reportError(const char* message);
 };
 
 #endif

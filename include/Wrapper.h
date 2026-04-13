@@ -254,7 +254,6 @@ uint8_t apply_pwm(int32_t pwm_right, int32_t pwm_left) {
 
 uint8_t set_state_control(uint8_t state) {
     StateMachine::current_state = state;
-    ROBOT::setState(state);
 
     // log the state change
     #if defined(LOG_ALL) || defined(LOG_INFO)

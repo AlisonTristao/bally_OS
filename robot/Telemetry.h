@@ -4,62 +4,53 @@
 // header
 #include <Settings.h>
 
-// verify if the telemetry function was already called
-bool telemetry_ok = false;
+name telemetry_to_wait() {
+    // log message
+    #if defined(LOG_ALL) || defined(LOG_INFO)
+        ROBOT::log("state_changed: telemetry -> wait", logType::INFO);
+    #endif
 
-bool telemetry_function() {
-    // telemetry only once
-    if (telemetry_ok)
-        return true;
+    // return the name of the next state
+    return WAIT;
+}
 
+name telemetry_to_finish() {
+    // log message
+    #if defined(LOG_ALL) || defined(LOG_INFO)
+        ROBOT::log("state_changed: telemetry -> finish", logType::INFO);
+    #endif
+
+    // return the name of the next state
+    return FINISH;
+}
+
+name telemetry_function() {
     // log message out
-    #if defined(LOG_ALL) 
-        Logger::send_logger(logType::NONE);
+    #if defined(LOG_ALL)
+        ROBOT::sendLogger(logType::NONE);
     #else
         #if defined(LOG_TELEMETRY)
-            Logger::send_logger(logType::TELEMETRY);
+            ROBOT::sendLogger(logType::TELEMETRY);
         #elif defined(LOG_ERROR)
-            Logger::send_logger(logType::ERROR);
+            ROBOT::sendLogger(logType::ERROR);
         #elif defined(LOG_DEBUG)
-            Logger::send_logger(logType::DEBUG);
+            ROBOT::sendLogger(logType::DEBUG);
         #elif defined(LOG_INFO)
-            Logger::send_logger(logType::INFO);
+            ROBOT::sendLogger(logType::INFO);
         #endif
     #endif
 
-    // telemetry the robot
-    telemetry_ok = true;
-    return true;
+    return telemetry_to_wait();
 }
 
 name next_state_telemetry(uint8_t buttons){
     // if button 1 is pressed
-    if(buttons & (1 << BIT_0)){
-
-        // log message
-        #if defined(LOG_ALL) || defined(LOG_INFO)
-            Logger::insert_log("states: Telemetry -> Wait", logType::INFO);
-        #endif
-
-        telemetry_ok = false;
-        return WAIT; 
-    }
+    if(buttons & (1 << BIT_0))
+        return telemetry_to_wait();
 
     // if button 2 is pressed
-    if(buttons & (1 << BIT_1)){
-        
-        // log message
-        #if defined(LOG_ALL) || defined(LOG_INFO)
-            Logger::insert_log("states: Telemetry -> Finish", logType::INFO);
-        #endif
-
-        telemetry_ok = false;
-        return FINISH;
-    }
-    
-    // if button 3 is pressed
-    /*if(buttons & (1 << BIT_2))
-        return TELEMETRY;*/
+    if(buttons & (1 << BIT_1))
+        return telemetry_to_finish();
 
     // stay in the same state
     return TELEMETRY;

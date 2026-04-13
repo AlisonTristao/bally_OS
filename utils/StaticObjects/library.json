@@ -1,0 +1,21 @@
+{
+  "name": "StaticObjects",
+  "version": "1.0.0",
+  "description": "Static Objects Library for bally_software",
+  "keywords": ["static-objects", "utilities"],
+  "authors": [
+    {
+      "name": "Alison Tristao"
+    }
+  ],
+  "frameworks": "arduino",
+  "platforms": "espressif32",
+  "dependencies": [
+    {
+      "name": "Flags"
+    },
+    {
+      "name": "Logger"
+    }
+  ]
+}

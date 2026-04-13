@@ -10,53 +10,47 @@
 // static library
 #include <StaticObjects.h>
 
-// verify if the calibrate function was already called
-bool calibrate_ok = false;
+name calibrate_to_wait() {
+    // log message
+    #if defined(LOG_ALL) || defined(LOG_INFO)
+        ROBOT::log("state_changed: calibrate -> wait", logType::INFO);
+    #endif
 
-bool calibrate_function() {
-    // calibrate only once
-    if (calibrate_ok)
-        return true;    
+    // return the name of the next state
+    return WAIT;
+}
 
-    // calibrate the sensors
-    bool calib = StaticObjects::array_sensor.calibrate(SAMPLES, DELAY_SAMPLE);
-    if(calib) StaticObjects::array_sensor.saveCalibration();
+name calibrate_to_error() {
+    // log message
+    #if defined(LOG_ALL) || defined(LOG_INFO)
+        ROBOT::log("state_changed: calibrate -> error", logType::INFO);
+    #endif
+
+    // return the name of the next state
+    return ERROR;
+}
+
+name calibrate_function() {
+    const bool calib = ROBOT::calibrateSensors(SAMPLES, DELAY_SAMPLE);
 
     // log message
     #if defined(LOG_ALL) || defined(LOG_INFO)
-        Logger::insert_log(("Calibrate function called: " + String(!calib ? "failed" : "success")), logType::INFO);
-        Logger::insert_log("Values:\n\n" + StaticObjects::array_sensor.calibrate_status(), logType::INFO);
+        ROBOT::log(("Calibrate function called: " + String(!calib ? "failed" : "success")), logType::INFO);
+        ROBOT::log("Values:\n\n" + ROBOT::calibrateStatus(), logType::INFO);
     #endif
 
-    // error 
-    if(!calib) return false;
+    if(calib)
+        ROBOT::saveCalibration();
+    else 
+        return calibrate_to_error();
 
-    // all ok
-    calibrate_ok = true;
-    return true;
+    return calibrate_to_wait();
 }
-
 
 name next_state_calibrate(uint8_t buttons){
     // if button 1 is pressed
-    if(buttons & (1 << BIT_0)){
-
-        // log message
-        #if defined(LOG_ALL) || defined(LOG_INFO)
-            Logger::insert_log("states: Calibrate -> Wait", logType::INFO);
-        #endif
-
-        calibrate_ok = false;
-        return WAIT; 
-    }
-
-    // if button 2 is pressed
-    /*if(buttons & (1 << BIT_1))
-        return MAP;
-
-    // if button 3 is pressed
-    if(buttons & (1 << BIT_2))
-        return RUN;*/
+    if(buttons & (1 << BIT_0))
+        return calibrate_to_wait();
 
     // stay in the same state
     return CALIBRATE;

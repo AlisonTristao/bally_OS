@@ -5,41 +5,46 @@
 #include <Logger.h>
 #include <StaticObjects.h>
 
-bool debug_function() {
-    // encoder left and encoder right
-    //string enc_l = String(StaticObjects::encoder_left.getCount()).c_str();
-    //string enc_r = String(StaticObjects::encoder_right.getCount()).c_str();
-
+name debug_to_finish() {
     // log message
     #if defined(LOG_ALL) || defined(LOG_INFO)
-        Logger::insert_log((StaticObjects::array_sensor.debug()).c_str(), logType::INFO);
+        ROBOT::log("state_changed: debug -> finish", logType::INFO);
     #endif
 
-    delay(10);
+    // return the name of the next state
+    return FINISH;
+}
 
-    // map the environment
-    return true;
+name debug_to_wait() {
+    // log message
+    #if defined(LOG_ALL) || defined(LOG_INFO)
+        ROBOT::log("state_changed: debug -> wait", logType::INFO);
+    #endif
+
+    // return the name of the next state
+    return WAIT;
+}
+
+name debug_function() {
+    // log message
+    #if defined(LOG_ALL) || defined(LOG_INFO)
+        ROBOT::log((ROBOT::debugSensors()).c_str(), logType::INFO);
+    #endif
+
+    // safety default outside RUN
+    delay(DELAY_FLAGS);
+
+    return DEBUG;
 }
 
 name next_state_debug(uint8_t buttons){
     // if button 1 is pressed
-    if(buttons & (1 << BIT_0)){
-        
-        // log message
-        #if defined(LOG_ALL) || defined(LOG_INFO)
-            Logger::insert_log("states: debug -> Finish", logType::INFO);
-        #endif
-        
-        return FINISH;
-    }
+    if(buttons & (1 << BIT_0))
+        return debug_to_finish();
 
     // if button 2 is pressed
-    /*if(buttons & (1 << BIT_1))
-        return CALIBRATE;
-
-    // if button 3 is pressed
-    if(buttons & (1 << BIT_2))
-        return RUN;*/
+    if(buttons & (1 << BIT_1))
+        return debug_to_wait();
 
     // stay in the same state
     return DEBUG;

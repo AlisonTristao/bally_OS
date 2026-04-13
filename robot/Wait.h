@@ -7,47 +7,53 @@
 // static libraries
 #include <StaticObjects.h>
 
-bool wait_function() {
-    // motor pwm 0
-    StaticObjects::motor_left.applyPWM(0);
-    StaticObjects::motor_right.applyPWM(0);
+name wait_to_debug() {
+    // log message
+    #if defined(LOG_ALL) || defined(LOG_INFO)
+        ROBOT::log("state_changed: wait -> debug", logType::INFO);
+    #endif
 
-    // wait for the next state
-    return true;
+    // return the name of the next state
+    return DEBUG;
+}
+
+name wait_to_calibrate() {
+    // log message
+    #if defined(LOG_ALL) || defined(LOG_INFO)
+        ROBOT::log("state_changed: wait -> calibrate", logType::INFO);
+    #endif
+
+    // return the name of the next state
+    return CALIBRATE;
+}
+
+name wait_to_run() {
+    // log message
+    #if defined(LOG_ALL) || defined(LOG_INFO)
+        ROBOT::log("state_changed: wait -> run", logType::INFO);
+    #endif
+
+    // return the name of the next state
+    return RUN;
+}
+
+name wait_function() {
+    return WAIT;
 }
 
 name next_state_wait(uint8_t buttons){
     // if button 1 is pressed
-    if(buttons & (1 << BIT_2)){
-
-        // log message
-        #if defined(LOG_ALL) || defined(LOG_INFO)
-            Logger::insert_log("states: Wait -> Debug", logType::INFO);
-        #endif
-
-        return DEBUG;    
-    }
+    if(buttons & (1 << BIT_2))
+        return wait_to_debug();
 
     // if button 2 is pressed
-    if(buttons & (1 << BIT_1)){
-        
-        // log message
-        #if defined(LOG_ALL) || defined(LOG_INFO)
-            Logger::insert_log("states: Wait -> Calibrate", logType::INFO);
-        #endif
+    if(buttons & (1 << BIT_1))
+        return wait_to_calibrate();
 
-        return CALIBRATE;
-    }
     // if button 3 is pressed
-    if(buttons & (1 << BIT_0)){
+    if(buttons & (1 << BIT_0))
+        return wait_to_run();
 
-        // log message
-        #if defined(LOG_ALL) || defined(LOG_INFO)
-            Logger::insert_log("states: Wait -> Run", logType::INFO);
-        #endif
-
-        return RUN;
-    }
     // stay in the same state
     return WAIT;
 }

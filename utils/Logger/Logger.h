@@ -10,12 +10,6 @@
 #define MAX_MESSAGE_SIZE 230
 #define MAX_MESSAGES 1024
 
-// wrapper function to send data and cmd 
-bool send_data(const uint8_t* data, size_t len);
-
-// wrapper function to run commands
-void run_command(const String& cmd);
-
 // types of logs 
 enum class logType {
     NONE,
@@ -36,6 +30,19 @@ typedef struct {
 // logger class
 class Logger {
     public:
+        using SendCallback = bool (*)(const uint8_t* data, size_t len);
+        using CommandCallback = void (*)(const String& cmd);
+
+        /**
+         * @brief set transport callback used to send logger payloads
+         */
+        static void setSendCallback(SendCallback callback);
+
+        /**
+         * @brief set command callback used by insert_cmd
+         */
+        static void setCommandCallback(CommandCallback callback);
+
         /*
             @brief: insert a message into the logger
             @param: msg -> message to be inserted
@@ -89,6 +96,13 @@ class Logger {
 
         // log commands
         static void insert_cmd_impl(const String& cmd);
+
+        // default callbacks to keep Logger self-contained
+        static bool defaultSendCallback(const uint8_t* data, size_t len);
+        static void defaultCommandCallback(const String& cmd);
+
+        static SendCallback send_callback_;
+        static CommandCallback command_callback_;
 
         // wait for the logger to be free
         static bool mutex;

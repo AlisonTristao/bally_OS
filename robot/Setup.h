@@ -6,61 +6,55 @@
 #include <ParallelProcessing.h>
 #include <StaticObjects.h>
 
-// verify if the setup function was already called
-bool configure_ok = false;
+name setup_to_wait() {
+    // log message
+    #if defined(LOG_ALL) || defined(LOG_INFO)
+        ROBOT::log("state_changed: setup -> wait", logType::INFO);
+    #endif
 
-bool setup_function() {
-    // configure only once
-    if(configure_ok) 
-        return true;
+    // return the name of the next state
+    return WAIT;
+}
 
+name setup_to_error() {
+    // log message
+    #if defined(LOG_ALL) || defined(LOG_INFO)
+        ROBOT::log("state_changed: setup -> error", logType::INFO);
+    #endif
+
+    // return the name of the next state
+    return ERROR;
+}
+
+name setup_function() {
     // init communication 
     Serial.begin(921600);  
     delay(100);
 
     // init pins direction, settings, i2c communication...
-    if(!init_structure()) 
-        return false;
+    if(!init_structure())
+        return setup_to_error();
 
     // init interruptions in parallel processing
-    if(!init_interruptions()) 
-        return false;
+    if(!init_interruptions())
+        return setup_to_error();
 
-    // init static objects
-    StaticObjects::init_objects();
+    // init robot objects
+    ROBOT::init();
 
     // log message
     #if defined(LOG_ALL) || defined(LOG_INFO)
-        Logger::insert_log("Setup function called", logType::INFO);
+        ROBOT::log("Setup function called", logType::INFO);
     #endif
 
-    // all ok
-    configure_ok = true;
-    return configure_ok;
+    // setup completed, go to wait state
+    return setup_to_wait();
 }
 
 name next_state_setup(uint8_t buttons){
-    // if button 1 is pressed
-    if(buttons & (1 << BIT_0) || configure_ok){
-        // log message
-        #if defined(LOG_ALL) || defined(LOG_INFO)
-            Logger::insert_log("states: Setup -> Wait", logType::INFO);
-        #endif
-
-        return WAIT; 
-    }
-
-    // if button 2 is pressed
-    /*if(buttons & (1 << BTN2)){
-        // LOGGER conf
-        return CALIBRATE;
-    }
-
-    // if button 3 is pressed
-    if(buttons & (1 << BTN3)){
-        // LOGGER conf
-        // return ERROR;
-    }*/
+    // if button 1 is pressed or setup completed
+    if(buttons & (1 << BIT_0))
+        return setup_to_wait();
 
     // stay in the same state
     return SETUP;

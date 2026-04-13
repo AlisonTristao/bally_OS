@@ -1,0 +1,13 @@
+{
+  "name": "Flags",
+  "version": "1.0.0",
+  "description": "Flags Library for bally_software",
+  "keywords": ["flags", "utilities"],
+  "authors": [
+    {
+      "name": "Alison Tristao"
+    }
+  ],
+  "frameworks": "arduino",
+  "platforms": "espressif32"
+}

@@ -1,19 +1,28 @@
-// header
+// ==================== SYSTEM & FRAMEWORK ====================
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+
+// ==================== PROJECT HEADERS ====================
 #include <Settings.h>
 #include <ParallelProcessing.h>
+#include <Pinout.h>
 
-// custom libraries
+// ==================== EXTERNAL LIBRARIES ====================
+#include <TinyShell.h>
+
+// ==================== CUSTOM MODULES ====================
 #include <ArraySensor.h>
 #include <Encoder.h>
 #include <HBridge.h>
 #include <Control.h>
 
-// static libraries
+// ==================== UTILITIES ====================
 #include <Flags.h>
 #include <Logger.h>
 #include <StateMachine.h>
+#include <StaticObjects.h>
 
-// state machine header
+// ==================== ROBOT STATE MACHINE ====================
 #include <Setup.h>  
 #include <Wait.h>
 #include <Calibrate.h>
@@ -23,15 +32,15 @@
 #include <Telemetry.h>
 #include <Error.h>
 
-// state machine
+// ==================== STATE MACHINE INSTANCES ====================
 StateMachine state1(SETUP, 		setup_function, 	next_state_setup);
-StateMachine state2(WAIT, 		wait_function, 		next_state_wait);	
+StateMachine state2(WAIT, 		wait_function,		next_state_wait);	
 StateMachine state3(CALIBRATE, 	calibrate_function, next_state_calibrate);
-StateMachine state4(DEBUG, 		debug_function, 		next_state_debug);
-StateMachine state5(RUN, 		run_function, 		next_state_run);
-StateMachine state6(FINISH, 	finish_function, 	next_state_finish);
+StateMachine state4(DEBUG, 		debug_function,	next_state_debug);
+StateMachine state5(RUN, 		run_function,		next_state_run);
+StateMachine state6(FINISH, 	finish_function,	next_state_finish);
 StateMachine state7(TELEMETRY, 	telemetry_function, next_state_telemetry);
-StateMachine state8(ERROR, 		error_function, 	next_state_error);
+StateMachine state8(ERROR, 		error_function,	next_state_error);
 
 void setup() {
 	// init log register
@@ -39,6 +48,7 @@ void setup() {
 
 	// init state machine
 	StateMachine::current_state = SETUP;
+	StateMachine::setErrorCallback(ROBOT::logStateMachineError);
 
 	// init parallel processing into secondary core
 	xTaskCreatePinnedToCore(routine, 				// task function 
@@ -56,7 +66,7 @@ uint32_t timer_print = 0;
 
 void loop() {
 	// run state machine
-	if(!StateMachine::run()) StateMachine::current_state = ERROR;
+	StateMachine::run();
 
 	// sample delay... (wait for the whatchdog to be ready) 
 	delay(1);
