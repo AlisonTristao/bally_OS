@@ -46,9 +46,16 @@ void setup() {
 	// init log register
 	Logger::insert_log("Welcome! the car is starting...", logType::INFO);
 
-	// init state machine
-	StateMachine::current_state = SETUP;
+	// init shell
+	Logger::setSendCallback(send_data);
+    Logger::setCommandCallback(run_command);
+
+	// set state machine error callback
 	StateMachine::setErrorCallback(ROBOT::logStateMachineError);
+
+	// init state machine
+	// ATTENTION: the state machine must be initialized after the set this callbacks
+	StateMachine::current_state = SETUP;
 
 	// init parallel processing into secondary core
 	xTaskCreatePinnedToCore(routine, 				// task function 

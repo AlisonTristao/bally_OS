@@ -28,9 +28,6 @@
 // Global ESP-NOW manager instance
 EspNowManager espNowManager;
 
-// Global RGB LED instance
-RGBLed rgbLed;
-
 void readMacAddress(){
     // logger the mac address
     uint8_t baseMac[6];
@@ -53,40 +50,23 @@ void readMacAddress(){
 // 📤 Callback de envio
 void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
     (void)mac_addr;
-
-    // Keep callback side-effect free for telemetry logger flow.
-    if (status == ESP_NOW_SEND_SUCCESS) {
-        rgbLed.setGreen();
-    } else {
-        rgbLed.setRed();
-    }
 }
 
 // 📥 Callback de recebimento
 void OnDataRecv(const uint8_t *mac_addr, const EspNowManager::message& incomingData) {
     (void)mac_addr;
 
-    rgbLed.setBlue();
-
     char buffer[EspNowManager::MESSAGE_TEXT_SIZE + 1] = {0};
     memcpy(buffer, incomingData.msg, EspNowManager::MESSAGE_TEXT_SIZE);
     buffer[EspNowManager::MESSAGE_TEXT_SIZE] = '\0';
 
     // Keep command path compatible with existing shell flow.
-    if (incomingData.type == EspNowManager::logType::INFO || incomingData.type == EspNowManager::logType::NONE) {
+    if (incomingData.type == logType::INFO || incomingData.type == logType::NONE) {
         Logger::insert_cmd(String(buffer));
     }
 }
 
 bool configure_wifi() {
-    // Initialize RGB LED first
-    if (!rgbLed.begin()) {
-        Logger::insert_log("Failed to initialize RGB LED", logType::ERROR);
-        return false;
-    }
-    
-    rgbLed.setYellow(); // Indicar que está inicializando
-
     // turn on the wifi
     WiFi.mode(WIFI_STA);
 
@@ -120,9 +100,6 @@ bool configure_wifi() {
 
     // register the mac address
     readMacAddress();
-    
-    // Signal that WiFi is ready
-    rgbLed.setGreen();
 
     // all ok
     return true;

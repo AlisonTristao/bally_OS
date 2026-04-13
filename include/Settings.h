@@ -57,6 +57,8 @@ bool configure_pins(){
     pinMode(UNK0, OUTPUT);
     pinMode(UNK1, OUTPUT);*/
 
+    pinMode(LED_RGB_PIN, OUTPUT);
+
     // H bridge
     pinMode(AIN1, OUTPUT);
     pinMode(AIN2, OUTPUT);
@@ -115,7 +117,7 @@ bool init_structure() {
         return false;
 
     // init shell
-    if (!start_shell())
+    if (!start_shell_wrappers())
         return false;
 
     // all ok

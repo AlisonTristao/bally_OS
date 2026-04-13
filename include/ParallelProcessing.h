@@ -22,6 +22,16 @@ esp_timer_handle_t timer_get_handle;
 // result of timer interrupt
 bool result_interrupt = false;
 
+static IRAM_ATTR void sampleISR(void* arg) {
+    #if defined(LOG_ALL) || defined(LOG_TELEMETRY)
+        if(!(StateMachine::current_state == RUN)) return;
+        /*Logger::insert_log(
+                            String(ROBOT::encoder_left.getCount())    + ";" +
+                            String(ROBOT::encoder_right.getCount()),
+                            logType::TELEMETRY);*/
+    #endif
+}
+
 void configure_interruptions(void *param){
     // set the buttons interruptions
     /*attachInterrupt(digitalPinToInterrupt(BTN1), Signals_IN::isrBtn0, FALLING);

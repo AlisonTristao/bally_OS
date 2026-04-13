@@ -6,6 +6,7 @@
 
 // ==================== PROJECT HEADERS ====================
 #include <Pinout.h> 
+#include <RGBLed.h>
 
 // ==================== CUSTOM MODULES ====================
 #include <ArraySensor.h>
@@ -55,6 +56,8 @@ public:
     static TinyShell& shell();
     static String runLineCommand(const String& cmd);
 
+    // public static members
+    static RGBLed rgb_led_;
 private:
     static ArraySensor array_sensor_;
     static HBridge motor_left_;

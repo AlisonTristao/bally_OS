@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <esp_now.h>
+#include "logger.h"  // ou o path correto do seu logger
 
 /**
  * @brief EspNowManager wraps peer registration and messaging over ESP-NOW.
@@ -24,24 +25,13 @@ public:
     static constexpr size_t MESSAGE_TEXT_SIZE = 231;
 
     /**
-     * @brief Message category used in ESP-NOW payloads.
-     */
-    enum class logType : uint8_t {
-        NONE,
-        INFO,
-        TELEMETRY,
-        ERROR,
-        DEBUG
-    };
-
-    /**
      * @brief Wire payload structure shared between sender and receiver.
      */
     struct message {
         uint32_t timer;
         char msg[MESSAGE_TEXT_SIZE];
         logType type;
-    };
+    };  
 
     /**
      * @brief Local device registry record.
