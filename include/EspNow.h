@@ -91,7 +91,7 @@ bool configure_wifi() {
 
     // add the peer 
     uint8_t peerAddress[] = MAC_ADDR;
-    if (!espNowManager.addDevice(peerAddress, "peer", "Remote peer"))
+    if (!espNowManager.addPeer(peerAddress))
         return false;
 
     #if defined(LOG_ALL) || defined(LOG_INFO)
