@@ -32,9 +32,6 @@
 #include <Telemetry.h>
 #include <Error.h>
 
-// ==================== STATE MACHINE CONTROLLER ====================
-StateMachine ROBOT::machine;
-
 // ==================== STATE MACHINE INSTANCES ====================
 StateMachine state1(SETUP, 		setup_function, 	next_state_setup);
 StateMachine state2(WAIT, 		wait_function,		next_state_wait);	
@@ -70,9 +67,6 @@ void setup() {
 							SECONDARY_CORE);		// secondary core
 
 }
-
-// timer to print
-uint32_t timer_print = 0;
 
 void loop() {
 	// run state machine

@@ -10,6 +10,7 @@ HBridge ROBOT::motor_left(AIN1, AIN2, CH0, PWM_A);
 HBridge ROBOT::motor_right(BIN1, BIN2, CH1, PWM_B);
 Control ROBOT::control;
 TinyShell ROBOT::shell;
+StateMachine ROBOT::machine;
 
 void ROBOT::init() {
     motor_left.init();
