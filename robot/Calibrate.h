@@ -13,7 +13,7 @@
 name calibrate_to_wait() {
     // log message
     #if defined(LOG_ALL) || defined(LOG_INFO)
-        ROBOT::log("state_changed: calibrate -> wait", logType::INFO);
+        ROBOT::logger.insert_log("state_changed: calibrate -> wait", logType::INFO);
     #endif
 
     // return the name of the next state
@@ -23,7 +23,7 @@ name calibrate_to_wait() {
 name calibrate_to_error() {
     // log message
     #if defined(LOG_ALL) || defined(LOG_INFO)
-        ROBOT::log("state_changed: calibrate -> error", logType::INFO);
+        ROBOT::logger.insert_log("state_changed: calibrate -> error", logType::INFO);
     #endif
 
     // return the name of the next state
@@ -31,16 +31,16 @@ name calibrate_to_error() {
 }
 
 name calibrate_function() {
-    const bool calib = ROBOT::calibrateSensors(SAMPLES, DELAY_SAMPLE);
+    const bool calib = ROBOT::array_sensor.calibrate(SAMPLES, DELAY_SAMPLE);
 
     // log message
     #if defined(LOG_ALL) || defined(LOG_INFO)
-        ROBOT::log(("Calibrate function called: " + String(!calib ? "failed" : "success")), logType::INFO);
-        ROBOT::log("Values:\n\n" + ROBOT::calibrateStatus(), logType::INFO);
+        ROBOT::logger.insert_log(("Calibrate function called: " + String(!calib ? "failed" : "success")), logType::INFO);
+        ROBOT::logger.insert_log("Values:\n\n" + ROBOT::array_sensor.calibrate_status(), logType::INFO);
     #endif
 
     if(calib)
-        ROBOT::saveCalibration();
+        ROBOT::array_sensor.saveCalibration();
     else 
         return calibrate_to_error();
 

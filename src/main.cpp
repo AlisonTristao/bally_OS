@@ -32,6 +32,9 @@
 #include <Telemetry.h>
 #include <Error.h>
 
+// ==================== STATE MACHINE CONTROLLER ====================
+StateMachine ROBOT::machine;
+
 // ==================== STATE MACHINE INSTANCES ====================
 StateMachine state1(SETUP, 		setup_function, 	next_state_setup);
 StateMachine state2(WAIT, 		wait_function,		next_state_wait);	
@@ -44,18 +47,18 @@ StateMachine state8(ERROR, 		error_function,	next_state_error);
 
 void setup() {
 	// init log register
-	Logger::insert_log("Welcome! the car is starting...", logType::INFO);
+	ROBOT::logger.insert_log("Welcome! the car is starting...", logType::INFO);
 
 	// init shell
-	Logger::setSendCallback(send_data);
-    Logger::setCommandCallback(run_command);
+	ROBOT::logger.setSendCallback(send_data);
+    ROBOT::logger.setCommandCallback(run_command);
 
 	// set state machine error callback
-	StateMachine::setErrorCallback(ROBOT::logStateMachineError);
+	ROBOT::machine.setErrorCallback(ROBOT::logStateMachineError);
 
 	// init state machine
 	// ATTENTION: the state machine must be initialized after the set this callbacks
-	StateMachine::current_state = SETUP;
+	ROBOT::machine.current_state = SETUP;
 
 	// init parallel processing into secondary core
 	xTaskCreatePinnedToCore(routine, 				// task function 
@@ -73,7 +76,7 @@ uint32_t timer_print = 0;
 
 void loop() {
 	// run state machine
-	StateMachine::run();
+	ROBOT::machine.run();
 
 	// sample delay... (wait for the whatchdog to be ready) 
 	delay(1);

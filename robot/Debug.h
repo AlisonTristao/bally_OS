@@ -8,7 +8,7 @@
 name debug_to_finish() {
     // log message
     #if defined(LOG_ALL) || defined(LOG_INFO)
-        ROBOT::log("state_changed: debug -> finish", logType::INFO);
+        ROBOT::logger.insert_log("state_changed: debug -> finish", logType::INFO);
     #endif
 
     // return the name of the next state
@@ -18,7 +18,7 @@ name debug_to_finish() {
 name debug_to_wait() {
     // log message
     #if defined(LOG_ALL) || defined(LOG_INFO)
-        ROBOT::log("state_changed: debug -> wait", logType::INFO);
+        ROBOT::logger.insert_log("state_changed: debug -> wait", logType::INFO);
     #endif
 
     // return the name of the next state
@@ -28,7 +28,7 @@ name debug_to_wait() {
 name debug_function() {
     // log message
     #if defined(LOG_ALL) || defined(LOG_INFO)
-        ROBOT::log((ROBOT::debugSensors()).c_str(), logType::INFO);
+        ROBOT::logger.insert_log((ROBOT::array_sensor.debug()).c_str(), logType::INFO);
     #endif
 
     // safety default outside RUN

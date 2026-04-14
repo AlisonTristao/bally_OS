@@ -9,7 +9,7 @@
 name setup_to_wait() {
     // log message
     #if defined(LOG_ALL) || defined(LOG_INFO)
-        ROBOT::log("state_changed: setup -> wait", logType::INFO);
+        ROBOT::logger.insert_log("state_changed: setup -> wait", logType::INFO);
     #endif
 
     // return the name of the next state
@@ -19,7 +19,7 @@ name setup_to_wait() {
 name setup_to_error() {
     // log message
     #if defined(LOG_ALL) || defined(LOG_INFO)
-        ROBOT::log("state_changed: setup -> error", logType::INFO);
+        ROBOT::logger.insert_log("state_changed: setup -> error", logType::INFO);
     #endif
 
     // return the name of the next state
@@ -44,7 +44,7 @@ name setup_function() {
 
     // log message
     #if defined(LOG_ALL) || defined(LOG_INFO)
-        ROBOT::log("Setup function called", logType::INFO);
+        ROBOT::logger.insert_log("Setup function called", logType::INFO);
     #endif
 
     // setup completed, go to wait state

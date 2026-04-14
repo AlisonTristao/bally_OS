@@ -7,7 +7,7 @@
 name telemetry_to_wait() {
     // log message
     #if defined(LOG_ALL) || defined(LOG_INFO)
-        ROBOT::log("state_changed: telemetry -> wait", logType::INFO);
+        ROBOT::logger.insert_log("state_changed: telemetry -> wait", logType::INFO);
     #endif
 
     // return the name of the next state
@@ -17,7 +17,7 @@ name telemetry_to_wait() {
 name telemetry_to_finish() {
     // log message
     #if defined(LOG_ALL) || defined(LOG_INFO)
-        ROBOT::log("state_changed: telemetry -> finish", logType::INFO);
+        ROBOT::logger.insert_log("state_changed: telemetry -> finish", logType::INFO);
     #endif
 
     // return the name of the next state
@@ -27,16 +27,16 @@ name telemetry_to_finish() {
 name telemetry_function() {
     // log message out
     #if defined(LOG_ALL)
-        ROBOT::sendLogger(logType::NONE);
+        ROBOT::logger.send_logger(logType::NONE);
     #else
         #if defined(LOG_TELEMETRY)
-            ROBOT::sendLogger(logType::TELEMETRY);
+            ROBOT::logger.send_logger(logType::TELEMETRY);
         #elif defined(LOG_ERROR)
-            ROBOT::sendLogger(logType::ERROR);
+            ROBOT::logger.send_logger(logType::ERROR);
         #elif defined(LOG_DEBUG)
-            ROBOT::sendLogger(logType::DEBUG);
+            ROBOT::logger.send_logger(logType::DEBUG);
         #elif defined(LOG_INFO)
-            ROBOT::sendLogger(logType::INFO);
+            ROBOT::logger.send_logger(logType::INFO);
         #endif
     #endif
 

@@ -99,7 +99,7 @@ bool configure_pins(){
     
     // log message
     #if defined(LOG_ALL) || defined(LOG_INFO)
-        Logger::insert_log("Pins configured", logType::INFO);
+        ROBOT::logger.insert_log("Pins configured", logType::INFO);
     #endif
     
     // all pins configured

@@ -15,6 +15,7 @@
 // ==================== UTILITIES & LOGGING ====================
 #include <Flags.h>
 #include <Logger.h>
+#include <StaticObjects.h>
 
 // ==================== EXTERNAL LIBRARIES ====================
 #include <EspNowManager.h>
@@ -35,7 +36,7 @@ void readMacAddress(){
     Serial.print("MAC Address: ");
     Serial.printf("%02X:%02X:%02X:%02X:%02X:%02X\n", baseMac[0], baseMac[1], baseMac[2], baseMac[3], baseMac[4], baseMac[5]);
     if (ret == ESP_OK) {
-        Logger::insert_log("This MAC Address: " +
+        ROBOT::logger.insert_log("This MAC Address: " +
                         String(baseMac[0], HEX) + ":" +
                         String(baseMac[1], HEX) + ":" +
                         String(baseMac[2], HEX) + ":" +
@@ -43,7 +44,7 @@ void readMacAddress(){
                         String(baseMac[4], HEX) + ":" +
                         String(baseMac[5], HEX), logType::INFO);
     } else {
-        Logger::insert_log("Failed to read MAC address", logType::ERROR);
+        ROBOT::logger.insert_log("Failed to read MAC address", logType::ERROR);
     }
 }
 
@@ -62,7 +63,7 @@ void OnDataRecv(const uint8_t *mac_addr, const EspNowManager::message& incomingD
 
     // Keep command path compatible with existing shell flow.
     if (incomingData.type == logType::INFO || incomingData.type == logType::NONE) {
-        Logger::insert_cmd(String(buffer));
+        ROBOT::logger.insert_cmd(String(buffer));
     }
 }
 
@@ -74,7 +75,7 @@ bool configure_wifi() {
         return false;
 
     #if defined(LOG_ALL) || defined(LOG_INFO)
-        Logger::insert_log("WiFi configured", logType::INFO);
+        ROBOT::logger.insert_log("WiFi configured", logType::INFO);
     #endif
 
     // starts ESP-NOW
@@ -82,7 +83,7 @@ bool configure_wifi() {
         return false;
 
     #if defined(LOG_ALL) || defined(LOG_INFO)
-        Logger::insert_log("ESP-NOW initialized successfully", logType::INFO);
+        ROBOT::logger.insert_log("ESP-NOW initialized successfully", logType::INFO);
     #endif
 
     // register callbacks for send and receive
@@ -95,7 +96,7 @@ bool configure_wifi() {
         return false;
 
     #if defined(LOG_ALL) || defined(LOG_INFO)
-        Logger::insert_log("Peer added successfully", logType::INFO);
+        ROBOT::logger.insert_log("Peer added successfully", logType::INFO);
     #endif
 
     // register the mac address

@@ -10,7 +10,7 @@
 name wait_to_debug() {
     // log message
     #if defined(LOG_ALL) || defined(LOG_INFO)
-        ROBOT::log("state_changed: wait -> debug", logType::INFO);
+        ROBOT::logger.insert_log("state_changed: wait -> debug", logType::INFO);
     #endif
 
     // return the name of the next state
@@ -20,7 +20,7 @@ name wait_to_debug() {
 name wait_to_calibrate() {
     // log message
     #if defined(LOG_ALL) || defined(LOG_INFO)
-        ROBOT::log("state_changed: wait -> calibrate", logType::INFO);
+        ROBOT::logger.insert_log("state_changed: wait -> calibrate", logType::INFO);
     #endif
 
     // return the name of the next state
@@ -30,7 +30,7 @@ name wait_to_calibrate() {
 name wait_to_run() {
     // log message
     #if defined(LOG_ALL) || defined(LOG_INFO)
-        ROBOT::log("state_changed: wait -> run", logType::INFO);
+        ROBOT::logger.insert_log("state_changed: wait -> run", logType::INFO);
     #endif
 
     // return the name of the next state

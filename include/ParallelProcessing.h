@@ -24,8 +24,8 @@ bool result_interrupt = false;
 
 static IRAM_ATTR void sampleISR(void* arg) {
     #if defined(LOG_ALL) || defined(LOG_TELEMETRY)
-        if(!(StateMachine::current_state == RUN)) return;
-        /*Logger::insert_log(
+        if(!(ROBOT::machine.current_state == RUN)) return;
+        /*ROBOT::logger.insert_log(
                             String(ROBOT::encoder_left.getCount())    + ";" +
                             String(ROBOT::encoder_right.getCount()),
                             logType::TELEMETRY);*/
@@ -59,7 +59,7 @@ void configure_interruptions(void *param){
 
     // log message
     #if defined(LOG_ALL) || defined(LOG_INFO)
-        Logger::insert_log("Interruptions configured", logType::INFO);
+        ROBOT::logger.insert_log("Interruptions configured", logType::INFO);
     #endif
 
     // delete this task
@@ -84,25 +84,25 @@ void routine(void *param){
     delay(DELAY_FLAGS);
 
 	// set the filter time for flags 
-    ROBOT::setFlagFilterTime(DELAY_FLAGS); 
+    ROBOT::flags.setFilterTime(DELAY_FLAGS); 
 
 	// timer of state machine actualization
 	uint32_t timer_state_machine = millis();
 	
     // log message  
     #if defined(LOG_ALL) || defined(LOG_INFO)
-        Logger::insert_log("Parallel processing initialized", logType::INFO);
+        ROBOT::logger.insert_log("Parallel processing initialized", logType::INFO);
     #endif
 
     // main loop of the parallel processing
 	while(true) {	
         // logger print live
         #ifdef LOG_VERBOSE
-            ROBOT::sendLoggerLive();
+            ROBOT::logger.send_logger_live();
         #endif
 
 		// check flags duration
-		ROBOT::checkFlagsDuration();
+		ROBOT::flags.checkFlagsDuration();
 
         // set leds according to the state machine
         //setLeds(Signals_IN::getLeds());
@@ -113,8 +113,8 @@ void routine(void *param){
 
             // log message
             #ifdef LOG_DEBUG
-                Logger::insert_log("Butoes: " + String(ROBOT::getButtons()) + "\t" + 
-                                    "Sensores laterais: " + String(ROBOT::getSideSensors()) , logType::INFO);
+                ROBOT::logger.insert_log("Butoes: " + String(ROBOT::flags.getButtons()) + "\t" + 
+                                    "Sensores laterais: " + String(ROBOT::flags.getSideSensors()) , logType::INFO);
             #endif
 		}
 		// sample delay... (wait for the whatchdog to be ready) 
