@@ -4,31 +4,31 @@
 // static objects
 #include <StaticObjects.h>
 
-name finish_to_wait() {
+stateName finish_to_wait() {
     // log message
     #if defined(LOG_ALL) || defined(LOG_INFO)
         ROBOT::logger.insert_log("state_changed: finish -> wait", logType::INFO);
     #endif
 
-    // return the name of the next state
+    // return the stateName of the next state
     return WAIT;
 }
 
-name finish_to_telemetry() {
+stateName finish_to_telemetry() {
     // log message
     #if defined(LOG_ALL) || defined(LOG_INFO)
         ROBOT::logger.insert_log("state_changed: finish -> telemetry", logType::INFO);
     #endif
 
-    // return the name of the next state
+    // return the stateName of the next state
     return TELEMETRY;
 }
 
-name finish_function() {
+stateName finish_function() {
     return FINISH;
 }
 
-name next_state_finish(uint8_t buttons){
+stateName next_state_finish(uint8_t buttons){
 
     // if button 1 is pressed
     if(buttons & (1 << BIT_0))

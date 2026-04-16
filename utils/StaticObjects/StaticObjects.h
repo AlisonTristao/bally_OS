@@ -20,20 +20,30 @@
 class ROBOT {
 public:
     static void init();
-    static void applyStateOutputs(uint8_t state);
-    static void stopMotors();
-    static void brakeMotors();
     static void logStateMachineError(const char* message);
 
-    static Signals_IN flags;
+    // routine to be executed in parallel processing
+    static void routine(void *param);
+
+    // Signals and flags for buttons, sensors, LEDs, and motors
+    static Flags_in buttons;
+    static Flags_in sideSensors;
+    static Flags_out leds;
+    static Flags_pwm motors;
+
+    // core utility objects
     static Logger logger;
     static StateMachine machine;
+    static TinyShell shell;
+    static Control control;
+
+    // peripheral objects
     static RGBLed rgb_led;
     static ArraySensor array_sensor;
     static HBridge motor_left;
     static HBridge motor_right;
-    static Control control;
-    static TinyShell shell;
+private:
+    static uint32_t delay_flags; 
 };
 
 #endif

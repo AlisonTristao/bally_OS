@@ -6,7 +6,8 @@
 
 #include <Arduino.h>
 
-enum name {
+// StateMachine Name
+enum stateName {
     NONE        = 0,
     SETUP       = 1,
     WAIT        = 2,
@@ -17,42 +18,80 @@ enum name {
     TELEMETRY   = 7,
     ERROR       = 8,
 
-    NUMBER_OF_STATES
+    NUMBER_OF_STATES // put the states before this line
 };
 
-class StateMachine {
-public:
-    using ErrorCallback = void (*)(const char* message);
-    using StateOutputCallback = void (*)(uint8_t state);
-    using InputCallback = uint8_t (*)();
+/****************************/
+/*  Class Of State Machine  */
+/****************************/  
 
-    StateMachine();
-    StateMachine(name state, name (*action)(), name (*next_state)(uint8_t buttons) = nullptr);
-    ~StateMachine(){};
+class StateMachine{
+    public:
+        using ErrorCallback = void (*)(const char* message);
 
-    void setErrorCallback(ErrorCallback callback);
-    uint8_t getValue() const;
-    bool run();
-    bool next(name next_state);
+        /**
+         * @brief constructor of the state machine
+         * @param state: the state of the state machine
+         * @param action: the function to be executed in the state
+         * @param next_state: the function to verify the next state
+         */
+        StateMachine(stateName state, stateName (*action)(), stateName (*next_state)(uint8_t buttons));
+        ~StateMachine(){};
 
-    uint8_t current_state;
+        /**
+         * @brief get the value of the state
+         * @return the value of the state
+         */
+        uint8_t getValue();
 
-private:
-    name state = NONE;
-    name (*action)() = nullptr;
-    name (*next_state_fn)(uint8_t buttons) = nullptr;
-    bool is_controller_ = false;
+        /**
+         * @brief run the current state
+         * @return true if the action was executed successfully
+         */
+        bool run();
 
-    StateMachine* arr_states[NUMBER_OF_STATES] = {};
-    ErrorCallback errorCallback_ = defaultErrorCallback;
-    StateOutputCallback stateOutputCallback_ = nullptr;
-    InputCallback inputCallback_ = defaultInputCallback;
+        /**
+         * @brief change the state machine to the next state
+         * @param buttons: the buttons pressed
+         */
+        void next(uint8_t buttons);
 
-    static StateMachine* active_machine_;
+        void setErrorCallback(ErrorCallback callback);
+    private:
+        // index of the state
+        union{
+            stateName state;
+            uint8_t number;
+        };
 
-    static void defaultErrorCallback(const char* message);
-    static uint8_t defaultInputCallback();
-    void reportError(const char* message);
+        /**
+         * @brief current state of the state machine
+         */
+        static uint8_t current_state;
+
+        /**
+         * @brief verify if the state is valid
+         * @return true if the action was executed successfully, false otherwise
+         */
+        bool verifyState();
+
+        /**
+         * @brief function to be executed in the state
+         * @return true if the action was executed successfully
+         */
+        stateName (*action)();
+
+        /**
+         * @brief function to verify the next state
+         * @param buttons: the buttons pressed
+         * @return the next state
+         */
+        stateName (*next_state)(uint8_t buttons);
+
+        static StateMachine* arr_states[NUMBER_OF_STATES];
+        static ErrorCallback errorCallback_;
+        static void defaultErrorCallback(const char* message);
+        static bool reportError(const char* message);
 };
 
 #endif

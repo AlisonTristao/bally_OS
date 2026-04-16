@@ -15,17 +15,17 @@ int16_t PWM = 55;
 
 uint32_t timer_ms = 0;
 
-name run_to_finish() {
+stateName run_to_finish() {
     // log message
     #if defined(LOG_ALL) || defined(LOG_INFO)
         ROBOT::logger.insert_log("state_changed: run -> finish", logType::INFO);
     #endif
 
-    // return the name of the next state
+    // return the stateName of the next state
     return FINISH;
 }
 
-name run_function() {
+stateName run_function() {
     timer_ms = millis();
 
     // calcula a posicao da linha
@@ -54,7 +54,7 @@ name run_function() {
     return RUN;
 }
 
-name next_state_run(uint8_t buttons){
+stateName next_state_run(uint8_t buttons){
     // if button 1 is pressed
     if(buttons & (1 << BIT_0))
         return run_to_finish();

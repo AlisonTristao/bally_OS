@@ -6,27 +6,27 @@
 #include <ParallelProcessing.h>
 #include <StaticObjects.h>
 
-name setup_to_wait() {
+stateName setup_to_wait() {
     // log message
     #if defined(LOG_ALL) || defined(LOG_INFO)
         ROBOT::logger.insert_log("state_changed: setup -> wait", logType::INFO);
     #endif
 
-    // return the name of the next state
+    // return the stateName of the next state
     return WAIT;
 }
 
-name setup_to_error() {
+stateName setup_to_error() {
     // log message
     #if defined(LOG_ALL) || defined(LOG_INFO)
         ROBOT::logger.insert_log("state_changed: setup -> error", logType::INFO);
     #endif
 
-    // return the name of the next state
+    // return the stateName of the next state
     return ERROR;
 }
 
-name setup_function() {
+stateName setup_function() {
     // init communication 
     Serial.begin(921600);  
     delay(100);
@@ -51,7 +51,7 @@ name setup_function() {
     return setup_to_wait();
 }
 
-name next_state_setup(uint8_t buttons){
+stateName next_state_setup(uint8_t buttons){
     // if button 1 is pressed or setup completed
     if(buttons & (1 << BIT_0))
         return setup_to_wait();

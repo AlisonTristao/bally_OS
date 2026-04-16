@@ -5,27 +5,27 @@
 #include <Logger.h>
 #include <StaticObjects.h>
 
-name debug_to_finish() {
+stateName debug_to_finish() {
     // log message
     #if defined(LOG_ALL) || defined(LOG_INFO)
         ROBOT::logger.insert_log("state_changed: debug -> finish", logType::INFO);
     #endif
 
-    // return the name of the next state
+    // return the stateName of the next state
     return FINISH;
 }
 
-name debug_to_wait() {
+stateName debug_to_wait() {
     // log message
     #if defined(LOG_ALL) || defined(LOG_INFO)
         ROBOT::logger.insert_log("state_changed: debug -> wait", logType::INFO);
     #endif
 
-    // return the name of the next state
+    // return the stateName of the next state
     return WAIT;
 }
 
-name debug_function() {
+stateName debug_function() {
     // log message
     #if defined(LOG_ALL) || defined(LOG_INFO)
         ROBOT::logger.insert_log((ROBOT::array_sensor.debug()).c_str(), logType::INFO);
@@ -37,7 +37,7 @@ name debug_function() {
     return DEBUG;
 }
 
-name next_state_debug(uint8_t buttons){
+stateName next_state_debug(uint8_t buttons){
     // if button 1 is pressed
     if(buttons & (1 << BIT_0))
         return debug_to_finish();

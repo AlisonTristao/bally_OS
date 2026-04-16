@@ -10,27 +10,27 @@
 // static library
 #include <StaticObjects.h>
 
-name calibrate_to_wait() {
+stateName calibrate_to_wait() {
     // log message
     #if defined(LOG_ALL) || defined(LOG_INFO)
         ROBOT::logger.insert_log("state_changed: calibrate -> wait", logType::INFO);
     #endif
 
-    // return the name of the next state
+    // return the stateName of the next state
     return WAIT;
 }
 
-name calibrate_to_error() {
+stateName calibrate_to_error() {
     // log message
     #if defined(LOG_ALL) || defined(LOG_INFO)
         ROBOT::logger.insert_log("state_changed: calibrate -> error", logType::INFO);
     #endif
 
-    // return the name of the next state
+    // return the stateName of the next state
     return ERROR;
 }
 
-name calibrate_function() {
+stateName calibrate_function() {
     const bool calib = ROBOT::array_sensor.calibrate(SAMPLES, DELAY_SAMPLE);
 
     // log message
@@ -47,7 +47,7 @@ name calibrate_function() {
     return calibrate_to_wait();
 }
 
-name next_state_calibrate(uint8_t buttons){
+stateName next_state_calibrate(uint8_t buttons){
     // if button 1 is pressed
     if(buttons & (1 << BIT_0))
         return calibrate_to_wait();
