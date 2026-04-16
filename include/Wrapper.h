@@ -16,6 +16,7 @@
 // ==================== EXTERNAL LIBRARIES ====================
 #include <TinyShell.h>
 
+
 // wrapper functions for shell commands
 void run_command(const String& cmd) {
     // run the command using TinyShell
@@ -25,6 +26,34 @@ void run_command(const String& cmd) {
     #if defined(LOG_ALL) || defined(LOG_CMD)
         ROBOT::logger.insert_log(result, logType::CMD);
     #endif
+}
+
+/**
+ * @brief Virtually triggers a button, keeping the flag active for time_ms milliseconds
+ * @param button Button index
+ * @param time_ms Time in milliseconds
+ */
+
+uint8_t triggerVirtualButton(uint8_t button, uint32_t time_ms) {
+    // Set the button flag
+    ROBOT::buttons.setFlag(button);
+    // Log the action
+    ROBOT::logger.insert_log(String("button {") + String(button) + "} virtually triggered", logType::INFO);
+    // The duration is controlled by the flags system (checkFlagsDuration)
+    // If you want to force the time, you can implement a timer/task to clear the flag after time_ms
+
+    return RESULT_OK;
+}
+
+uint8_t triggerVirtualSideSensor(uint8_t sensor, uint32_t time_ms) {
+    // Set the side sensor flag
+    ROBOT::sideSensors.setFlag(sensor);
+    // Log the action
+    ROBOT::logger.insert_log(String("side sensor {") + String(sensor) + "} virtually triggered", logType::INFO);
+    // The duration is controlled by the flags system (checkFlagsDuration)
+    // If you want to force the time, you can implement a timer/task to clear the flag after time_ms
+
+    return RESULT_OK;
 }
 
 /**
@@ -147,6 +176,8 @@ bool start_shell_wrappers() {
     ROBOT::shell.create_module("robot", "Module for robot control commands");
     ROBOT::shell.add(set_led, "set_led", "Set LED color and brightness", "robot");
     ROBOT::shell.add(led_off, "led_off", "Turn off the LED", "robot");
+    ROBOT::shell.add(triggerVirtualButton, "btn", "Virtually trigger a button", "robot");
+    ROBOT::shell.add(triggerVirtualSideSensor, "ssr", "Virtually trigger a side sensor", "robot");
 
     #if defined(LOG_ALL) || defined(LOG_INFO)
         ROBOT::logger.insert_log("Shell started", logType::CMD);
