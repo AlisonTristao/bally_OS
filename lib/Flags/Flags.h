@@ -35,10 +35,12 @@ struct FlagsByte {
 // Abstract base class shared by all flag types
 class FlagsBase {
 public:
+    static constexpr uint8_t MAX_FLAGS = 8;
+
     // Constructor with optional debug name
     FlagsBase(const String& name = "", uint32_t timeLimit = 100)
         : name(name) {
-            for (int i = 0; i < 8; i++) {
+            for (int i = 0; i < MAX_FLAGS; i++) {
                 this->timeLimit[i] = timeLimit;
             }
         }
@@ -63,7 +65,9 @@ public:
 protected:
     FlagsByte flags;
     String name;
-    uint32_t timeLimit[8];
+    uint32_t timeLimit[MAX_FLAGS];
+
+    bool isValidIndex(uint8_t index) const;
 
     // Updates flags based on current time
     void refreshFlags(uint32_t currentTime);
@@ -81,7 +85,7 @@ public:
     void setFlag(uint8_t index);
 protected:
     // Handles flag update triggered by interrupt
-    void handleUpdate(uint8_t index);
+    void IRAM_ATTR handleUpdate(uint8_t index);
 };
 
 // Digital output flags controlled by software

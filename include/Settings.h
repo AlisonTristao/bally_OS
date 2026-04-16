@@ -8,8 +8,6 @@
 // -> LOG_ERROR           // register error logs
 // -> LOG_DEBUG           // register debug logs
 // -> LOG_VERBOSE         // print log messages in real time
-#define LOG_ALL
-#define LOG_VERBOSE
 
 // native libraries
 #include <Arduino.h>
@@ -120,9 +118,6 @@ bool init_structure() {
     // init shell wrappers
     if (!start_shell_wrappers())
         return false;
-
-    // init static objects
-	ROBOT::init();
 
     // all ok
     return true;

@@ -10,6 +10,7 @@
 
 #define MAX_MESSAGE_SIZE 230
 #define MAX_MESSAGES 1024
+#define LOGGER_MUTEX_TIMEOUT_MS 100
 
 enum class logType {
     NONE,

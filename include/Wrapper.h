@@ -34,9 +34,14 @@ void run_command(const String& cmd) {
  * @param time_ms Time in milliseconds
  */
 
-uint8_t triggerVirtualButton(uint8_t button, uint32_t time_ms) {
+uint8_t triggerVirtualButton(uint8_t button) {
+    if (button > 2) {
+        ROBOT::logger.insert_log(String("invalid button index {") + String(button) + "}. expected: 0..2", logType::ERROR);
+        return RESULT_ERROR;
+    }
+
     // Set the button flag
-    ROBOT::buttons.setFlag(button);
+    //ROBOT::buttons.setFlag(button);
     // Log the action
     ROBOT::logger.insert_log(String("button {") + String(button) + "} virtually triggered", logType::INFO);
     // The duration is controlled by the flags system (checkFlagsDuration)
@@ -45,11 +50,39 @@ uint8_t triggerVirtualButton(uint8_t button, uint32_t time_ms) {
     return RESULT_OK;
 }
 
+static bool normalizeSideSensorIndex(uint8_t sensor, uint8_t& normalized) {
+    if (sensor <= 1) {
+        normalized = sensor;
+        return true;
+    }
+
+    if (sensor == LEFT) {
+        normalized = 0;
+        return true;
+    }
+
+    if (sensor == RIGHT) {
+        normalized = 1;
+        return true;
+    }
+
+    return false;
+}
+
 uint8_t triggerVirtualSideSensor(uint8_t sensor, uint32_t time_ms) {
+    uint8_t sensorIndex = 0;
+    if (!normalizeSideSensorIndex(sensor, sensorIndex)) {
+        ROBOT::logger.insert_log(String("invalid side sensor {") + String(sensor) + "}. expected: 0/1 or LEFT/RIGHT pin", logType::ERROR);
+        return RESULT_ERROR;
+    }
+
+    if (time_ms > 0)
+        ROBOT::sideSensors.setTimeLimit(sensorIndex, time_ms);
+
     // Set the side sensor flag
-    ROBOT::sideSensors.setFlag(sensor);
+    ROBOT::sideSensors.setFlag(sensorIndex);
     // Log the action
-    ROBOT::logger.insert_log(String("side sensor {") + String(sensor) + "} virtually triggered", logType::INFO);
+    ROBOT::logger.insert_log(String("side sensor {") + String(sensorIndex) + "} virtually triggered", logType::INFO);
     // The duration is controlled by the flags system (checkFlagsDuration)
     // If you want to force the time, you can implement a timer/task to clear the flag after time_ms
 

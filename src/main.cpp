@@ -42,6 +42,9 @@ StateMachine state7(TELEMETRY, 	telemetry_function, next_state_telemetry);
 StateMachine state8(ERROR, 		error_function,		next_state_error);
 
 void setup() {
+	// init static objects
+	ROBOT::init();
+
 	// init log register
 	ROBOT::logger.insert_log("Welcome! the car is starting...", logType::INFO);
 
@@ -72,7 +75,7 @@ void setup() {
 							NULL, 							// not used
 							2, 								// priority 
 							NULL, 							// not used
-							SECONDARY_CORE);				// secondary core
+							SECONDARY_CORE);				// secondary core*/
 }
 
 void loop() {
@@ -80,5 +83,5 @@ void loop() {
 	ROBOT::machine.run();
 
 	// sample delay... (wait for the whatchdog to be ready) 
-	delay(1);
+	delay(10);
 }

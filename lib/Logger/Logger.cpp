@@ -63,10 +63,9 @@ void Logger::send_logger(logType type) {
 
 void Logger::clear_logger() {
     if (mutex_ == NULL) return;
-    if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(1000))) {
+    if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(LOGGER_MUTEX_TIMEOUT_MS))) {
         if (message_count == MAX_MESSAGES) {
             message_count = 0;
-            last_index = 0;
         }
         xSemaphoreGive(mutex_);
     }
@@ -75,18 +74,37 @@ void Logger::clear_logger() {
 void Logger::send_logger_live() {
     if (mutex_ == NULL) return;
     // copy range under lock
-    if (!xSemaphoreTake(mutex_, pdMS_TO_TICKS(1000))) return;
+    if (!xSemaphoreTake(mutex_, pdMS_TO_TICKS(LOGGER_MUTEX_TIMEOUT_MS))) return;
     uint32_t start = last_index;
     uint32_t end = message_count;
     xSemaphoreGive(mutex_);
 
-    for (uint32_t i = start; i < end; ++i) {
-        send_callback_(reinterpret_cast<const uint8_t*>(&messages[i]), sizeof(messages[i]));
-        // update last_index progress under lock
-        if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(1000))) {
-            last_index = i + 1;
-            xSemaphoreGive(mutex_);
-        }
+    if (start >= MAX_MESSAGES) start = 0;
+    if (end > MAX_MESSAGES) end = MAX_MESSAGES;
+
+    if (start == end) return;
+
+    auto send_entry = [this](uint32_t idx) {
+        send_callback_(reinterpret_cast<const uint8_t*>(&messages[idx]), sizeof(messages[idx]));
+        Serial.print("Sent log: ");
+        Serial.println(messages[idx].msg);
+    };
+
+    if (start < end) {
+        for (uint32_t i = start; i < end; ++i)
+            send_entry(i);
+    } else {
+        // Buffer wrapped: send from last_index to end of array and then from 0 to message_count.
+        for (uint32_t i = start; i < MAX_MESSAGES; ++i)
+            send_entry(i);
+
+        for (uint32_t i = 0; i < end; ++i)
+            send_entry(i);
+    }
+
+    if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(LOGGER_MUTEX_TIMEOUT_MS))) {
+        last_index = (end == MAX_MESSAGES) ? 0 : end;
+        xSemaphoreGive(mutex_);
     }
 }
 

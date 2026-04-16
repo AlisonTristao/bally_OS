@@ -96,6 +96,6 @@ void ROBOT::routine(void *param){
         ROBOT::motors.checkFlagsDuration();
 
         // unlock the CPU (wait for the whatchdog to be ready) 
-        taskYIELD();
+        vTaskDelay(10/portTICK_PERIOD_MS);
     }
 }

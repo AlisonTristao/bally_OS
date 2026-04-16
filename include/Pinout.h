@@ -38,8 +38,8 @@
 #define BTN3            0
 
 // -------------------- Side sensors --------------------
-#define LEFT            20 
-#define RIGHT           47
+#define LEFT            39 
+#define RIGHT           40
 
 // -------------------- Buzzer --------------------
 //#define BZR             6*/

@@ -49,22 +49,23 @@ bool StateMachine::run(){
     if(!verifyState())
         return reportError("State is not valid");
 
-    // try execute function 
-    bool result = false;
+    // execute action and use returned state as the next active state
+    stateName next_state = NONE;
     try {
-        result = arr_states[current_state]->action();
+        next_state = arr_states[current_state]->action();
     } catch(const std::exception& e) {
         // LOGGER erro
         reportError("Error in the state machine");
         return reportError(e.what());
     }
 
-    if(!result)
-        // LOGGER erro
-        return reportError("State function returned false");
+    if(next_state <= NONE || next_state >= NUMBER_OF_STATES)
+        return reportError("State function returned an invalid state");
+
+    current_state = next_state;
 
     // all is okay    
-    return result;
+    return true;
 }
 
 void StateMachine::next(uint8_t buttons){
