@@ -39,9 +39,6 @@ stateName setup_function() {
     if(!init_interruptions())
         return setup_to_error();
 
-    // init robot objects
-    ROBOT::init();
-
     // log message
     #if defined(LOG_ALL) || defined(LOG_INFO)
         ROBOT::logger.insert_log("Setup function called", logType::INFO);

@@ -58,7 +58,7 @@ void setup() {
 	ROBOT::machine.current_state = SETUP;
 
 	// init parallel processing into secondary core
-	xTaskCreatePinnedToCore(routine, 				// task function 
+	xTaskCreatePinnedToCore(ROBOT::routine, 			// task function 
 							"parallel_processing", 	// task name
 							10240, 					// stack size
 							NULL, 					// not used

@@ -120,6 +120,9 @@ bool init_structure() {
     if (!start_shell_wrappers())
         return false;
 
+    // init static objects
+	ROBOT::init();
+
     // all ok
     return true;
 }

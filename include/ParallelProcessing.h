@@ -79,42 +79,4 @@ bool init_interruptions(){
     return result_interrupt;
 }
 
-void routine(void *param){
-    // delay to stabilize the system (wait checkFlagsDuration() to be ready)
-    delay(DELAY_FLAGS);
-
-	// set the filter time for flags 
-    ROBOT::buttons.setFilterTime(DELAY_FLAGS); 
-    ROBOT::sideSensors.setFilterTime(DELAY_FLAGS);
-
-	// timer of state machine actualization
-	uint32_t timer_state_machine = millis();
-	
-    // log message  
-    #if defined(LOG_ALL) || defined(LOG_INFO)
-        ROBOT::logger.insert_log("Parallel processing initialized", logType::INFO);
-    #endif
-
-    // main loop of the parallel processing
-	while(true) {	
-        // logger print live
-        #ifdef LOG_VERBOSE
-            ROBOT::logger.send_logger_live();
-        #endif
-
-		// check flags duration
-		ROBOT::buttons.checkFlagsDuration();
-		ROBOT::sideSensors.checkFlagsDuration();
-        ROBOT::leds.checkFlagsDuration();
-        ROBOT::motors.checkFlagsDuration();
-
-        // keep periodic debug prints without changing state here
-		if(millis() - timer_state_machine > DELAY_FLAGS)
-			timer_state_machine = millis();
-
-		// sample delay... (wait for the whatchdog to be ready) 
-		delay(1);
-	}
-}
-
 #endif

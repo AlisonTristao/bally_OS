@@ -56,18 +56,22 @@ class StateMachine{
          */
         void next(uint8_t buttons);
 
+        /**
+         * @brief set the error callback function
+         * @param callback: the function to be called when an error occurs
+         */
         void setErrorCallback(ErrorCallback callback);
+
+        /**
+         * @brief current state of the state machine
+         */
+        static uint8_t current_state;
     private:
         // index of the state
         union{
             stateName state;
             uint8_t number;
         };
-
-        /**
-         * @brief current state of the state machine
-         */
-        static uint8_t current_state;
 
         /**
          * @brief verify if the state is valid
