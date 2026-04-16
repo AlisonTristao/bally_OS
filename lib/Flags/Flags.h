@@ -60,7 +60,6 @@ public:
     String toString() const {
         return name + " Flags: " + String(flags.allFlags, BIN);
     };
-
 protected:
     FlagsByte flags;
     String name;
@@ -76,10 +75,10 @@ public:
     // Constructor with optional debug name
     Flags_in(const String& name = "") : FlagsBase(name) {}        
     virtual ~Flags_in() {};
-
     // Static ISR required for attachInterruptArg
     void IRAM_ATTR isr(void* arg);
-
+    // Sets a specific flag from an ISR
+    void setFlag(uint8_t index);
 protected:
     // Handles flag update triggered by interrupt
     void handleUpdate(uint8_t index);
@@ -90,7 +89,6 @@ class Flags_out : public FlagsBase {
 public:
     Flags_out(const String& name = "") : FlagsBase(name) {}
     virtual ~Flags_out() {};
-
     // Sets a specific flag manually
     void setFlag(uint8_t index, uint32_t time);
 };
@@ -101,7 +99,6 @@ public:
     // Constructor with optional debug name
     Flags_pwm(const String& name = "") : FlagsBase(name) {}
     virtual ~Flags_pwm() {};
-
     // Sets PWM value (0–100)
     void setValue(uint8_t index, int16_t value, uint32_t time);
 

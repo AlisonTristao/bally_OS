@@ -2,7 +2,9 @@
 
 Logger::Logger()
     : send_callback_(defaultSendCallback),
-      command_callback_(defaultCommandCallback) {}
+      command_callback_(defaultCommandCallback) {
+    mutex_ = xSemaphoreCreateMutex();
+}
 
 void Logger::setSendCallback(SendCallback callback) {
     send_callback_ = (callback != nullptr) ? callback : defaultSendCallback;
@@ -60,20 +62,31 @@ void Logger::send_logger(logType type) {
 }
 
 void Logger::clear_logger() {
-    mutex = false;
-
-    if (message_count == MAX_MESSAGES) {
-        message_count = 0;
-        last_index = 0;
+    if (mutex_ == NULL) return;
+    if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(1000))) {
+        if (message_count == MAX_MESSAGES) {
+            message_count = 0;
+            last_index = 0;
+        }
+        xSemaphoreGive(mutex_);
     }
-
-    mutex = true;
 }
 
 void Logger::send_logger_live() {
-    for (; last_index < message_count; ++last_index) {
-        if (!mutex) return;
-        send_callback_(reinterpret_cast<const uint8_t*>(&messages[last_index]), sizeof(messages[last_index]));
+    if (mutex_ == NULL) return;
+    // copy range under lock
+    if (!xSemaphoreTake(mutex_, pdMS_TO_TICKS(1000))) return;
+    uint32_t start = last_index;
+    uint32_t end = message_count;
+    xSemaphoreGive(mutex_);
+
+    for (uint32_t i = start; i < end; ++i) {
+        send_callback_(reinterpret_cast<const uint8_t*>(&messages[i]), sizeof(messages[i]));
+        // update last_index progress under lock
+        if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(1000))) {
+            last_index = i + 1;
+            xSemaphoreGive(mutex_);
+        }
     }
 }
 

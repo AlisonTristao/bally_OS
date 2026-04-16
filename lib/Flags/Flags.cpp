@@ -30,6 +30,11 @@ void IRAM_ATTR Flags_in::isr(void* arg) {
     handleUpdate(index);
 }
 
+void Flags_in::setFlag(uint8_t index) {
+    flags.time[index] = millis();
+    flags.allFlags |= (1 << index);
+}
+
 void Flags_in::handleUpdate(uint8_t index) {
     uint32_t now = millis();
 

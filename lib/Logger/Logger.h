@@ -5,6 +5,8 @@
 // email: AlisonTristao@hotmail.com
 
 #include <Arduino.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 #define MAX_MESSAGE_SIZE 230
 #define MAX_MESSAGES 1024
@@ -44,7 +46,7 @@ private:
     message messages[MAX_MESSAGES] = {};
     uint32_t message_count = 0;
     uint32_t last_index = 0;
-    bool mutex = true;
+    SemaphoreHandle_t mutex_ = NULL;
     SendCallback send_callback_;
     CommandCallback command_callback_;
 
