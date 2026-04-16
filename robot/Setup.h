@@ -3,7 +3,6 @@
 
 // header
 #include <Settings.h>
-#include <ParallelProcessing.h>
 #include <StaticObjects.h>
 
 stateName setup_to_wait() {
@@ -33,10 +32,6 @@ stateName setup_function() {
 
     // init pins direction, settings, i2c communication...
     if(!init_structure())
-        return setup_to_error();
-
-    // init interruptions in parallel processing
-    if(!init_interruptions())
         return setup_to_error();
 
     // log message

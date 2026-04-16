@@ -4,7 +4,6 @@
 
 // ==================== PROJECT HEADERS ====================
 #include <Settings.h>
-#include <ParallelProcessing.h>
 #include <Pinout.h>
 
 // ==================== EXTERNAL LIBRARIES ====================
@@ -58,14 +57,22 @@ void setup() {
 	ROBOT::machine.current_state = SETUP;
 
 	// init parallel processing into secondary core
-	xTaskCreatePinnedToCore(ROBOT::routine, 			// task function 
-							"parallel_processing", 	// task name
-							10240, 					// stack size
-							NULL, 					// not used
-							2, 						// priority
-							NULL, 					// not used
-							SECONDARY_CORE);		// secondary core
+	xTaskCreatePinnedToCore(ROBOT::routine, 				// task function 
+							"parallel_processing", 			// task name
+							10240, 							// stack size
+							NULL, 							// not used
+							3, 								// priority
+							NULL, 							// not used
+							SECONDARY_CORE);				// secondary core
 
+    // init interruptions on secondary core
+    xTaskCreatePinnedToCore(ROBOT::configure_interruptions, // task function
+							"setup_interrupts", 			// task name
+							2048, 							// stack size
+							NULL, 							// not used
+							2, 								// priority 
+							NULL, 							// not used
+							SECONDARY_CORE);				// secondary core
 }
 
 void loop() {

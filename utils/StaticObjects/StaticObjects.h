@@ -3,6 +3,8 @@
 
 #include <Arduino.h>
 
+#include <esp_timer.h>
+
 #include <Pinout.h>
 #include <RGBLed.h>
 
@@ -24,6 +26,12 @@ public:
 
     // routine to be executed in parallel processing
     static void routine(void *param);
+
+    // Interrupt/timer handling (moved from ParallelProcessing.h)
+    static esp_timer_handle_t timer_get_handle;
+    static void sampleISR(void* arg);
+    static void configure_interruptions(void *param);
+    static bool init_interruptions();
 
     // Signals and flags for buttons, sensors, LEDs, and motors
     static Flags_in buttons;

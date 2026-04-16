@@ -17,6 +17,65 @@ TinyShell ROBOT::shell;
 StateMachine ROBOT::machine(NONE, NULL, NULL);
 uint32_t ROBOT::delay_flags = 100; // default delay for flags duration check
 
+// timer handle (moved from ParallelProcessing.h)
+esp_timer_handle_t ROBOT::timer_get_handle;
+
+struct InterruptInitResult {
+    volatile bool done;
+    volatile bool success;
+    InterruptInitResult(): done(false), success(false) {}
+};
+
+// sample ISR (IRAM resident)
+void IRAM_ATTR ROBOT::sampleISR(void* arg) {
+    #if defined(LOG_ALL) || defined(LOG_TELEMETRY)
+        if(!(ROBOT::machine.current_state == RUN)) return;
+        /*ROBOT::logger.insert_log(
+                            String(ROBOT::encoder_left.getCount())    + ";" +
+                            String(ROBOT::encoder_right.getCount()),
+                            logType::TELEMETRY);*/
+    #endif
+}
+
+void ROBOT::configure_interruptions(void *param){
+    InterruptInitResult* res = (InterruptInitResult*) param;
+
+    // set the buttons interruptions
+    /*attachInterrupt(digitalPinToInterrupt(BTN1), Signals_IN::isrBtn0, FALLING);
+    attachInterrupt(digitalPinToInterrupt(BTN2), Signals_IN::isrBtn1, FALLING);
+    attachInterrupt(digitalPinToInterrupt(BTN3), Signals_IN::isrBtn2, FALLING);
+
+    // set the side sensors interruptions
+    attachInterrupt(digitalPinToInterrupt(LEFT), Signals_IN::isrsideSensor0, RISING);
+    attachInterrupt(digitalPinToInterrupt(RIGHT), Signals_IN::isrsideSensor1, RISING);*/
+
+    // set the timer interruptions
+    #ifdef SAMPLING_ACTIVE
+        esp_timer_create_args_t timer_args = {
+          .callback = &ROBOT::sampleISR,
+          .arg = NULL,
+          .name = "timer_get_values"
+        };
+
+        // try init the timer interrupt
+        bool ok = !(esp_timer_create(&timer_args, &ROBOT::timer_get_handle) != ESP_OK
+                    || esp_timer_start_periodic(ROBOT::timer_get_handle, SAMPLE_MICROS) != ESP_OK);
+        res->success = ok;
+    #else
+        res->success = true;
+    #endif
+
+    // log message
+    #if defined(LOG_ALL) || defined(LOG_INFO)
+        ROBOT::logger.insert_log("Interruptions configured", logType::INFO);
+    #endif
+
+    res->done = true;
+
+    // delete this task
+    vTaskDelete(NULL);
+}
+
 void ROBOT::init() {
     motor_left.init();
     motor_right.init();
@@ -48,11 +107,7 @@ void ROBOT::routine(void *param){
         ROBOT::leds.checkFlagsDuration();
         ROBOT::motors.checkFlagsDuration();
 
-        // keep periodic debug prints without changing state here
-        if(millis() - timer_state_machine > ROBOT::delay_flags)
-            timer_state_machine = millis();
-
-        // sample delay... (wait for the whatchdog to be ready) 
-        delay(1);
+        // unlock the CPU (wait for the whatchdog to be ready) 
+        taskYIELD();
     }
 }
