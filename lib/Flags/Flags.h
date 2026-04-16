@@ -76,7 +76,7 @@ public:
     Flags_in(const String& name = "") : FlagsBase(name) {}        
     virtual ~Flags_in() {};
     // Static ISR required for attachInterruptArg
-    void IRAM_ATTR isr(void* arg);
+    static void IRAM_ATTR isr(void* arg);
     // Sets a specific flag from an ISR
     void setFlag(uint8_t index);
 protected:
@@ -106,6 +106,11 @@ public:
     int16_t getValue(uint8_t index) const;
 protected:
     int16_t pwmValues[8] = {0, 0, 0, 0, 0, 0, 0, 0}; // stores PWM values per channel
+};
+
+struct FlagsIsrArg {
+    Flags_in* obj;
+    uint8_t index;
 };
 
 #endif // FLAGS_H

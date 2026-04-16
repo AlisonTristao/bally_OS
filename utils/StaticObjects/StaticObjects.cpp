@@ -1,4 +1,6 @@
 #include <StaticObjects.h>
+#include <Arduino.h>
+#include <Pinout.h>
 
 uint8_t sensor_pins[LEN_SENSOR] = {D0, D1, D2, D3, D4, D5, D6, D7};
 
@@ -15,7 +17,6 @@ HBridge ROBOT::motor_right(BIN1, BIN2, CH1, PWM_B);
 Control ROBOT::control;
 TinyShell ROBOT::shell;
 StateMachine ROBOT::machine(NONE, NULL, NULL);
-uint32_t ROBOT::delay_flags = 100; // default delay for flags duration check
 
 // timer handle (moved from ParallelProcessing.h)
 esp_timer_handle_t ROBOT::timer_get_handle;
@@ -38,16 +39,13 @@ void IRAM_ATTR ROBOT::sampleISR(void* arg) {
 }
 
 void ROBOT::configure_interruptions(void *param){
-    InterruptInitResult* res = (InterruptInitResult*) param;
 
-    // set the buttons interruptions
-    /*attachInterrupt(digitalPinToInterrupt(BTN1), Signals_IN::isrBtn0, FALLING);
-    attachInterrupt(digitalPinToInterrupt(BTN2), Signals_IN::isrBtn1, FALLING);
-    attachInterrupt(digitalPinToInterrupt(BTN3), Signals_IN::isrBtn2, FALLING);
-
-    // set the side sensors interruptions
-    attachInterrupt(digitalPinToInterrupt(LEFT), Signals_IN::isrsideSensor0, RISING);
-    attachInterrupt(digitalPinToInterrupt(RIGHT), Signals_IN::isrsideSensor1, RISING);*/
+    // set the button interruptions
+    attachInterruptArg(digitalPinToInterrupt(BTN1), Flags_in::isr, &btnArgs[0], FALLING);
+    attachInterruptArg(digitalPinToInterrupt(BTN2), Flags_in::isr, &btnArgs[1], FALLING);
+    attachInterruptArg(digitalPinToInterrupt(BTN3), Flags_in::isr, &btnArgs[2], FALLING);
+    attachInterruptArg(digitalPinToInterrupt(LEFT), Flags_in::isr, &sideArgs[0], RISING);
+    attachInterruptArg(digitalPinToInterrupt(RIGHT), Flags_in::isr, &sideArgs[1], RISING);
 
     // set the timer interruptions
     #ifdef SAMPLING_ACTIVE
@@ -60,17 +58,7 @@ void ROBOT::configure_interruptions(void *param){
         // try init the timer interrupt
         bool ok = !(esp_timer_create(&timer_args, &ROBOT::timer_get_handle) != ESP_OK
                     || esp_timer_start_periodic(ROBOT::timer_get_handle, SAMPLE_MICROS) != ESP_OK);
-        res->success = ok;
-    #else
-        res->success = true;
     #endif
-
-    // log message
-    #if defined(LOG_ALL) || defined(LOG_INFO)
-        ROBOT::logger.insert_log("Interruptions configured", logType::INFO);
-    #endif
-
-    res->done = true;
 
     // delete this task
     vTaskDelete(NULL);

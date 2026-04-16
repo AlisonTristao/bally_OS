@@ -30,15 +30,19 @@
 /*#define ENC_A0          21
 #define ENC_A1          47
 #define ENC_B0          20
-#define ENC_B1          19
+#define ENC_B1          19*/
 
 // -------------------- Buttons --------------------
 #define BTN1            1
 #define BTN2            2
 #define BTN3            0
 
+// -------------------- Side sensors --------------------
+#define LEFT            20 
+#define RIGHT           47
+
 // -------------------- Buzzer --------------------
-#define BZR             6*/
+//#define BZR             6*/
 
 // -------------------- Sensor --------------------
 #define D0        18
@@ -50,12 +54,8 @@
 #define D6        5
 #define D7        4
 
-// -------------------- Side sensors --------------------
-/*#define LEFT            8 
-#define RIGHT           17
-
 // -------------------- I2C devices --------------------
-#define SDA             4
+/*#define SDA             4
 #define SCL             5
 
 // -------------------- Voltage dividers --------------------

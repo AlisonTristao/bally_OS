@@ -31,7 +31,6 @@ public:
     static esp_timer_handle_t timer_get_handle;
     static void sampleISR(void* arg);
     static void configure_interruptions(void *param);
-    static bool init_interruptions();
 
     // Signals and flags for buttons, sensors, LEDs, and motors
     static Flags_in buttons;
@@ -50,8 +49,18 @@ public:
     static ArraySensor array_sensor;
     static HBridge motor_left;
     static HBridge motor_right;
-private:
-    static uint32_t delay_flags; 
+};
+
+// Define the buttons and side sensors as Flags_in objects with their respective indices
+static FlagsIsrArg btnArgs[] = {
+    {&ROBOT::buttons, 0},
+    {&ROBOT::buttons, 1},
+    {&ROBOT::buttons, 2}
+};
+
+static FlagsIsrArg sideArgs[] = {
+    {&ROBOT::sideSensors, 0},
+    {&ROBOT::sideSensors, 1}
 };
 
 #endif

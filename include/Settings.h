@@ -67,15 +67,20 @@ bool configure_pins(){
     pinMode(PWM_A, OUTPUT);
     pinMode(PWM_B, OUTPUT);
 
+    // Buttons
+    pinMode(BTN1, INPUT_PULLUP);
+    pinMode(BTN2, INPUT_PULLUP);
+    pinMode(BTN3, INPUT_PULLUP);
+
+    // Side sensors
+    pinMode(LEFT, INPUT);
+    pinMode(RIGHT, INPUT);
+
     // Encoders
     /*pinMode(ENC_A0, INPUT);
     pinMode(ENC_A1, INPUT);
     pinMode(ENC_B0, INPUT);
     pinMode(ENC_B1, INPUT);
-
-    // Buttons
-    pinMode(BTN1, INPUT_PULLUP);
-    pinMode(BTN2, INPUT_PULLUP);
 
     // Buzzer
     pinMode(BZR, OUTPUT);
@@ -86,10 +91,6 @@ bool configure_pins(){
     pinMode(C1, OUTPUT);
     pinMode(C2, OUTPUT);
     pinMode(C3, OUTPUT);
-
-    // Side sensors
-    pinMode(LEFT, INPUT);
-    pinMode(RIGHT, INPUT);
 
     // Bat
     pinMode(BAT, INPUT);
@@ -116,7 +117,7 @@ bool init_structure() {
     if (!configure_wifi())
         return false;
 
-    // init shell
+    // init shell wrappers
     if (!start_shell_wrappers())
         return false;
 

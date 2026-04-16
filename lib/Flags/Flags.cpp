@@ -25,9 +25,8 @@ void FlagsBase::refreshFlags(uint32_t currentTime) {
 // ===== Flags_in =====
 
 void IRAM_ATTR Flags_in::isr(void* arg) {
-    // Cast back to object
-    uint8_t index = (uintptr_t) arg;
-    handleUpdate(index);
+    FlagsIsrArg* data = static_cast<FlagsIsrArg*>(arg);
+    data->obj->handleUpdate(data->index);
 }
 
 void Flags_in::setFlag(uint8_t index) {
