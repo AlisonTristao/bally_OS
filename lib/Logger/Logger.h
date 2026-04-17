@@ -7,19 +7,11 @@
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
+#include <SharedMessageTypes.h>
 
 #define MAX_MESSAGE_SIZE 230
 #define MAX_MESSAGES 1024
 #define LOGGER_MUTEX_TIMEOUT_MS 100
-
-enum class logType {
-    NONE,
-    INFO,
-    CMD,
-    TELEMETRY,
-    ERROR,
-    DEBUG
-};
 
 typedef struct {
     uint32_t timer;

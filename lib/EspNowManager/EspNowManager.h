@@ -2,7 +2,7 @@
 
 #include <Arduino.h>
 #include <esp_now.h>
-#include "logger.h"
+#include <SharedMessageTypes.h>
 
 /**
  * @brief EspNowManager simplificado: apenas envio point-to-point.
