@@ -202,9 +202,29 @@ uint8_t wrapper_h() {
     return RESULT_OK;  // return 0 to indicate success
 }
 
+uint8_t wrapper_types_help() {
+    #if defined(LOG_ALL) || defined(LOG_CMD)
+        ROBOT::logger.insert_log("Type aliases used by shell:", logType::CMD);
+        ROBOT::logger.insert_log("u8  => uint8_t", logType::CMD);
+        ROBOT::logger.insert_log("u16 => uint16_t", logType::CMD);
+        ROBOT::logger.insert_log("u32 => uint32_t", logType::CMD);
+        ROBOT::logger.insert_log("u64 => uint64_t", logType::CMD);
+        ROBOT::logger.insert_log("i8  => int8_t", logType::CMD);
+        ROBOT::logger.insert_log("i16 => int16_t", logType::CMD);
+        ROBOT::logger.insert_log("i32 => int32_t", logType::CMD);
+        ROBOT::logger.insert_log("i64 => int64_t", logType::CMD);
+        ROBOT::logger.insert_log("f32 => float", logType::CMD);
+        ROBOT::logger.insert_log("f64 => double", logType::CMD);
+        ROBOT::logger.insert_log("b   => bool", logType::CMD);
+        ROBOT::logger.insert_log("str => string", logType::CMD);
+    #endif
+    return RESULT_OK;
+}
+
 bool start_shell_wrappers() {
     ROBOT::shell.create_module("help", "Module for help and information");
     ROBOT::shell.add(wrapper_h, "h", "List all modules", "help");
+    ROBOT::shell.add(wrapper_types_help, "types", "Show type aliases (u8, i32, str...)", "help");
 
     ROBOT::shell.create_module("robot", "Module for robot control commands");
     ROBOT::shell.add(set_led, "set_led", "Set LED color and brightness", "robot");
