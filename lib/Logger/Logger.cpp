@@ -86,6 +86,13 @@ void Logger::send_logger_live() {
 
     auto send_entry = [this](uint32_t idx) {
         send_callback_(reinterpret_cast<const uint8_t*>(&messages[idx]), sizeof(messages[idx]));
+        // Optionally print if DEBUG is enabled
+        #if defined(LOG_ALL) || defined(LOG_DEBUG)
+            Serial.print("[");
+            Serial.print(logTypeToString(messages[idx].type));
+            Serial.print("] ");
+            Serial.println(messages[idx].msg);
+        #endif
     };
 
     if (start < end) {
