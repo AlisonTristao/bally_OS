@@ -21,12 +21,6 @@ StateMachine ROBOT::machine(NONE, NULL, NULL);
 // timer handle (moved from ParallelProcessing.h)
 esp_timer_handle_t ROBOT::timer_get_handle;
 
-struct InterruptInitResult {
-    volatile bool done;
-    volatile bool success;
-    InterruptInitResult(): done(false), success(false) {}
-};
-
 // sample ISR (IRAM resident)
 void IRAM_ATTR ROBOT::sampleISR(void* arg) {
     #if defined(LOG_ALL) || defined(LOG_TELEMETRY)
