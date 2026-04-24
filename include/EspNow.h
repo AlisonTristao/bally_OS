@@ -57,14 +57,63 @@ void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
 void OnDataRecv(const uint8_t *mac_addr, const EspNowManager::message& incomingData) {
     (void)mac_addr;
 
+    static String assembledMessage;
+    static uint8_t expectedPacketIndex = 0;
+    static bool assembling = false;
+
     char buffer[EspNowManager::MESSAGE_TEXT_SIZE + 1] = {0};
     memcpy(buffer, incomingData.msg, EspNowManager::MESSAGE_TEXT_SIZE);
     buffer[EspNowManager::MESSAGE_TEXT_SIZE] = '\0';
 
-    // Keep command path compatible with existing shell flow.
-    if (incomingData.type == logType::INFO || incomingData.type == logType::NONE) {
-        ROBOT::logger.insert_cmd(String(buffer));
+    const uint8_t packetIndex = getPacketIndex(incomingData.packetInfo);
+    const bool lastPacket = isLastPacket(incomingData.packetInfo);
+    const bool isStartType = (incomingData.type == logType::INFO || incomingData.type == logType::NONE);
+    const bool isContinuationType = (incomingData.type == logType::PAKG);
+
+    if (isStartType) {
+        // Start of a new command/message flow.
+        assembledMessage = "";
+        expectedPacketIndex = 0;
+        assembling = true;
     }
+
+    if (!assembling) {
+        return;
+    }
+
+    if (!isStartType && !isContinuationType) {
+        assembling = false;
+        assembledMessage = "";
+        expectedPacketIndex = 0;
+        return;
+    }
+
+    if (packetIndex != expectedPacketIndex) {
+        // Packet sequence mismatch, abort current assembly.
+        assembling = false;
+        assembledMessage = "";
+        expectedPacketIndex = 0;
+        return;
+    }
+
+    assembledMessage += String(buffer);
+
+    if (lastPacket) {
+        ROBOT::logger.insert_cmd(assembledMessage);
+        assembling = false;
+        assembledMessage = "";
+        expectedPacketIndex = 0;
+        return;
+    }
+
+    if (expectedPacketIndex >= MESSAGE_PACKET_MAX_INDEX) {
+        assembling = false;
+        assembledMessage = "";
+        expectedPacketIndex = 0;
+        return;
+    }
+
+    ++expectedPacketIndex;
 }
 
 bool configure_wifi() {

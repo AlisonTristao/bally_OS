@@ -161,6 +161,7 @@ void EspNowManager::handleReceiveStatic(const uint8_t* mac, const uint8_t* incom
         incoming.msg[copySize] = '\0';
         incoming.timer = millis();
         incoming.type = logType::NONE;
+        incoming.packetInfo = makePacketInfo(0, true);
     }
 
     activeInstance_->receiveCallback_(mac, incoming);

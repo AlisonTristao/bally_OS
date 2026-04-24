@@ -17,6 +17,7 @@ typedef struct {
     uint32_t timer;
     char msg[MAX_MESSAGE_SIZE + 1];
     logType type;
+    uint8_t packetInfo;
 } message;
 
 class Logger {

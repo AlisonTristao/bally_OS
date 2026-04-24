@@ -106,12 +106,14 @@ bool send_data(const uint8_t *data, size_t len) {
     EspNowManager::message outgoing = {};
     outgoing.timer = millis();
     outgoing.type = logType::INFO;
+    outgoing.packetInfo = makePacketInfo(0, true);
 
     // Logger sends packed `message`; normalize it to EspNow wire format.
     if (len == sizeof(::message)) {
         const ::message* logger_msg = reinterpret_cast<const ::message*>(data);
         outgoing.timer = logger_msg->timer;
         outgoing.type = logger_msg->type;
+        outgoing.packetInfo = logger_msg->packetInfo;
         strncpy(outgoing.msg, logger_msg->msg, EspNowManager::MESSAGE_TEXT_SIZE - 1);
         outgoing.msg[EspNowManager::MESSAGE_TEXT_SIZE - 1] = '\0';
     } else {
@@ -134,6 +136,7 @@ static bool send_text_message(const char* text, logType type) {
     EspNowManager::message msg = {};
     msg.timer = millis();
     msg.type = type;
+    msg.packetInfo = makePacketInfo(0, true);
 
     const size_t len = strlen(text);
     const size_t copy_size = (len < (EspNowManager::MESSAGE_TEXT_SIZE - 1)) ? len : (EspNowManager::MESSAGE_TEXT_SIZE - 1);

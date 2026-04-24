@@ -31,22 +31,36 @@ void Logger::insert_log(const String& msg, logType type) {
 void Logger::insert_log_impl(const String& msg, logType type, uint32_t ts) {
     if (msg.length() == 0) return;
 
-    const size_t n = (msg.length() > MAX_MESSAGE_SIZE) ? MAX_MESSAGE_SIZE : msg.length();
+    const size_t msgLen = msg.length();
+    size_t packetCount = (msgLen + MAX_MESSAGE_SIZE - 1) / MAX_MESSAGE_SIZE;
+    if (packetCount == 0) {
+        packetCount = 1;
+    }
 
-    message m = {};
-    m.timer = ts;
-    m.type = type;
+    // packet index is 7-bit (0..127)
+    if (packetCount > (static_cast<size_t>(MESSAGE_PACKET_MAX_INDEX) + 1U)) {
+        packetCount = static_cast<size_t>(MESSAGE_PACKET_MAX_INDEX) + 1U;
+    }
 
-    memset(m.msg, 0, sizeof(m.msg));
-    strncpy(m.msg, msg.c_str(), n);
-    m.msg[n] = '\0';
+    for (size_t i = 0; i < packetCount; ++i) {
+        const size_t start = i * MAX_MESSAGE_SIZE;
+        const size_t remaining = (start < msgLen) ? (msgLen - start) : 0;
+        const size_t n = (remaining > MAX_MESSAGE_SIZE) ? MAX_MESSAGE_SIZE : remaining;
+        const bool lastPacket = (i + 1U) == packetCount;
 
-    clear_logger();
-    messages[message_count++] = m;
+        message m = {};
+        m.timer = ts;
+        m.type = (i == 0U) ? type : logType::PAKG;
+        m.packetInfo = makePacketInfo(static_cast<uint8_t>(i), lastPacket);
 
-    if (msg.length() > n) {
-        // when the message exceeds the max size, the tipe message is PAKG and the content is the remaining part of the message
-        insert_log_impl(msg.substring(n), logType::PAKG, ts);
+        memset(m.msg, 0, sizeof(m.msg));
+        if (n > 0) {
+            strncpy(m.msg, msg.c_str() + start, n);
+        }
+        m.msg[n] = '\0';
+
+        clear_logger();
+        messages[message_count++] = m;
     }
 }
 
