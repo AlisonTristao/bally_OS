@@ -5,6 +5,9 @@
 // email: AlisonTristao@hotmail.com
 
 #include <Arduino.h>
+#include <atomic>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 // StateMachine Name
 enum stateName {
@@ -54,7 +57,7 @@ class StateMachine{
          * @brief change the state machine to the next state
          * @param buttons: the buttons pressed
          */
-        void next(uint8_t buttons);
+        bool next(uint8_t buttons);
 
         /**
          * @brief set the error callback function
@@ -65,7 +68,7 @@ class StateMachine{
         /**
          * @brief current state of the state machine
          */
-        static uint8_t current_state;
+        static std::atomic<uint8_t> current_state;
     private:
         // index of the state
         union{
@@ -77,7 +80,7 @@ class StateMachine{
          * @brief verify if the state is valid
          * @return true if the action was executed successfully, false otherwise
          */
-        bool verifyState();
+        bool verifyState(uint8_t state) const;
 
         /**
          * @brief function to be executed in the state
@@ -93,6 +96,7 @@ class StateMachine{
         stateName (*next_state)(uint8_t buttons);
 
         static StateMachine* arr_states[NUMBER_OF_STATES];
+        static SemaphoreHandle_t transitionMutex_;
         static ErrorCallback errorCallback_;
         static void defaultErrorCallback(const char* message);
         static bool reportError(const char* message);

@@ -1,27 +1,27 @@
-// ==================== SYSTEM & FRAMEWORK ====================
+//  SYSTEM & FRAMEWORK 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
-// ==================== PROJECT HEADERS ====================
+//  PROJECT HEADERS 
 #include <Settings.h>
 #include <Pinout.h>
 
-// ==================== EXTERNAL LIBRARIES ====================
+//  EXTERNAL LIBRARIES 
 #include <TinyShell.h>
 
-// ==================== CUSTOM MODULES ====================
+//  CUSTOM MODULES 
 #include <ArraySensor.h>
 #include <Encoder.h>
 #include <HBridge.h>
 #include <Control.h>
 
-// ==================== UTILITIES ====================
+//  UTILITIES 
 #include <Flags.h>
 #include <Logger.h>
 #include <StateMachine.h>
 #include <StaticObjects.h>
 
-// ==================== ROBOT STATE MACHINE ====================
+//  ROBOT STATE MACHINE 
 #include <Setup.h>  
 #include <Wait.h>
 #include <Calibrate.h>
@@ -31,7 +31,7 @@
 #include <Telemetry.h>
 #include <Error.h>
 
-// ==================== STATE MACHINE INSTANCES ====================
+//  STATE MACHINE INSTANCES 
 StateMachine state1(SETUP, 		setup_function, 	next_state_setup);
 StateMachine state2(WAIT, 		wait_function,		next_state_wait);	
 StateMachine state3(CALIBRATE, 	calibrate_function, next_state_calibrate);
@@ -48,11 +48,9 @@ void setup() {
 	// init log register
 	ROBOT::logger.insert_log("Welcome! the car is starting...", logType::INFO);
 
-	// init shell
+	// define the callbacks for the logger and state machine
 	ROBOT::logger.setSendCallback(send_data);
     ROBOT::logger.setCommandCallback(run_command);
-
-	// set state machine error callback
 	ROBOT::machine.setErrorCallback(ROBOT::logStateMachineError);
 
 	// init state machine
