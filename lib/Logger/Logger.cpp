@@ -135,6 +135,7 @@ String Logger::logTypeToString(logType type) const {
         case logType::TELEMETRY: return "TELEMETRY";
         case logType::ERROR: return "ERROR";
         case logType::DEBUG: return "DEBUG";
+        case logType::PAKG: return "PAKG";
         case logType::NONE:
         default:
             return "NONE";
