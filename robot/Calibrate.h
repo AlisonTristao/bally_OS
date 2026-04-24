@@ -48,10 +48,6 @@ stateName calibrate_function() {
 }
 
 stateName next_state_calibrate(uint8_t buttons){
-    // if button 1 is pressed
-    if(buttons & (1 << BIT_0))
-        return calibrate_to_wait();
-
     // stay in the same state
     return CALIBRATE;
 }

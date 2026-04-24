@@ -60,6 +60,12 @@ class StateMachine{
         bool next(uint8_t buttons);
 
         /**
+         * @brief verify if every registered state has both callbacks defined
+         * @return true if all states are properly configured, false otherwise
+         */
+        bool verifyCallbacks();
+
+        /**
          * @brief set the error callback function
          * @param callback: the function to be called when an error occurs
          */
@@ -100,6 +106,7 @@ class StateMachine{
         static ErrorCallback errorCallback_;
         static void defaultErrorCallback(const char* message);
         static bool reportError(const char* message);
+        static const char* stateToString(uint8_t state);
 };
 
 #endif

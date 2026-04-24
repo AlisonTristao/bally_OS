@@ -27,7 +27,7 @@ stateName setup_to_error() {
 
 stateName setup_function() {
     // init communication 
-    Serial.begin(921600);  
+    Serial.begin(3000000);  
     delay(100);
 
     // init pins direction, settings, i2c communication...
@@ -44,10 +44,6 @@ stateName setup_function() {
 }
 
 stateName next_state_setup(uint8_t buttons){
-    // if button 1 is pressed or setup completed
-    if(buttons & (1 << BIT_0))
-        return setup_to_wait();
-
     // stay in the same state
     return SETUP;
 }

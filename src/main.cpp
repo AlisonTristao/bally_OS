@@ -55,7 +55,14 @@ void setup() {
 
 	// init state machine
 	// ATTENTION: the state machine must be initialized after the set this callbacks
-	ROBOT::machine.current_state = SETUP;
+	ROBOT::machine.current_state.store(SETUP, std::memory_order_release);
+	if (!ROBOT::machine.verifyCallbacks()) {
+		ROBOT::logger.insert_log("State machine callbacks are not fully configured", logType::ERROR);
+		while (true) delay(1000);
+	}
+	
+	// if you dont initialize the state machine with the states,
+	// it will initialize with the default state (NONE) 
 
 	// init parallel processing into secondary core
 	xTaskCreatePinnedToCore(ROBOT::routine, 				// task function 
