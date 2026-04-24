@@ -128,16 +128,3 @@ void Logger::send_logger_live() {
     }
 }
 
-String Logger::logTypeToString(logType type) const {
-    switch (type) {
-        case logType::INFO: return "INFO";
-        case logType::CMD: return "CMD";
-        case logType::TELEMETRY: return "TELEMETRY";
-        case logType::ERROR: return "ERROR";
-        case logType::DEBUG: return "DEBUG";
-        case logType::PAKG: return "PAKG";
-        case logType::NONE:
-        default:
-            return "NONE";
-    }
-}

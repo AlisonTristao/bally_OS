@@ -34,7 +34,6 @@ public:
     void send_logger(logType type);
     void clear_logger();
     void send_logger_live();
-    String logTypeToString(logType type) const;
 
 private:
     message messages[MAX_MESSAGES] = {};
