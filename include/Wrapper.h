@@ -20,7 +20,7 @@
 // wrapper functions for shell commands
 void run_command(const String& cmd) {
     // run the command using TinyShell
-    String result = ROBOT::shell.run_line_command(cmd.c_str()).c_str();
+    String result = ROBOT::shell.run_command_line(cmd.c_str()).c_str();
 
     // log the command result
     #if defined(LOG_ALL) || defined(LOG_CMD)
@@ -41,7 +41,7 @@ uint8_t triggerVirtualButton(uint8_t button) {
     }
 
     // Set the button flag
-    //ROBOT::buttons.setFlag(button);
+    ROBOT::buttons.setFlag(button);
     // Log the action
     ROBOT::logger.insert_log(String("button {") + String(button) + "} virtually triggered", logType::INFO);
     // The duration is controlled by the flags system (checkFlagsDuration)

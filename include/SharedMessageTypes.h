@@ -9,5 +9,6 @@ enum class logType : uint8_t {
     CMD,
     TELEMETRY,
     ERROR,
-    DEBUG
+    DEBUG,
+    PAKG
 };

@@ -45,7 +45,8 @@ void Logger::insert_log_impl(const String& msg, logType type, uint32_t ts) {
     messages[message_count++] = m;
 
     if (msg.length() > n) {
-        insert_log_impl(msg.substring(n), type, ts);
+        // when the message exceeds the max size, the tipe message is PAKG and the content is the remaining part of the message
+        insert_log_impl(msg.substring(n), logType::PAKG, ts);
     }
 }
 
