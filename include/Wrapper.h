@@ -132,18 +132,42 @@ static bool send_text_message(const char* text, logType type) {
     }
 
     uint8_t peer_mac[] = MAC_ADDR;
+    const size_t total_len = strlen(text);
+    const size_t max_chunk = EspNowManager::MESSAGE_TEXT_SIZE - 1;
 
-    EspNowManager::message msg = {};
-    msg.timer = millis();
-    msg.type = type;
-    msg.packetInfo = makePacketInfo(0, true);
+    size_t packet_count = (total_len + max_chunk - 1) / max_chunk;
+    if (packet_count == 0) {
+        packet_count = 1;
+    }
 
-    const size_t len = strlen(text);
-    const size_t copy_size = (len < (EspNowManager::MESSAGE_TEXT_SIZE - 1)) ? len : (EspNowManager::MESSAGE_TEXT_SIZE - 1);
-    memcpy(msg.msg, text, copy_size);
-    msg.msg[copy_size] = '\0';
+    // Packet index is 7-bit: 0..127 => max 128 packets.
+    const size_t max_packets = static_cast<size_t>(MESSAGE_PACKET_MAX_INDEX) + 1U;
+    if (packet_count > max_packets) {
+        packet_count = max_packets;
+    }
 
-    return espNowManager.sendToMac(peer_mac, msg);
+    for (size_t i = 0; i < packet_count; ++i) {
+        const size_t start = i * max_chunk;
+        const size_t remaining = (start < total_len) ? (total_len - start) : 0;
+        const size_t copy_size = (remaining > max_chunk) ? max_chunk : remaining;
+        const bool is_last = (i + 1U) == packet_count;
+
+        EspNowManager::message msg = {};
+        msg.timer = millis();
+        msg.type = (i == 0U) ? type : logType::PAKG;
+        msg.packetInfo = makePacketInfo(static_cast<uint8_t>(i), is_last);
+
+        if (copy_size > 0) {
+            memcpy(msg.msg, text + start, copy_size);
+        }
+        msg.msg[copy_size] = '\0';
+
+        if (!espNowManager.sendToMac(peer_mac, msg)) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 /**
@@ -207,21 +231,52 @@ uint8_t wrapper_h() {
 
 uint8_t wrapper_types_help() {
     #if defined(LOG_ALL) || defined(LOG_CMD)
-        ROBOT::logger.insert_log("Type aliases used by shell:", logType::CMD);
-        ROBOT::logger.insert_log("u8  => uint8_t", logType::CMD);
-        ROBOT::logger.insert_log("u16 => uint16_t", logType::CMD);
-        ROBOT::logger.insert_log("u32 => uint32_t", logType::CMD);
-        ROBOT::logger.insert_log("u64 => uint64_t", logType::CMD);
-        ROBOT::logger.insert_log("i8  => int8_t", logType::CMD);
-        ROBOT::logger.insert_log("i16 => int16_t", logType::CMD);
-        ROBOT::logger.insert_log("i32 => int32_t", logType::CMD);
-        ROBOT::logger.insert_log("i64 => int64_t", logType::CMD);
-        ROBOT::logger.insert_log("f32 => float", logType::CMD);
-        ROBOT::logger.insert_log("f64 => double", logType::CMD);
-        ROBOT::logger.insert_log("b   => bool", logType::CMD);
-        ROBOT::logger.insert_log("str => string", logType::CMD);
+        ROBOT::logger.insert_log("Type aliases used by shell:" + String("\n") +
+                                "u8  => uint8_t" + String("\n") +
+                                "u16 => uint16_t" + String("\n") +
+                                "u32 => uint32_t" + String("\n") +
+                                "u64 => uint64_t" + String("\n") +
+                                "i8  => int8_t" + String("\n") +
+                                "i16 => int16_t" + String("\n") +
+                                "i32 => int32_t" + String("\n") +
+                                "i64 => int64_t" + String("\n") +
+                                "f32 => float" + String("\n") +
+                                "f64 => double" + String("\n") +
+                                "b   => bool" + String("\n") +
+                                "str => string", logType::CMD);
     #endif
     return RESULT_OK;
+}
+
+uint8_t testPacket() {
+    // envia um texto grande para testar o envio de varios pacotes
+    // o texto é uma citacao de "Dom Casmurro", de Machado de Assis
+    const char* long_text =
+        "Uma noite, ao chegar a casa,\n"
+        "encontrei um bilhete de minha mãe, dizendo que ela e meu pai\n"
+        "haviam saído para jantar, e que eu deveria me comportar.\n"
+        "Fiquei sozinho em casa, e a solidão me envolveu como um manto.\n"
+        "Sentei-me à janela, olhando para as estrelas,\n"
+        "e pensei em tudo o que havia acontecido em minha vida até então.\n"
+        "As lembranças de minha infância, de meus pais, de minha escola,\n"
+        "de meus amigos, tudo isso passou diante de meus olhos como um filme.\n"
+        "E então, percebi que a vida era como um rio, que corria sem parar,\n"
+        "levando-nos para lugares desconhecidos, e que nós éramos como folhas,\n"
+        "flutuando na correnteza, sem saber onde iríamos parar. Foi uma\n"
+        "noite de reflexão profunda, e eu me senti mais maduro, mais consciente\n"
+        "de mim mesmo e do mundo ao meu redor. E assim, adormeci, com a cabeça\n"
+        "cheia de pensamentos e o coração cheio de emoções, sabendo que a vida\n"
+        "continuaria a me surpreender, a me desafiar, e que eu teria que enfrentar\n"
+        "tudo isso com coragem e determinação.";
+
+    // When info logs are enabled, push to logger to validate its packetization path.
+    #if defined(LOG_ALL) || defined(LOG_INFO)
+        ROBOT::logger.insert_log(long_text, logType::INFO);
+        return RESULT_OK;
+    #else
+        // Fallback keeps the test command useful even with logging disabled.
+        return send_text_message(long_text, logType::INFO) ? RESULT_OK : RESULT_ERROR;
+    #endif
 }
 
 bool start_shell_wrappers() {
@@ -230,6 +285,7 @@ bool start_shell_wrappers() {
     ROBOT::shell.add(wrapper_types_help, "types", "Show type aliases (u8, i32, str...)", "help");
 
     ROBOT::shell.create_module("robot", "Module for robot control commands");
+    ROBOT::shell.add(testPacket, "test_packet", "Send a long test packet to evaluate multi-packet handling", "robot");
     ROBOT::shell.add(set_led, "set_led", "Set LED color and brightness", "robot");
     ROBOT::shell.add(led_off, "led_off", "Turn off the LED", "robot");
     ROBOT::shell.add(triggerVirtualButton, "btn", "Virtually trigger a button", "robot");
