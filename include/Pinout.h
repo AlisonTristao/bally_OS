@@ -66,4 +66,9 @@
 #define SAMPLES         30      // número de amostras para calibração
 #define DELAY_SAMPLE    100     // delay entre amostras (ms)
 
+// timers
+#define SAMPLE_MICROS   100000
+#define DELAY_FLAGS     250
+#define CONTROL_TIME_MS 1
+
 #endif // PINOUT_H

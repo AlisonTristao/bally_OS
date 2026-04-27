@@ -31,11 +31,6 @@
 #define PRIMARY_CORE    1   // void loop
 #define SECONDARY_CORE  0   // parallel processing 
 
-// timers
-#define SAMPLE_MICROS   100000
-#define DELAY_FLAGS     250
-#define CONTROL_TIME_MS 1
-
 /*void setLeds(uint8_t bit_arr){
     digitalWrite(YELLOW, bit_arr & (1 << BIT_3));
     digitalWrite(RED, bit_arr & (1 << BIT_2));

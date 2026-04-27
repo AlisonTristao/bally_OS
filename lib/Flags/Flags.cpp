@@ -17,7 +17,7 @@ void FlagsBase::setTimeLimit(uint8_t index, uint32_t time) {
     timeLimit[index] = time;
 }
 
-void FlagsBase::setFilterTime(uint32_t time) {
+void FlagsBase::setTimeLimit(uint32_t time) {
     for (int i = 0; i < MAX_FLAGS; i++)
         timeLimit[i] = time;
 }

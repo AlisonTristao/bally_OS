@@ -115,10 +115,19 @@ void ROBOT::logStateMachineError(const char* message) {
 }
 
 void ROBOT::routine(void *param){
+    // time to verify check the state machine
+    uint32_t lastStateCheckTime = millis();
+
     // log message  
     #if defined(LOG_ALL) || defined(LOG_INFO)
         ROBOT::logger.insert_log("Parallel processing initialized", logType::INFO);
     #endif
+
+    // set the time limit for the flags 
+    ROBOT::buttons.setTimeLimit(DELAY_FLAGS);
+    ROBOT::sideSensors.setTimeLimit(DELAY_FLAGS);
+    ROBOT::leds.setTimeLimit(DELAY_FLAGS);
+    ROBOT::motors.setTimeLimit(DELAY_FLAGS);
 
     // main loop of the parallel processing
     while(true) {	
@@ -134,7 +143,15 @@ void ROBOT::routine(void *param){
         ROBOT::motors.checkFlagsDuration();
 
         // unlock the CPU (wait for the whatchdog to be ready) 
-        vTaskDelay(10/portTICK_PERIOD_MS);
+        if (millis() - lastStateCheckTime > DELAY_FLAGS) {
+            // check the next state of the state machine
+            ROBOT::machine.next(ROBOT::buttons.getFlags());
+            // update the last state check time
+            lastStateCheckTime = millis();  
+        }   
+            
+        // sample delay... (wait for the whatchdog to be ready)
+        vTaskDelay(1/portTICK_PERIOD_MS);
     }
 }
 

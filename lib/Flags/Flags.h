@@ -53,7 +53,7 @@ public:
 
     // Sets time limit in milliseconds
     void setTimeLimit(uint8_t index, uint32_t time);
-    void setFilterTime(uint32_t time);
+    void setTimeLimit(uint32_t time);
 
     // Checks and clears flags based on duration
     void checkFlagsDuration();

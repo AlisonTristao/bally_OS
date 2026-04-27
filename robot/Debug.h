@@ -32,7 +32,7 @@ stateName debug_function() {
     #endif
 
     // safety default outside RUN
-    delay(DELAY_FLAGS);
+    delay(10);
 
     return DEBUG;
 }
