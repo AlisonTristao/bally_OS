@@ -31,7 +31,11 @@ stateName setup_function() {
     delay(100);
 
     // init pins direction, settings, i2c communication...
-    if(!init_structure())
+    if (!configure_pins())
+        return setup_to_error();
+
+    // init shell wrappers
+    if (!start_shell_wrappers())
         return setup_to_error();
 
     // log message

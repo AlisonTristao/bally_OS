@@ -17,7 +17,6 @@
 
 // header
 #include <Pinout.h>
-#include <EspNow.h>
 
 // static libraries
 #include <Flags.h>
@@ -96,30 +95,14 @@ bool configure_pins(){
     // i2c communication
     bool i2c = Wire.begin(SDA, SCL);
     
+    // all pins configured
+    return i2c;*/
+
     // log message
     #if defined(LOG_ALL) || defined(LOG_INFO)
         ROBOT::logger.insert_log("Pins configured", logType::INFO);
     #endif
-    
-    // all pins configured
-    return i2c;*/
-    return true;
-}
 
-bool init_structure() {
-    // init pins direction, settings, i2c communication...
-    if (!configure_pins())
-        return false;
-
-    // init wifi
-    if (!configure_wifi())
-        return false;
-
-    // init shell wrappers
-    if (!start_shell_wrappers())
-        return false;
-
-    // all ok
     return true;
 }
 

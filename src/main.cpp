@@ -3,7 +3,6 @@
 #include <freertos/task.h>
 
 //  PROJECT HEADERS 
-#include <Settings.h>
 #include <Pinout.h>
 
 //  EXTERNAL LIBRARIES 
@@ -45,12 +44,8 @@ void setup() {
 	// init static objects
 	ROBOT::init();
 
-	// init log register
-	ROBOT::logger.insert_log("Welcome! the car is starting...", logType::INFO);
-
 	// define the callbacks for the logger and state machine
-	ROBOT::logger.setSendCallback(send_data);
-    ROBOT::logger.setCommandCallback(run_command);
+	ROBOT::logger.setSendCallback(esp_now_send);
 	ROBOT::machine.setErrorCallback(ROBOT::logStateMachineError);
 
 	// init state machine
@@ -60,9 +55,6 @@ void setup() {
 		ROBOT::logger.insert_log("State machine callbacks are not fully configured", logType::ERROR);
 		while (true) delay(1000);
 	}
-	
-	// if you dont initialize the state machine with the states,
-	// it will initialize with the default state (NONE) 
 
 	// init parallel processing into secondary core
 	xTaskCreatePinnedToCore(ROBOT::routine, 				// task function 

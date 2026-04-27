@@ -4,6 +4,9 @@
 #include <Arduino.h>
 
 #include <esp_timer.h>
+#include <esp_now.h>
+#include <esp_wifi.h>
+#include <WiFi.h>
 
 #include <Pinout.h>
 #include <RGBLed.h>
@@ -31,6 +34,12 @@ public:
     static esp_timer_handle_t timer_get_handle;
     static void sampleISR(void* arg);
     static void configure_interruptions(void *param);
+
+    // Callbacks for ESP-NOW (moved from EspNow.h)
+    static void handleReceiveStatic(const uint8_t* mac, const uint8_t* incomingData, int len);
+
+    // Callbacks for ESP-NOW (moved from EspNow.h)
+    static void handleSendStatic(const uint8_t* mac, esp_now_send_status_t status);
 
     // Signals and flags for buttons, sensors, LEDs, and motors
     static Flags_in buttons;

@@ -4,9 +4,6 @@
 // ==================== SYSTEM ====================
 #include <Arduino.h>
 
-// ==================== PROJECT HEADERS ====================
-#include <EspNow.h>
-
 // ==================== UTILITIES ====================
 #include <Flags.h>
 #include <Logger.h>
@@ -15,18 +12,6 @@
 
 // ==================== EXTERNAL LIBRARIES ====================
 #include <TinyShell.h>
-
-
-// wrapper functions for shell commands
-void run_command(const String& cmd) {
-    // run the command using TinyShell
-    String result = ROBOT::shell.run_command_line(cmd.c_str()).c_str();
-
-    // log the command result
-    #if defined(LOG_ALL) || defined(LOG_CMD)
-        ROBOT::logger.insert_log(result, logType::CMD);
-    #endif
-}
 
 /**
  * @brief Virtually triggers a button, keeping the flag active for time_ms milliseconds
@@ -87,123 +72,6 @@ uint8_t triggerVirtualSideSensor(uint8_t sensor, uint32_t time_ms) {
     // If you want to force the time, you can implement a timer/task to clear the flag after time_ms
 
     return RESULT_OK;
-}
-
-/**
- * @brief Envia dados genéricos via ESP-NOW
- * @param data Dados a enviar
- * @param len Comprimento dos dados
- * @return true se enviado com sucesso
- */
-
- // ================== ESP-NOW SEND WRAPPERS ==================
-
-bool send_data(const uint8_t *data, size_t len) {
-    if (data == nullptr || len == 0) {
-        return false;
-    }
-
-    EspNowManager::message outgoing = {};
-    outgoing.timer = millis();
-    outgoing.type = logType::INFO;
-    outgoing.packetInfo = makePacketInfo(0, true);
-
-    // Logger sends packed `message`; normalize it to EspNow wire format.
-    if (len == sizeof(::message)) {
-        const ::message* logger_msg = reinterpret_cast<const ::message*>(data);
-        outgoing.timer = logger_msg->timer;
-        outgoing.type = logger_msg->type;
-        outgoing.packetInfo = logger_msg->packetInfo;
-        strncpy(outgoing.msg, logger_msg->msg, EspNowManager::MESSAGE_TEXT_SIZE - 1);
-        outgoing.msg[EspNowManager::MESSAGE_TEXT_SIZE - 1] = '\0';
-    } else {
-        const size_t copy_size = (len < (EspNowManager::MESSAGE_TEXT_SIZE - 1)) ? len : (EspNowManager::MESSAGE_TEXT_SIZE - 1);
-        memcpy(outgoing.msg, data, copy_size);
-        outgoing.msg[copy_size] = '\0';
-    }
-
-    uint8_t peer_mac[] = MAC_ADDR;
-    return espNowManager.sendToMac(peer_mac, outgoing);
-}
-
-static bool send_text_message(const char* text, logType type) {
-    if (text == nullptr) {
-        return false;
-    }
-
-    uint8_t peer_mac[] = MAC_ADDR;
-    const size_t total_len = strlen(text);
-    const size_t max_chunk = EspNowManager::MESSAGE_TEXT_SIZE - 1;
-
-    size_t packet_count = (total_len + max_chunk - 1) / max_chunk;
-    if (packet_count == 0) {
-        packet_count = 1;
-    }
-
-    // Packet index is 7-bit: 0..127 => max 128 packets.
-    const size_t max_packets = static_cast<size_t>(MESSAGE_PACKET_MAX_INDEX) + 1U;
-    if (packet_count > max_packets) {
-        packet_count = max_packets;
-    }
-
-    for (size_t i = 0; i < packet_count; ++i) {
-        const size_t start = i * max_chunk;
-        const size_t remaining = (start < total_len) ? (total_len - start) : 0;
-        const size_t copy_size = (remaining > max_chunk) ? max_chunk : remaining;
-        const bool is_last = (i + 1U) == packet_count;
-
-        EspNowManager::message msg = {};
-        msg.timer = millis();
-        msg.type = (i == 0U) ? type : logType::PAKG;
-        msg.packetInfo = makePacketInfo(static_cast<uint8_t>(i), is_last);
-
-        if (copy_size > 0) {
-            memcpy(msg.msg, text + start, copy_size);
-        }
-        msg.msg[copy_size] = '\0';
-
-        if (!espNowManager.sendToMac(peer_mac, msg)) {
-            return false;
-        }
-    }
-
-    return true;
-}
-
-/**
- * @brief Envia mensagem de informação via ESP-NOW
- * @param message Mensagem a enviar
- * @return true se enviado com sucesso
- */
-bool send_info(const char* message) {
-    return send_text_message(message, logType::INFO);
-}
-
-/**
- * @brief Envia mensagem de telemetria via ESP-NOW
- * @param telemetry Dados de telemetria
- * @return true se enviado com sucesso
- */
-bool send_telemetry(const char* telemetry) {
-    return send_text_message(telemetry, logType::TELEMETRY);
-}
-
-/**
- * @brief Envia mensagem de erro via ESP-NOW
- * @param error Mensagem de erro
- * @return true se enviado com sucesso
- */
-bool send_error(const char* error) {
-    return send_text_message(error, logType::ERROR);
-}
-
-/**
- * @brief Envia mensagem de debug via ESP-NOW
- * @param debug Mensagem de debug
- * @return true se enviado com sucesso
- */
-bool send_debug(const char* debug) {
-    return send_text_message(debug, logType::DEBUG);
 }
 
 // ================== RGB LED WRAPPERS ==================
@@ -273,9 +141,6 @@ uint8_t testPacket() {
     #if defined(LOG_ALL) || defined(LOG_INFO)
         ROBOT::logger.insert_log(long_text, logType::INFO);
         return RESULT_OK;
-    #else
-        // Fallback keeps the test command useful even with logging disabled.
-        return send_text_message(long_text, logType::INFO) ? RESULT_OK : RESULT_ERROR;
     #endif
 }
 

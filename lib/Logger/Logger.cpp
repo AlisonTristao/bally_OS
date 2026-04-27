@@ -1,8 +1,7 @@
 #include <Logger.h>
 
 Logger::Logger()
-    : send_callback_(defaultSendCallback),
-      command_callback_(defaultCommandCallback) {
+    : send_callback_(defaultSendCallback){
     mutex_ = xSemaphoreCreateMutex();
 }
 
@@ -10,18 +9,11 @@ void Logger::setSendCallback(SendCallback callback) {
     send_callback_ = (callback != nullptr) ? callback : defaultSendCallback;
 }
 
-void Logger::setCommandCallback(CommandCallback callback) {
-    command_callback_ = (callback != nullptr) ? callback : defaultCommandCallback;
-}
-
-bool Logger::defaultSendCallback(const uint8_t* data, size_t len) {
+esp_err_t Logger::defaultSendCallback(const uint8_t *peer_addr, const uint8_t *data, size_t len) {
+    (void)peer_addr;
     (void)data;
     (void)len;
-    return false;
-}
-
-void Logger::defaultCommandCallback(const String& cmd) {
-    (void)cmd;
+    return ESP_FAIL;
 }
 
 void Logger::insert_log(const String& msg, logType type) {
@@ -64,14 +56,16 @@ void Logger::insert_log_impl(const String& msg, logType type, uint32_t ts) {
     }
 }
 
-void Logger::insert_cmd(const String& cmd) {
-    command_callback_(cmd);
-}
-
 void Logger::send_logger(logType type) {
     for (size_t i = 0; i < message_count; ++i) {
         if (messages[i].type == type || type == logType::NONE) {
-            send_callback_(reinterpret_cast<const uint8_t*>(&messages[i]), sizeof(messages[i]));
+            #ifdef MAC_ADDR
+                uint8_t peer_addr[6] = {MAC_ADDR};
+                send_callback_(peer_addr, reinterpret_cast<const uint8_t*>(&messages[i]), sizeof(messages[i]));
+            #else
+                // use NULL peer_addr if MAC_ADDR is not defined, but this may not work with all send callbacks
+                send_callback_(nullptr, reinterpret_cast<const uint8_t*>(&messages[i]), sizeof(messages[i]));
+            #endif  
         }
     }
 }
@@ -94,19 +88,18 @@ void Logger::send_logger_live() {
     uint32_t end = message_count;
     xSemaphoreGive(mutex_);
 
-    if (start >= MAX_MESSAGES) start = 0;
-    if (end > MAX_MESSAGES) end = MAX_MESSAGES;
+    if (start >= MAX_MESSAGES)  start = 0;
+    if (end > MAX_MESSAGES)     end = MAX_MESSAGES;
 
     if (start == end) return;
 
     auto send_entry = [this](uint32_t idx) {
-        send_callback_(reinterpret_cast<const uint8_t*>(&messages[idx]), sizeof(messages[idx]));
-        // Optionally print if DEBUG is enabled
-        #if defined(LOG_ALL) || defined(LOG_DEBUG)
-            Serial.print("[");
-            Serial.print(logTypeToString(messages[idx].type));
-            Serial.print("] ");
-            Serial.println(messages[idx].msg);
+        #ifdef MAC_ADDR
+            uint8_t peer_addr[6] = {MAC_ADDR};
+            send_callback_(peer_addr, reinterpret_cast<const uint8_t*>(&messages[idx]), sizeof(messages[idx]));
+        #else
+            // use NULL peer_addr if MAC_ADDR is not defined, but this may not work with all send callbacks
+            send_callback_(nullptr, reinterpret_cast<const uint8_t*>(&messages[idx]), sizeof(messages[idx]));
         #endif
     };
 

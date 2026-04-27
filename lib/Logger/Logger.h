@@ -8,6 +8,8 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <SharedMessageTypes.h>
+#include <esp_err.h>
+#include <esp_now.h>
 
 #define MAX_MESSAGE_SIZE 230
 #define MAX_MESSAGES 1024
@@ -22,15 +24,13 @@ typedef struct {
 
 class Logger {
 public:
-    using SendCallback = bool (*)(const uint8_t* data, size_t len);
-    using CommandCallback = void (*)(const String& cmd);
+    // Define a type for the send callback function
+    using SendCallback = esp_err_t (*)(const uint8_t *peer_addr, const uint8_t *data, size_t len);
 
     Logger();
 
     void setSendCallback(SendCallback callback);
-    void setCommandCallback(CommandCallback callback);
     void insert_log(const String& msg, logType type);
-    void insert_cmd(const String& cmd);
     void send_logger(logType type);
     void clear_logger();
     void send_logger_live();
@@ -41,11 +41,10 @@ private:
     uint32_t last_index = 0;
     SemaphoreHandle_t mutex_ = NULL;
     SendCallback send_callback_;
-    CommandCallback command_callback_;
 
     void insert_log_impl(const String& msg, logType type, uint32_t ts);
 
-    static bool defaultSendCallback(const uint8_t* data, size_t len);
+    static esp_err_t defaultSendCallback(const uint8_t *peer_addr, const uint8_t *data, size_t len);
     static void defaultCommandCallback(const String& cmd);
 };
 
