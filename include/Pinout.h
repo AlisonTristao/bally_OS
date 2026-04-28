@@ -1,6 +1,35 @@
 #ifndef PINOUT_H
 #define PINOUT_H
 
+// native libraries
+#include <Arduino.h>
+
+// logger configuration
+// -> LOG_ALL             // register all logs
+// -> LOG_INFO            // register configuration logs
+// -> LOG_TELEMETRY       // register operational logs
+// -> LOG_ERROR           // register error logs
+// -> LOG_DEBUG           // register debug logs
+// -> LOG_VERBOSE         // print log messages in real time
+
+// sampling activation
+// -> SAMPLING_ACTIVE
+//#define SAMPLING_ACTIVE
+
+// timers
+#define SAMPLE_MICROS   100000
+#define DELAY_FLAGS     250
+#define CONTROL_TIME_MS 1
+
+// esp32 core 
+#define PRIMARY_CORE    1   // void loop
+#define SECONDARY_CORE  0   // parallel processing 
+
+// -------------------- Array sensor configuration --------------------
+#define LEN_SENSOR      8       // quantidade de sensores
+#define SAMPLES         30      // número de amostras para calibração
+#define DELAY_SAMPLE    100     // delay entre amostras (ms)
+
 // -------------------- Channels --------------------
 #define CH0             0
 #define CH1             1
@@ -60,15 +89,5 @@
 
 // -------------------- Voltage dividers --------------------
 #define BAT             7*/
-
-// -------------------- Array sensor configuration --------------------
-#define LEN_SENSOR      8       // quantidade de sensores
-#define SAMPLES         30      // número de amostras para calibração
-#define DELAY_SAMPLE    100     // delay entre amostras (ms)
-
-// timers
-#define SAMPLE_MICROS   100000
-#define DELAY_FLAGS     250
-#define CONTROL_TIME_MS 1
 
 #endif // PINOUT_H

@@ -68,6 +68,15 @@ private:
     static ROBOT* instance_;
     bool initialized = false;
 
+    // configure the pins, the i2c communication and other settings for the robot
+    bool configurePins();
+
+    // configure the wifi and the esp-now settings for the robot
+    bool configureCommunication();
+
+    // set the time limit for the flags, to reset them after a certain time
+    void setTimeLimit();
+
     // run received commands of the queue
     void executeCommandFromQueue();
 

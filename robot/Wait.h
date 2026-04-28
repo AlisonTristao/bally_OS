@@ -2,7 +2,7 @@
 #define WAIT_H
 
 // header
-#include <Settings.h>
+#include <Pinout.h>
 
 // static libraries
 #include <StaticObjects.h>

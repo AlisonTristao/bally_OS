@@ -2,7 +2,8 @@
 #define SETUP_H
 
 // header
-#include <Settings.h>
+#include <Pinout.h>
+#include <Wrapper.h>
 #include <StaticObjects.h>
 
 stateName setup_to_wait() {
@@ -26,10 +27,6 @@ stateName setup_to_error() {
 }
 
 stateName setup_function() {
-    // init pins direction, settings, i2c communication...
-    if (!configure_pins())
-        return setup_to_error();
-
     // init shell wrappers
     if (!start_shell_wrappers())
         return setup_to_error();

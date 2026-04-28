@@ -1,7 +1,7 @@
 #ifndef ERROR_H
 #define ERROR_H
 
-#include <Settings.h>
+#include <Pinout.h>
 
 stateName error_to_telemetry() {
     // log message

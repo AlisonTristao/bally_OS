@@ -70,15 +70,63 @@ void ROBOT::configure_interruptions(void *param){
     vTaskDelete(NULL);
 }
 
-bool ROBOT::init() {
-    // avoid initializing more than once
-    if (initialized)    
-        return true;
+bool ROBOT::configurePins() {
+    // array of leds
+    /*pinMode(YELLOW, OUTPUT);
+    pinMode(RED, OUTPUT);
+    pinMode(BLUE, OUTPUT);
+    pinMode(GREEN, OUTPUT);
+    pinMode(UNK0, OUTPUT);
+    pinMode(UNK1, OUTPUT);*/
 
-    // configure motor 
-    motor_left.init();
-    motor_right.init();
+    pinMode(LED_RGB_PIN, OUTPUT);
 
+    // H bridge
+    pinMode(AIN1, OUTPUT);
+    pinMode(AIN2, OUTPUT);
+    pinMode(BIN1, OUTPUT);
+    pinMode(BIN2, OUTPUT);
+    pinMode(PWM_A, OUTPUT);
+    pinMode(PWM_B, OUTPUT);
+
+    // Buttons
+    pinMode(BTN1, INPUT_PULLUP);
+    pinMode(BTN2, INPUT_PULLUP);
+    pinMode(BTN3, INPUT_PULLUP);
+
+    // Side sensors
+    pinMode(LEFT, INPUT);
+    pinMode(RIGHT, INPUT);
+
+    // Encoders
+    /*pinMode(ENC_A0, INPUT);
+    pinMode(ENC_A1, INPUT);
+    pinMode(ENC_B0, INPUT);
+    pinMode(ENC_B1, INPUT);
+
+    // Buzzer
+    pinMode(BZR, OUTPUT);
+
+    // Multiplex
+    pinMode(SIG, INPUT);
+    pinMode(C0, OUTPUT);
+    pinMode(C1, OUTPUT);
+    pinMode(C2, OUTPUT);
+    pinMode(C3, OUTPUT);
+
+    // Bat
+    pinMode(BAT, INPUT);
+
+    // i2c communication
+    bool i2c = Wire.begin(SDA, SCL);
+    
+    // all pins configured
+    return i2c;*/
+
+    return true;
+}
+
+bool ROBOT::configureCommunication() {
     // configure WiFi and ESP-NOW
     if (!WiFi.mode(WIFI_STA) || !WiFi.disconnect()) {
         ROBOT::logger.insert_log("Failed to configure WiFi", logType::ERROR);
@@ -91,9 +139,6 @@ bool ROBOT::init() {
         return false;
     }
 
-    // create the queue for the received data
-    receveivedDataQueue = xQueueCreate(10, sizeof(message));
-
     // configure the ESP-NOW callbacks
     if (esp_now_register_recv_cb(handleReceiveStatic) != ESP_OK) {
         ROBOT::logger.insert_log("Failed to register receive callback", logType::ERROR);
@@ -105,6 +150,9 @@ bool ROBOT::init() {
         return false;
     }
 
+    // log the MAC address
+    readMacAddress();
+
     // add peer if MAC_ADDR is defined
     #ifdef MAC_ADDR
         uint8_t peer_addr[6] = {MAC_ADDR};
@@ -115,17 +163,50 @@ bool ROBOT::init() {
         esp_now_add_peer(&peerInfo);
     #endif
 
-    // init log register
+    return true;
+}
+
+void ROBOT::setTimeLimit() {
+    // set the time limit for the flags, to reset them after a certain time
+    buttons.setTimeLimit(DELAY_FLAGS);
+    sideSensors.setTimeLimit(DELAY_FLAGS);
+    leds.setTimeLimit(DELAY_FLAGS);
+    motors.setTimeLimit(DELAY_FLAGS);
+}
+
+void ROBOT::resetFlags() {
+    // check flags duration
+    ROBOT::buttons.checkFlagsDuration();
+    ROBOT::sideSensors.checkFlagsDuration();
+    ROBOT::leds.checkFlagsDuration();
+    ROBOT::motors.checkFlagsDuration();
+}
+
+bool ROBOT::init() {
+    // avoid initializing more than once
+    if (initialized)    
+        return true;
+
+    // configure the pins (OUTPUT, INPUT, etc) and the i2c communication
+    if (!configurePins())
+        return false;
+
+    // configure communication (wifi and esp-now)  
+    if (!configureCommunication())
+        return false;
+        
+    // configure motor (init the channel PWM and set the initial state)
+    motor_left.init();
+    motor_right.init();
+
+    // set time for reset the flags signals
+    setTimeLimit();
+
+    // create the queue for the received data from the ESP-NOW
+    receveivedDataQueue = xQueueCreate(10, sizeof(message));
+
+    // log message 
 	ROBOT::logger.insert_log("Welcome! the car is starting...", logType::INFO);
-
-    // log the MAC address
-    readMacAddress();
-
-    // set the time limit for the flags 
-    ROBOT::buttons.setTimeLimit(DELAY_FLAGS);
-    ROBOT::sideSensors.setTimeLimit(DELAY_FLAGS);
-    ROBOT::leds.setTimeLimit(DELAY_FLAGS);
-    ROBOT::motors.setTimeLimit(DELAY_FLAGS);
 
     // return true if everything is ok
     initialized = true;
@@ -156,14 +237,6 @@ void ROBOT::executeCommand(const char* command) const {
 
     // log the command and the result
     logger.insert_log(result.c_str(), logType::CMD);
-}
-
-void ROBOT::resetFlags() {
-    // check flags duration
-    ROBOT::buttons.checkFlagsDuration();
-    ROBOT::sideSensors.checkFlagsDuration();
-    ROBOT::leds.checkFlagsDuration();
-    ROBOT::motors.checkFlagsDuration();
 }
 
 void ROBOT::checkStateMachine() {
