@@ -7,8 +7,8 @@ Este projeto implementa o controle de um robô baseado em ESP32-S3, utilizando a
 > **Compatibilidade:**
 > Este software está sendo desenvolvido para ser totalmente compatível com o hardware documentado no repositório [bally_robot](https://github.com/AlisonTristao/bally_robot).
 
-#### Telemetria com T-Dongle S3 (LilyGO)
-Para realizar a telemetria via ESP-NOW, é utilizado o T-Dongle S3 da LilyGO como receptor dos dados. O código desenvolvido para enviar comandos e logs do robô para o dongle está disponível em: [t_dongle_develop](https://github.com/AlisonTristao/t_dongle_develop).
+> **Telemetria com T-Dongle S3 (LilyGO):**
+> Para realizar a telemetria via ESP-NOW, é utilizado o T-Dongle S3 da LilyGO como receptor dos dados. O código desenvolvido para enviar comandos e logs do robô para o dongle está disponível em: [t_dongle_develop](https://github.com/AlisonTristao/t_dongle_develop).
 
 
 ## Estrutura do Projeto
