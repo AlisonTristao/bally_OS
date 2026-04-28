@@ -26,10 +26,6 @@ stateName setup_to_error() {
 }
 
 stateName setup_function() {
-    // init communication 
-    Serial.begin(3000000);  
-    delay(100);
-
     // init pins direction, settings, i2c communication...
     if (!configure_pins())
         return setup_to_error();

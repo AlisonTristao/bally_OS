@@ -12,7 +12,7 @@
 #include <esp_now.h>
 
 #define MAX_MESSAGE_SIZE 230
-#define MAX_MESSAGES 1024
+#define MAX_MESSAGES 256
 #define LOGGER_MUTEX_TIMEOUT_MS 100
 
 typedef struct {

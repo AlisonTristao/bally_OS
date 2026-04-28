@@ -1,16 +1,16 @@
 #ifndef WRAPPER_H
 #define WRAPPER_H
 
-// ==================== SYSTEM ====================
+//   SYSTEM  
 #include <Arduino.h>
 
-// ==================== UTILITIES ====================
+//   UTILITIES  
 #include <Flags.h>
 #include <Logger.h>
 #include <StateMachine.h>
 #include <StaticObjects.h>
 
-// ==================== EXTERNAL LIBRARIES ====================
+//   EXTERNAL LIBRARIES  
 #include <TinyShell.h>
 
 /**
@@ -144,6 +144,19 @@ uint8_t testPacket() {
     #endif
 }
 
+// reset the robot using the shell
+uint8_t reset_robot() {
+    #if defined(LOG_ALL) || defined(LOG_CMD)
+        ROBOT::logger.insert_log("Resetting robot in 3s...", logType::CMD);
+    #endif
+
+    // Wait for 3 seconds to allow the log message to be sent before restarting
+    vTaskDelay(3000/portTICK_PERIOD_MS);
+
+    ESP.restart();
+    return RESULT_OK; // this line will never be reached, but it's here to satisfy the return type
+}
+
 bool start_shell_wrappers() {
     ROBOT::shell.create_module("help", "Module for help and information");
     ROBOT::shell.add(wrapper_h, "h", "List all modules", "help");
@@ -155,6 +168,7 @@ bool start_shell_wrappers() {
     ROBOT::shell.add(led_off, "led_off", "Turn off the LED", "robot");
     ROBOT::shell.add(triggerVirtualButton, "btn", "Virtually trigger a button", "robot");
     ROBOT::shell.add(triggerVirtualSideSensor, "ssr", "Virtually trigger a side sensor", "robot");
+    ROBOT::shell.add(reset_robot, "reset", "Reset the robot", "robot");
 
     #if defined(LOG_ALL) || defined(LOG_INFO)
         ROBOT::logger.insert_log("Shell started", logType::CMD);

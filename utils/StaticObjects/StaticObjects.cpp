@@ -2,6 +2,9 @@
 #include <Arduino.h>
 #include <Pinout.h>
 
+// active instance of the robot class
+ROBOT* ROBOT::instance_ = nullptr;
+
 uint8_t sensor_pins[LEN_SENSOR] = {D0, D1, D2, D3, D4, D5, D6, D7};
 
 Flags_in ROBOT::buttons("Buttons");
@@ -37,29 +40,20 @@ void readMacAddress(){
     }
 }
 
-// timer handle (moved from ParallelProcessing.h)
-esp_timer_handle_t ROBOT::timer_get_handle;
-
 // sample ISR (IRAM resident)
 void IRAM_ATTR ROBOT::sampleISR(void* arg) {
     #if defined(LOG_ALL) || defined(LOG_TELEMETRY)
-        if(!(ROBOT::machine.current_state == RUN)) return;
-        /*ROBOT::logger.insert_log(
-                            String(ROBOT::encoder_left.getCount())    + ";" +
-                            String(ROBOT::encoder_right.getCount()),
-                            logType::TELEMETRY);*/
+        // nothing 
     #endif
 }
 
 void ROBOT::configure_interruptions(void *param){
-
     // set the button interruptions
     attachInterruptArg(digitalPinToInterrupt(BTN1), Flags_in::isr, &btnArgs[0], FALLING);
     attachInterruptArg(digitalPinToInterrupt(BTN2), Flags_in::isr, &btnArgs[1], FALLING);
     attachInterruptArg(digitalPinToInterrupt(BTN3), Flags_in::isr, &btnArgs[2], FALLING);
     attachInterruptArg(digitalPinToInterrupt(LEFT), Flags_in::isr, &sideArgs[0], RISING);
     attachInterruptArg(digitalPinToInterrupt(RIGHT), Flags_in::isr, &sideArgs[1], RISING);
-
     // set the timer interruptions
     #ifdef SAMPLING_ACTIVE
         esp_timer_create_args_t timer_args = {
@@ -72,29 +66,44 @@ void ROBOT::configure_interruptions(void *param){
         bool ok = !(esp_timer_create(&timer_args, &ROBOT::timer_get_handle) != ESP_OK
                     || esp_timer_start_periodic(ROBOT::timer_get_handle, SAMPLE_MICROS) != ESP_OK);
     #endif
-
     // delete this task
     vTaskDelete(NULL);
 }
 
-void ROBOT::init() {
+bool ROBOT::init() {
+    // avoid initializing more than once
+    if (initialized)    
+        return true;
+
     // configure motor 
     motor_left.init();
     motor_right.init();
 
     // configure WiFi and ESP-NOW
-    WiFi.mode(WIFI_STA);
-    WiFi.disconnect();
-
-    // log the MAC address
-    readMacAddress();
+    if (!WiFi.mode(WIFI_STA) || !WiFi.disconnect()) {
+        ROBOT::logger.insert_log("Failed to configure WiFi", logType::ERROR);
+        return false;
+    }
 
     // initialize ESP-NOW
-    esp_now_init();
+    if (esp_now_init() != ESP_OK) {
+        ROBOT::logger.insert_log("Failed to initialize ESP-NOW", logType::ERROR);
+        return false;
+    }
+
+    // create the queue for the received data
+    receveivedDataQueue = xQueueCreate(10, sizeof(message));
 
     // configure the ESP-NOW callbacks
-    esp_now_register_recv_cb(handleReceiveStatic);
-    esp_now_register_send_cb(handleSendStatic);
+    if (esp_now_register_recv_cb(handleReceiveStatic) != ESP_OK) {
+        ROBOT::logger.insert_log("Failed to register receive callback", logType::ERROR);
+        return false;
+    }
+
+    if (esp_now_register_send_cb(handleSendStatic) != ESP_OK) {
+        ROBOT::logger.insert_log("Failed to register send callback", logType::ERROR);
+        return false;
+    }
 
     // add peer if MAC_ADDR is defined
     #ifdef MAC_ADDR
@@ -108,26 +117,74 @@ void ROBOT::init() {
 
     // init log register
 	ROBOT::logger.insert_log("Welcome! the car is starting...", logType::INFO);
-}
 
-void ROBOT::logStateMachineError(const char* message) {
-    logger.insert_log(message, logType::ERROR);
-}
-
-void ROBOT::routine(void *param){
-    // time to verify check the state machine
-    uint32_t lastStateCheckTime = millis();
-
-    // log message  
-    #if defined(LOG_ALL) || defined(LOG_INFO)
-        ROBOT::logger.insert_log("Parallel processing initialized", logType::INFO);
-    #endif
+    // log the MAC address
+    readMacAddress();
 
     // set the time limit for the flags 
     ROBOT::buttons.setTimeLimit(DELAY_FLAGS);
     ROBOT::sideSensors.setTimeLimit(DELAY_FLAGS);
     ROBOT::leds.setTimeLimit(DELAY_FLAGS);
     ROBOT::motors.setTimeLimit(DELAY_FLAGS);
+
+    // return true if everything is ok
+    initialized = true;
+    return true;
+}
+
+void ROBOT::staticInsertLog(const char* message) {
+    logger.insert_log(message, logType::ERROR);
+}
+
+void ROBOT::executeCommandFromQueue() {
+    // check if there is a message in the queue, if not, return
+    if(uxQueueMessagesWaiting(instance_->receveivedDataQueue) == 0) 
+        return;
+    message receivedMessage;
+    // check if there is a message in the queue
+    if (xQueueReceive(receveivedDataQueue, &receivedMessage, 0) == pdTRUE) {
+        // convert the message to a string
+        String command(receivedMessage.msg);
+        // execute the command and log the result
+        executeCommand(command.c_str());
+    }
+}
+
+void ROBOT::executeCommand(const char* command) const {
+    // execute the command in the shell and get the result
+    std::string result = shell.run_command_line(command);
+
+    // log the command and the result
+    logger.insert_log(result.c_str(), logType::CMD);
+}
+
+void ROBOT::resetFlags() {
+    // check flags duration
+    ROBOT::buttons.checkFlagsDuration();
+    ROBOT::sideSensors.checkFlagsDuration();
+    ROBOT::leds.checkFlagsDuration();
+    ROBOT::motors.checkFlagsDuration();
+}
+
+void ROBOT::checkStateMachine() {
+    // check the state machine every DELAY_FLAGS milliseconds
+    if (millis() - instance_->stateMachineTimer > DELAY_FLAGS) {
+        // check the next state of the state machine
+        ROBOT::machine.next(ROBOT::buttons.getFlags());
+        // update the last state check time
+        instance_->stateMachineTimer = millis();  
+    }   
+}
+
+void ROBOT::routine(void *param){
+    // if the robot is not initialized, we cannot run the routine
+    while (!instance_->initialized)
+        vTaskDelay(100/portTICK_PERIOD_MS);
+
+    // log message  
+    #if defined(LOG_ALL) || defined(LOG_INFO)
+        ROBOT::logger.insert_log("Parallel processing initialized", logType::INFO);
+    #endif
 
     // main loop of the parallel processing
     while(true) {	
@@ -136,19 +193,14 @@ void ROBOT::routine(void *param){
             ROBOT::logger.send_logger_live();
         #endif
 
-        // check flags duration
-        ROBOT::buttons.checkFlagsDuration();
-        ROBOT::sideSensors.checkFlagsDuration();
-        ROBOT::leds.checkFlagsDuration();
-        ROBOT::motors.checkFlagsDuration();
+        // execute the commands from the queue
+        instance_->executeCommandFromQueue();
 
-        // unlock the CPU (wait for the whatchdog to be ready) 
-        if (millis() - lastStateCheckTime > DELAY_FLAGS) {
-            // check the next state of the state machine
-            ROBOT::machine.next(ROBOT::buttons.getFlags());
-            // update the last state check time
-            lastStateCheckTime = millis();  
-        }   
+        // reset the flags if the time limit is reached
+        instance_->resetFlags();
+
+        // check the state machine to change the state if the conditions are met
+        instance_->checkStateMachine();
             
         // sample delay... (wait for the whatchdog to be ready)
         vTaskDelay(1/portTICK_PERIOD_MS);
@@ -157,24 +209,18 @@ void ROBOT::routine(void *param){
 
 // Adapter para callback estático de recebimento.
 void ROBOT::handleReceiveStatic(const uint8_t* mac, const uint8_t* incomingData, int len) {
+    // verify if the queue is created
+    if (instance_->receveivedDataQueue == nullptr) {
+        ROBOT::logger.insert_log("Receive callback called but queue is not initialized", logType::ERROR);
+        return;
+    }
 
-    // Copy the incoming data into a message struct
-    message incoming = {};
-    memcpy(&incoming, incomingData, sizeof(message));
-    incoming.msg[sizeof(incoming.msg) - 1] = '\0';
-
-    // run the command in the shell and log it as CMD
-    string result = ROBOT::shell.run_command_line(incoming.msg);
-
-    // log the command result
-    #if defined(LOG_ALL) || defined(LOG_CMD)
-        ROBOT::logger.insert_log(String(result.c_str()), logType::CMD);
-    #endif
+    // add the buffer to the queue to be processed in the parallel processing
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    xQueueSendFromISR(instance_->receveivedDataQueue, incomingData, &xHigherPriorityTaskWoken);
 }
 
 // Adapter para callback estático de envio.
 void ROBOT::handleSendStatic(const uint8_t* mac, esp_now_send_status_t status) {
     // Currently, we do not have a send callback set up, but this is where you would handle it if needed.
-    (void)mac;
-    (void)status;
 }

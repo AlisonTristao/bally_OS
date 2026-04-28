@@ -3,7 +3,7 @@
 
 std::atomic<uint8_t> StateMachine::current_state{NONE};
 SemaphoreHandle_t StateMachine::transitionMutex_ = nullptr;
-StateMachine::ErrorCallback StateMachine::errorCallback_ = &StateMachine::defaultErrorCallback;
+StateMachine::ErrorCallback StateMachine::errorCallback_ = nullptr;
 
 StateMachine *StateMachine::arr_states[NUMBER_OF_STATES] = {
 	NULL,
