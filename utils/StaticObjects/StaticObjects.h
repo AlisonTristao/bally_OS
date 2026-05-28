@@ -83,6 +83,9 @@ private:
     // exec a command in the shell and return the result as string
     void executeCommand(const char* command) const;
 
+    // set the outputs flags (leds and motors) to 0 after the time limit is reached
+    void setOutputs();
+
     // Interrupt/timer handling
     esp_timer_handle_t timer_get_handle;
     static void sampleISR(void* arg);
@@ -105,13 +108,13 @@ private:
 };
 
 // Define the buttons and side sensors as Flags_in objects with their respective indices
-static FlagsIsrArg btnArgs[] = {
+static FlagsArg btnArgs[] = {
     {&ROBOT::buttons, 0},
     {&ROBOT::buttons, 1},
     {&ROBOT::buttons, 2}
 };
 
-static FlagsIsrArg sideArgs[] = {
+static FlagsArg sideArgs[] = {
     {&ROBOT::sideSensors, 0},
     {&ROBOT::sideSensors, 1}
 };

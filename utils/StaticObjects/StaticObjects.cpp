@@ -182,6 +182,15 @@ void ROBOT::resetFlags() {
     ROBOT::motors.checkFlagsDuration();
 }
 
+void ROBOT::setOutputs() {
+    // define the outputs value based on the flags
+    ROBOT::motor_left.applyPWM(ROBOT::motors.getValue(0));
+    ROBOT::motor_right.applyPWM(ROBOT::motors.getValue(1));
+
+    // set the leds based on the flags
+    // ainda nao existe leds
+}
+
 bool ROBOT::init() {
     // avoid initializing more than once
     if (initialized)    
@@ -271,6 +280,9 @@ void ROBOT::routine(void *param){
 
         // reset the flags if the time limit is reached
         instance_->resetFlags();
+
+        // set the outputs signal based on the flags
+        instance_->setOutputs();
 
         // check the state machine to change the state if the conditions are met
         instance_->checkStateMachine();

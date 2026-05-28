@@ -157,6 +157,17 @@ uint8_t reset_robot() {
     return RESULT_OK; // this line will never be reached, but it's here to satisfy the return type
 }
 
+// wrapper to apply a pwm value to the motors, using the Flags_pwm class
+uint8_t set_motor_pwm(uint8_t motor, int16_t pwm_value) {
+    if (motor > 1) {
+        ROBOT::logger.insert_log(String("invalid motor index {") + String(motor) + "}. expected: 0..1", logType::ERROR);
+        return RESULT_ERROR;
+    }
+
+    ROBOT::motors.setValue(motor, pwm_value);
+    return RESULT_OK;
+}
+
 bool start_shell_wrappers() {
     ROBOT::shell.create_module("help", "Module for help and information");
     ROBOT::shell.add(wrapper_h, "h", "List all modules", "help");

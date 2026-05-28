@@ -104,15 +104,19 @@ public:
     Flags_pwm(const String& name = "") : FlagsBase(name) {}
     virtual ~Flags_pwm() {};
     // Sets PWM value (0–100)
-    void setValue(uint8_t index, int16_t value, uint32_t time);
+    void setValue(uint8_t index, int8_t value, uint32_t time);
+    void setValue(uint8_t index, int8_t value) {
+        setValue(index, value, timeLimit[index]);
+    }
 
     // Gets PWM value
-    int16_t getValue(uint8_t index) const;
+    int16_t getValue(uint8_t index);
 protected:
     int16_t pwmValues[8] = {0, 0, 0, 0, 0, 0, 0, 0}; // stores PWM values per channel
 };
 
-struct FlagsIsrArg {
+// used to pass the object and index to the ISR
+struct FlagsArg {
     Flags_in* obj;
     uint8_t index;
 };

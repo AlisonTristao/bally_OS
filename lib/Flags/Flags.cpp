@@ -36,7 +36,7 @@ void FlagsBase::refreshFlags(uint32_t currentTime) {
 // ===== Flags_in =====
 
 void IRAM_ATTR Flags_in::isr(void* arg) {
-    FlagsIsrArg* data = static_cast<FlagsIsrArg*>(arg);
+    FlagsArg* data = static_cast<FlagsArg*>(arg);
 
     if (data == nullptr || data->obj == nullptr)
         return;
@@ -79,9 +79,13 @@ void Flags_out::setFlag(uint8_t index, uint32_t time) {
 
 // ===== Flags_pwm ======
 
-void Flags_pwm::setValue(uint8_t index, int16_t value, uint32_t time) {
+void Flags_pwm::setValue(uint8_t index, int8_t value, uint32_t time) {
     if (!isValidIndex(index))
         return;
+
+    // saturate the pwm in 100
+    value = (value >  100) ?  100 : value;
+    value = (value < -100) ? -100 : value;
 
     pwmValues[index] = value;
     flags.time[index] = millis();
@@ -89,9 +93,11 @@ void Flags_pwm::setValue(uint8_t index, int16_t value, uint32_t time) {
     flags.allFlags |= (1 << index);
 }
 
-int16_t Flags_pwm::getValue(uint8_t index) const {
+int16_t Flags_pwm::getValue(uint8_t index) {
     if (!isValidIndex(index))
         return 0;
 
+    // multiply the value by the flag state (0 or 1) to return 0 if the flag is not active
+    pwmValues[index] = (flags.allFlags & (1 << index)) ? pwmValues[index] : 0;
     return pwmValues[index];
 }
