@@ -38,19 +38,18 @@ public:
     * @brief Insert a log message into the logger's buffer. 
     * This method is thread-safe and can be called from multiple tasks concurrently.
     * 
-    * @param msg The log message to be inserted. This is a String object that can contain any text.
+    * @param msg The log message to be inserted. This is a char*object that can contain any text.
     * @param type The type of the log message, using the logType enum to categorize
     */
-    void insert_log(logType type, const String& msg);
+    void insert_log(logType type, const char* msg);
     void insert_logf(logType type, const char* format, ...);
-    void insert_log_int16_t(const int16_t *sound_data, size_t len); // add a I2SD type for sound data
 
     /*
     * @brief Send the log messages that are currently in the logger's buffer using the configured send callback.
     * This method should be called periodically (e.g., in a task) to ensure that the log messages are sent out. 
     * It will send all the messages in the buffer and then clear it
     */
-    void send_live_logger();
+    void flush_logs();
 
 private:
     // private members for the logger
@@ -96,7 +95,7 @@ private:
     void free_mutex();      // release the mutex
 
     static bool defaultSendCallback(const uint8_t *data, size_t len);
-    static void defaultCommandCallback(const String& cmd);
+    static void defaultCommandCallback(const char* cmd);
 };
 
 #endif // LOGGER_H

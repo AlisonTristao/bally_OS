@@ -20,14 +20,6 @@ void Logger::begin() {
     // create the mutex for the logger to ensure thread safety when multiple tasks are inserting logs concurrently
     if (mutex_ == nullptr)
         mutex_ = xSemaphoreCreateMutex();
-
-    // add 4 logs
-    // the max packet size, the max message size, the protocol overhead size and the max messages
-    insert_log(logType::INFO, "Logger initialized.");
-    insert_log(logType::INFO, "Max packet size: "           + String(MAX_PACKET_SIZE) + " bytes.");
-    insert_log(logType::INFO, "Max message size: "          + String(MAX_CONTENT_SIZE) + " bytes.");
-    insert_log(logType::INFO, "Overhead size: "             + String(PROTOCOL_OVERHEAD_SIZE) + " bytes.");
-    insert_log(logType::INFO, "Buffer size: "               + String(MAX_PACKETS_IN_RAM) + ".");
 }
 
 bool Logger::wait_for_mutex() {
@@ -55,20 +47,6 @@ bool Logger::defaultSendCallback(const uint8_t *data, size_t len) {
     (void)data;
     (void)len;
     return false;
-}
-
-void Logger::insert_log_int16_t(const int16_t *sound_data, size_t len) {
-    // verify the mutex is created and try to take it before inserting the log,
-    if (sound_data == nullptr || len == 0) return;
-
-    // convert the sound data to send as bytes, calculating the byte length based on the number of int16_t elements and their size
-    const size_t byte_len = len * sizeof(int16_t);
-    const uint8_t* data = reinterpret_cast<const uint8_t*>(sound_data);
-
-    // insert the log message into the buffer, using the current timestamp in milliseconds for the log entry
-    if (!wait_for_mutex()) return;
-    insert_log_impl(data, byte_len, logType::I2SD, millis());
-    free_mutex();
 }
 
 void Logger::insert_logf(logType type, const char* format, ...) {
@@ -99,16 +77,16 @@ void Logger::insert_logf(logType type, const char* format, ...) {
     free_mutex();
 }
 
-void Logger::insert_log(logType type, const String& msg) {
+void Logger::insert_log(logType type, const char* msg) {
     // verify the mutex is created and try to take it before inserting the log, 
     // to ensure thread safety when multiple tasks are inserting logs concurrently
     if (!wait_for_mutex()) return;
 
     // convert the string to send as bytes
-    const uint8_t* data = reinterpret_cast<const uint8_t*>(const_cast<char*>(msg.c_str()));
+    const uint8_t* data = reinterpret_cast<const uint8_t*>(const_cast<char*>(msg));
 
     // insert the log message into the buffer, using the current timestamp in milliseconds for the log entry
-    insert_log_impl(data, msg.length(), type, millis());
+    insert_log_impl(data, strlen(msg), type, millis());
     free_mutex();
 }
 
@@ -145,10 +123,10 @@ void Logger::insert_log_impl(const uint8_t* data, size_t len, logType type, uint
         const uint16_t remaining  = (start < len) ? (len - start) : 0; // remaining characters to send starting from the current packet's start index
         const size_t length       = (remaining > MAX_CONTENT_SIZE) ? MAX_CONTENT_SIZE : remaining;    // length of the substring for the current packet
 
-        if (message_count >= MAX_PACKETS_IN_RAM) {
+        // warning - if the buffer is full and the logger is not sending the messages fast enough, 
+        // we will start overwriting the old messages in the buffer,
+        if (message_count >= MAX_PACKETS_IN_RAM)
             message_count = 0;
-            last_index = 0; // drop old data to avoid re-sending stale messages
-        }
 
         message& m          = messages[message_count++];
         m.timer             = ts;
@@ -179,7 +157,7 @@ void Logger::reset_loop_counter() {
     }
 }
 
-void Logger::send_live_logger() {
+void Logger::flush_logs() {
     // verify the mutex is created and try to take it before sending the logs,
     if (!wait_for_mutex()) return;
 
