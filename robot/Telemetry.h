@@ -7,7 +7,7 @@
 stateName telemetry_to_wait() {
     // log message
     #if defined(LOG_ALL) || defined(LOG_INFO)
-        ROBOT::logger.insert_log("state_changed: telemetry -> wait", logType::INFO);
+        ROBOT::logger.insert_log(logType::INFO, "state_changed: telemetry -> wait");
     #endif
 
     // return the stateName of the next state
@@ -17,7 +17,7 @@ stateName telemetry_to_wait() {
 stateName telemetry_to_finish() {
     // log message
     #if defined(LOG_ALL) || defined(LOG_INFO)
-        ROBOT::logger.insert_log("state_changed: telemetry -> finish", logType::INFO);
+        ROBOT::logger.insert_log(logType::INFO, "state_changed: telemetry -> finish");
     #endif
 
     // return the stateName of the next state
@@ -25,22 +25,7 @@ stateName telemetry_to_finish() {
 }
 
 stateName telemetry_function() {
-    // log message out
-    #if defined(LOG_ALL)
-        ROBOT::logger.send_logger(logType::NONE);
-    #else
-        #if defined(LOG_TELEMETRY)
-            ROBOT::logger.send_logger(logType::TELEMETRY);
-        #elif defined(LOG_ERROR)
-            ROBOT::logger.send_logger(logType::ERROR);
-        #elif defined(LOG_DEBUG)
-            ROBOT::logger.send_logger(logType::DEBUG);
-        #elif defined(LOG_INFO)
-            ROBOT::logger.send_logger(logType::INFO);
-        #endif
-    #endif
-
-    return telemetry_to_wait();
+    return TELEMETRY;
 }
 
 stateName next_state_telemetry(uint8_t buttons){

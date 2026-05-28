@@ -18,7 +18,7 @@ uint32_t timer_ms = 0;
 stateName run_to_finish() {
     // log message
     #if defined(LOG_ALL) || defined(LOG_INFO)
-        ROBOT::logger.insert_log("state_changed: run -> finish", logType::INFO);
+        ROBOT::logger.insert_log(logType::INFO,"state_changed: run -> finish");
     #endif
 
     // return the stateName of the next state

@@ -45,43 +45,40 @@ StateMachine state8(ERROR, 		error_function,		next_state_error);
 ROBOT robot;
 
 // callback to print the logger messages in the serial monitor, used when the esp-now is not working
-esp_err_t printLoggerSerial(const uint8_t *peer_addr, const uint8_t *data, size_t len) {
-	// the peer address is not relevant in this case, so we ignore it
-	(void)peer_addr;
-
+bool printLoggerSerial(const uint8_t *data, size_t len) {
 	// convert the data to a struct LogMessage 
 	message logMessage;
 	memcpy(&logMessage, data, sizeof(message));
-	logMessage.msg[sizeof(logMessage.msg) - 1] = '\0';
+	logMessage.content.text[sizeof(logMessage.content.text) - 1] = '\0';
 	
 	// print the log message in the serial monitor
 	Serial.printf("[%u ms] [%s] %s\n", logMessage.timer, 
 		(logMessage.type == logType::INFO) ? "INFO" :
-		(logMessage.type == logType::CMD) ? "CMD" :
-		(logMessage.type == logType::TELEMETRY) ? "TELEMETRY" :
-		(logMessage.type == logType::ERROR) ? "ERROR" :
-		(logMessage.type == logType::DEBUG) ? "DEBUG" :
-		(logMessage.type == logType::PAKG) ? "PAKG" : "NONE",
-		logMessage.msg);
+		(logMessage.type == logType::CMDO) ? "CMDO" :
+		(logMessage.type == logType::WARN) ? "WARN" :
+		(logMessage.type == logType::NONE) ? "NONE" :
+		(logMessage.type == logType::ERRO) ? "ERRO" :
+		(logMessage.type == logType::DEBG) ? "DEBG" :
+		logMessage.content.text);
 
-	return ESP_OK;
+	return true;
 }
 
 void setup() {
 	// start serial communication for debuggind when the espnow is not working
 	// using USB CDC communication, the baud rate is not relevant
 	Serial.begin(3000000); 
-	robot.logger.setSendCallback(printLoggerSerial);
+	robot.logger.set_send_callback(printLoggerSerial);
 
 	// init static objects and espnow settings
 	if(!robot.init()) {
 		for (uint8_t i = 0; i < 10; i++) {
 			// print error message and wait for a while before trying again, to avoid spamming the logs
-			robot.logger.insert_log("Failed to initialize robot", logType::ERROR);
+			robot.logger.insert_log(logType::ERRO, "Failed to initialize robot");
 
 			// if the parallel processing is not working, 
 			// we need to send the logs from here to be able to debug the problem
-			robot.logger.send_logger_live();
+			robot.logger.flush_logs();
 			delay(1000); // wait 10s for the user to see the message before restarting
 		}	
 		ESP.restart(); // there nothing we can do...
@@ -90,7 +87,7 @@ void setup() {
 	// define the callbacks for the logger and state machine
 	// in this case, the logger will use the esp_now_send function to send the logs, 
 	// and the state machine will save the error messages in the logger
-	robot.logger.setSendCallback(esp_now_send); // now, the logger send the messages using esp-now
+	//robot.logger.set_send_callback(esp_now_send); // now, the logger send the messages using esp-now
 	robot.machine.setErrorCallback(robot.staticInsertLog);
 
 	// init state machine
@@ -99,11 +96,11 @@ void setup() {
 	if (!robot.machine.verifyCallbacks()) {
 		for (uint8_t i = 0; i < 10; i++) {
 			// print error message and wait for a while before trying again, to avoid spamming the logs
-			robot.logger.insert_log("State machine callbacks are not properly configured", logType::ERROR);
+			robot.logger.insert_log( logType::ERRO, "State machine callbacks are not properly configured");
 			
 			// if the parallel processing is not working, 
 			// we need to send the logs from here to be able to debug the problem
-			robot.logger.send_logger_live();
+			robot.logger.flush_logs();
 			delay(1000);
 		}
 		ESP.restart(); // there nothing we can do...

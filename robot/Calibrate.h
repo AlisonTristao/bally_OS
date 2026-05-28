@@ -13,7 +13,7 @@
 stateName calibrate_to_wait() {
     // log message
     #if defined(LOG_ALL) || defined(LOG_INFO)
-        ROBOT::logger.insert_log("state_changed: calibrate -> wait", logType::INFO);
+        ROBOT::logger.insert_log(logType::INFO, "state_changed: calibrate -> wait");
     #endif
 
     // return the stateName of the next state
@@ -23,7 +23,7 @@ stateName calibrate_to_wait() {
 stateName calibrate_to_error() {
     // log message
     #if defined(LOG_ALL) || defined(LOG_INFO)
-        ROBOT::logger.insert_log("state_changed: calibrate -> error", logType::INFO);
+        ROBOT::logger.insert_log(logType::INFO, "state_changed: calibrate -> error");
     #endif
 
     // return the stateName of the next state
@@ -35,8 +35,8 @@ stateName calibrate_function() {
 
     // log message
     #if defined(LOG_ALL) || defined(LOG_INFO)
-        ROBOT::logger.insert_log(("Calibrate function called: " + String(!calib ? "failed" : "success")), logType::INFO);
-        ROBOT::logger.insert_log("Values:\n\n" + ROBOT::array_sensor.calibrate_status(), logType::INFO);
+        ROBOT::logger.insert_log(logType::INFO, ("Calibrate function called: " + String(!calib ? "failed" : "success")).c_str());
+        ROBOT::logger.insert_log(logType::INFO, ("Values:\n\n" + ROBOT::array_sensor.calibrate_status()).c_str());
     #endif
 
     if(calib)

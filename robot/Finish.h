@@ -7,7 +7,7 @@
 stateName finish_to_wait() {
     // log message
     #if defined(LOG_ALL) || defined(LOG_INFO)
-        ROBOT::logger.insert_log("state_changed: finish -> wait", logType::INFO);
+        ROBOT::logger.insert_log(logType::INFO, "state_changed: finish -> wait");
     #endif
 
     // return the stateName of the next state
@@ -17,7 +17,7 @@ stateName finish_to_wait() {
 stateName finish_to_telemetry() {
     // log message
     #if defined(LOG_ALL) || defined(LOG_INFO)
-        ROBOT::logger.insert_log("state_changed: finish -> telemetry", logType::INFO);
+        ROBOT::logger.insert_log(logType::INFO, "state_changed: finish -> telemetry");
     #endif
 
     // return the stateName of the next state

@@ -21,14 +21,14 @@
 
 uint8_t triggerVirtualButton(uint8_t button) {
     if (button > 2) {
-        ROBOT::logger.insert_log(String("invalid button index {") + String(button) + "}. expected: 0..2", logType::ERROR);
+        ROBOT::logger.insert_logf(logType::ERRO, "Invalid button index {%d}. Expected: 0, 1, or 2", button);
         return RESULT_ERROR;
     }
 
     // Set the button flag
     ROBOT::buttons.setFlag(button);
     // Log the action
-    ROBOT::logger.insert_log(String("button {") + String(button) + "} virtually triggered", logType::INFO);
+    ROBOT::logger.insert_logf(logType::INFO, "button {%d} virtually triggered", button);
     // The duration is controlled by the flags system (checkFlagsDuration)
     // If you want to force the time, you can implement a timer/task to clear the flag after time_ms
 
@@ -57,7 +57,7 @@ static bool normalizeSideSensorIndex(uint8_t sensor, uint8_t& normalized) {
 uint8_t triggerVirtualSideSensor(uint8_t sensor, uint32_t time_ms) {
     uint8_t sensorIndex = 0;
     if (!normalizeSideSensorIndex(sensor, sensorIndex)) {
-        ROBOT::logger.insert_log(String("invalid side sensor {") + String(sensor) + "}. expected: 0/1 or LEFT/RIGHT pin", logType::ERROR);
+        ROBOT::logger.insert_logf(logType::ERRO, "Invalid side sensor {%d}. Expected: 0/1 or LEFT/RIGHT pin", sensor);
         return RESULT_ERROR;
     }
 
@@ -67,7 +67,7 @@ uint8_t triggerVirtualSideSensor(uint8_t sensor, uint32_t time_ms) {
     // Set the side sensor flag
     ROBOT::sideSensors.setFlag(sensorIndex);
     // Log the action
-    ROBOT::logger.insert_log(String("side sensor {") + String(sensorIndex) + "} virtually triggered", logType::INFO);
+    ROBOT::logger.insert_logf(logType::INFO, "Side sensor {%d} virtually triggered", sensorIndex);
     // The duration is controlled by the flags system (checkFlagsDuration)
     // If you want to force the time, you can implement a timer/task to clear the flag after time_ms
 
@@ -92,26 +92,14 @@ uint8_t wrapper_h() {
     // get help
     String result = ROBOT::shell.get_help("").c_str();
     #if defined(LOG_ALL) || defined(LOG_CMD)
-        ROBOT::logger.insert_log(result, logType::CMD);
+        ROBOT::logger.insert_logf(logType::CMDO, "Help information:\n%s", result);
     #endif
     return RESULT_OK;  // return 0 to indicate success
 }
 
 uint8_t wrapper_types_help() {
     #if defined(LOG_ALL) || defined(LOG_CMD)
-        ROBOT::logger.insert_log("Type aliases used by shell:" + String("\n") +
-                                "u8  => uint8_t" + String("\n") +
-                                "u16 => uint16_t" + String("\n") +
-                                "u32 => uint32_t" + String("\n") +
-                                "u64 => uint64_t" + String("\n") +
-                                "i8  => int8_t" + String("\n") +
-                                "i16 => int16_t" + String("\n") +
-                                "i32 => int32_t" + String("\n") +
-                                "i64 => int64_t" + String("\n") +
-                                "f32 => float" + String("\n") +
-                                "f64 => double" + String("\n") +
-                                "b   => bool" + String("\n") +
-                                "str => string", logType::CMD);
+        ROBOT::logger.insert_log(logType::INFO, "Type aliases used by shell:\nu8: uint8_t\nu16: uint16_t\nu32: uint32_t\ni8: int8_t\ni16: int16_t\ni32: int32_t\nstr: string\nb: bool\nf32: float\nf64: double");
     #endif
     return RESULT_OK;
 }
@@ -139,7 +127,7 @@ uint8_t testPacket() {
 
     // When info logs are enabled, push to logger to validate its packetization path.
     #if defined(LOG_ALL) || defined(LOG_INFO)
-        ROBOT::logger.insert_log(long_text, logType::INFO);
+        ROBOT::logger.insert_log(logType::INFO, long_text);
         return RESULT_OK;
     #endif
 }
@@ -147,7 +135,7 @@ uint8_t testPacket() {
 // reset the robot using the shell
 uint8_t reset_robot() {
     #if defined(LOG_ALL) || defined(LOG_CMD)
-        ROBOT::logger.insert_log("Resetting robot in 3s...", logType::CMD);
+        ROBOT::logger.insert_log(logType::CMDO, "Resetting robot in 3s...");
     #endif
 
     // Wait for 3 seconds to allow the log message to be sent before restarting
@@ -160,7 +148,7 @@ uint8_t reset_robot() {
 // wrapper to apply a pwm value to the motors, using the Flags_pwm class
 uint8_t set_motor_pwm(uint8_t motor, int16_t pwm_value) {
     if (motor > 1) {
-        ROBOT::logger.insert_log(String("invalid motor index {") + String(motor) + "}. expected: 0..1", logType::ERROR);
+        ROBOT::logger.insert_logf(logType::ERRO, "Invalid motor index {%d}. Expected: 0 or 1", motor);
         return RESULT_ERROR;
     }
 
@@ -182,7 +170,7 @@ bool start_shell_wrappers() {
     ROBOT::shell.add(reset_robot, "reset", "Reset the robot", "robot");
 
     #if defined(LOG_ALL) || defined(LOG_INFO)
-        ROBOT::logger.insert_log("Shell started", logType::CMD);
+        ROBOT::logger.insert_log(logType::INFO, "Shell started");
     #endif
     return true;
 }

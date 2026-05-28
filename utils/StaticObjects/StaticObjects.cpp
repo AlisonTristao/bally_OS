@@ -28,15 +28,9 @@ void readMacAddress(){
     Serial.print("MAC Address: ");
     Serial.printf("%02X:%02X:%02X:%02X:%02X:%02X\n", baseMac[0], baseMac[1], baseMac[2], baseMac[3], baseMac[4], baseMac[5]);
     if (ret == ESP_OK) {
-        ROBOT::logger.insert_log("This MAC Address: " +
-                        String(baseMac[0], HEX) + ":" +
-                        String(baseMac[1], HEX) + ":" +
-                        String(baseMac[2], HEX) + ":" +
-                        String(baseMac[3], HEX) + ":" +
-                        String(baseMac[4], HEX) + ":" +
-                        String(baseMac[5], HEX), logType::INFO);
+        ROBOT::logger.insert_log(logType::INFO, ("MAC Address: " + String(baseMac[0], HEX) + ":" + String(baseMac[1], HEX) + ":" + String(baseMac[2], HEX) + ":" + String(baseMac[3], HEX) + ":" + String(baseMac[4], HEX) + ":" + String(baseMac[5], HEX)).c_str());
     } else {
-        ROBOT::logger.insert_log("Failed to read MAC address", logType::ERROR);
+        ROBOT::logger.insert_log(logType::ERRO, "Failed to read MAC address");
     }
 }
 
@@ -129,24 +123,24 @@ bool ROBOT::configurePins() {
 bool ROBOT::configureCommunication() {
     // configure WiFi and ESP-NOW
     if (!WiFi.mode(WIFI_STA) || !WiFi.disconnect()) {
-        ROBOT::logger.insert_log("Failed to configure WiFi", logType::ERROR);
+        ROBOT::logger.insert_log(logType::ERRO, "Failed to configure WiFi");
         return false;
     }
 
     // initialize ESP-NOW
     if (esp_now_init() != ESP_OK) {
-        ROBOT::logger.insert_log("Failed to initialize ESP-NOW", logType::ERROR);
+        ROBOT::logger.insert_log(logType::ERRO, "Failed to initialize ESP-NOW");
         return false;
     }
 
     // configure the ESP-NOW callbacks
     if (esp_now_register_recv_cb(handleReceiveStatic) != ESP_OK) {
-        ROBOT::logger.insert_log("Failed to register receive callback", logType::ERROR);
+        ROBOT::logger.insert_log(logType::ERRO, "Failed to register receive callback");
         return false;
     }
 
     if (esp_now_register_send_cb(handleSendStatic) != ESP_OK) {
-        ROBOT::logger.insert_log("Failed to register send callback", logType::ERROR);
+        ROBOT::logger.insert_log(logType::ERRO, "Failed to register send callback");
         return false;
     }
 
@@ -215,7 +209,7 @@ bool ROBOT::init() {
     receveivedDataQueue = xQueueCreate(10, sizeof(message));
 
     // log message 
-	ROBOT::logger.insert_log("Welcome! the car is starting...", logType::INFO);
+	ROBOT::logger.insert_log(logType::INFO, "Welcome! the car is starting...");
 
     // return true if everything is ok
     initialized = true;
@@ -223,7 +217,7 @@ bool ROBOT::init() {
 }
 
 void ROBOT::staticInsertLog(const char* message) {
-    logger.insert_log(message, logType::ERROR);
+    logger.insert_log(logType::ERRO, message);
 }
 
 void ROBOT::executeCommandFromQueue() {
@@ -234,7 +228,7 @@ void ROBOT::executeCommandFromQueue() {
     // check if there is a message in the queue
     if (xQueueReceive(receveivedDataQueue, &receivedMessage, 0) == pdTRUE) {
         // convert the message to a string
-        String command(receivedMessage.msg);
+        String command(receivedMessage.content.text);
         // execute the command and log the result
         executeCommand(command.c_str());
     }
@@ -245,7 +239,7 @@ void ROBOT::executeCommand(const char* command) const {
     std::string result = shell.run_command_line(command);
 
     // log the command and the result
-    logger.insert_log(result.c_str(), logType::CMD);
+    logger.insert_log(logType::CMDO, result.c_str());
 }
 
 void ROBOT::checkStateMachine() {
@@ -265,14 +259,14 @@ void ROBOT::routine(void *param){
 
     // log message  
     #if defined(LOG_ALL) || defined(LOG_INFO)
-        ROBOT::logger.insert_log("Parallel processing initialized", logType::INFO);
+        ROBOT::logger.insert_log(logType::INFO, "Parallel processing initialized");
     #endif
 
     // main loop of the parallel processing
     while(true) {	
         // logger print live
         #ifdef LOG_VERBOSE
-            ROBOT::logger.send_logger_live();
+            ROBOT::logger.flush_logs();
         #endif
 
         // execute the commands from the queue
@@ -296,7 +290,7 @@ void ROBOT::routine(void *param){
 void ROBOT::handleReceiveStatic(const uint8_t* mac, const uint8_t* incomingData, int len) {
     // verify if the queue is created
     if (instance_->receveivedDataQueue == nullptr) {
-        ROBOT::logger.insert_log("Receive callback called but queue is not initialized", logType::ERROR);
+        ROBOT::logger.insert_log(logType::ERRO, "Receive callback called but queue is not initialized");
         return;
     }
 
