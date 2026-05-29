@@ -57,7 +57,6 @@ static bool esp_now_send_wrapper(const uint8_t *data, size_t len) {
     #ifdef MAC_ADDR
         uint8_t peer_addr[6] = {MAC_ADDR};
         esp_err_t result = esp_now_send(peer_addr, data, len);
-		Serial.println("aq89");
         return result == ESP_OK;
     #else
         return false;
