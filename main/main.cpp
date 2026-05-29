@@ -2,9 +2,15 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <esp_err.h>
+#include <esp_log.h>
+#include <esp_system.h>
+#include <nvs_flash.h>
+#include <cstring>
+#include <inttypes.h>
 
 //  PROJECT HEADERS 
 #include <Pinout.h>
+#include <SharedMessageTypes.h>
 
 //  EXTERNAL LIBRARIES 
 #include <TinyShell.h>
@@ -44,30 +50,47 @@ StateMachine state8(ERROR, 		error_function,		next_state_error);
 // ROBOT INSTANCE
 ROBOT robot;
 
+static const char* TAG = "main";
+
+static esp_log_level_t logTypeToLevel(logType type) {
+	 switch (type) {
+		 case logType::ERRO: return ESP_LOG_ERROR;
+		 case logType::WARN: return ESP_LOG_WARN;
+		 case logType::DEBG: return ESP_LOG_DEBUG;
+		 case logType::CMDO: return ESP_LOG_INFO;
+		 case logType::INFO: return ESP_LOG_INFO;
+		 case logType::NONE: return ESP_LOG_INFO;
+		 default: return ESP_LOG_INFO;
+	 }
+}
+
 // callback to print the logger messages in the serial monitor, used when the esp-now is not working
 bool printLoggerSerial(const uint8_t *data, size_t len) {
 	// convert the data to a struct LogMessage 
 	message logMessage;
-	memcpy(&logMessage, data, sizeof(message));
+	std::memcpy(&logMessage, data, sizeof(message));
 	logMessage.content.text[sizeof(logMessage.content.text) - 1] = '\0';
 	
 	// print the log message in the serial monitor
-	Serial.printf("[%u ms] [%s] %s\n", logMessage.timer, 
-		(logMessage.type == logType::INFO) ? "INFO" :
-		(logMessage.type == logType::CMDO) ? "CMDO" :
-		(logMessage.type == logType::WARN) ? "WARN" :
-		(logMessage.type == logType::NONE) ? "NONE" :
-		(logMessage.type == logType::ERRO) ? "ERRO" :
-		(logMessage.type == logType::DEBG) ? "DEBG" :
-		logMessage.content.text);
+	esp_log_level_t level = logTypeToLevel(logMessage.type);
+	ESP_LOG_LEVEL(level, TAG, "[%" PRIu32 " ms] [%s] %s", logMessage.timer, logTypeToString(logMessage.type), logMessage.content.text);
 
 	return true;
 }
 
-void setup() {
-	// start serial communication for debuggind when the espnow is not working
-	// using USB CDC communication, the baud rate is not relevant
-	Serial.begin(3000000); 
+
+static void robot_setup() {
+	// initialize NVS required by WiFi/ESP-NOW and Preferences replacement
+	esp_err_t nvs_err = nvs_flash_init();
+	if (nvs_err == ESP_ERR_NVS_NO_FREE_PAGES || nvs_err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+		nvs_flash_erase();
+		nvs_err = nvs_flash_init();
+	}
+	if (nvs_err != ESP_OK) {
+		ESP_LOGE(TAG, "NVS init failed: %s", esp_err_to_name(nvs_err));
+	}
+
+	// set callback to print the logger messages when esp-now is not working
 	robot.logger.set_send_callback(printLoggerSerial);
 
 	// init static objects and espnow settings
@@ -79,9 +102,9 @@ void setup() {
 			// if the parallel processing is not working, 
 			// we need to send the logs from here to be able to debug the problem
 			robot.logger.flush_logs();
-			delay(1000); // wait 10s for the user to see the message before restarting
+			vTaskDelay(pdMS_TO_TICKS(1000)); // wait 1s for the user to see the message before restarting
 		}	
-		ESP.restart(); // there nothing we can do...
+		esp_restart(); // there nothing we can do...
 	}
 
 	// define the callbacks for the logger and state machine
@@ -101,9 +124,9 @@ void setup() {
 			// if the parallel processing is not working, 
 			// we need to send the logs from here to be able to debug the problem
 			robot.logger.flush_logs();
-			delay(1000);
+			vTaskDelay(pdMS_TO_TICKS(1000));
 		}
-		ESP.restart(); // there nothing we can do...
+		esp_restart(); // there nothing we can do...
 	}
 
 	// init parallel processing into secondary core
@@ -111,12 +134,12 @@ void setup() {
 							robot.routine, 				
 							"parallel_processing", 
 							// 32kb na stack			
-							32*1024, 							
-							NULL, 						
+							32*1024, 					
+							NULL, 					
 							// this task needs to be lower priority than interruptions
 							3,
 							NULL, 	
-							// this task run in the secondary core to avoid blocking the main loop						
+							// this task run in the secondary core to avoid blocking the main loop					
 							SECONDARY_CORE);
 
     // init interruptions on secondary core
@@ -124,21 +147,28 @@ void setup() {
 							robot.configure_interruptions,
 							"setup_interrupts", 
 							// 2kb na stack			
-							2048, 							
+							2048, 					
 							NULL, 	
 							// this task needs to be higher priority than the parallel processing			
-							2, 								 
+							2, 						 
 							NULL, 		
 							// this task run in the secondary core to avoid blocking the main loop					
 							SECONDARY_CORE);				
 }
 
-// main loop focused on running the state machine function, 
-// the parallel processing is responsible for the rest
-void loop() {
-	// run state machine
-	robot.machine.run();
 
-	// sample delay... (wait for the whatchdog to be ready) 
-	vTaskDelay(1/portTICK_PERIOD_MS);
+static void robot_loop_task(void* param) {
+	(void)param;
+	for (;;) {
+		// run state machine
+		robot.machine.run();
+
+		// sample delay... (wait for the whatchdog to be ready) 
+		vTaskDelay(pdMS_TO_TICKS(1));
+	}
+}
+
+extern "C" void app_main(void) {
+	robot_setup();
+	xTaskCreatePinnedToCore(robot_loop_task, "main_loop", 4096, NULL, 3, NULL, PRIMARY_CORE);
 }

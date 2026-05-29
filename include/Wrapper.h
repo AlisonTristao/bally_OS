@@ -2,7 +2,11 @@
 #define WRAPPER_H
 
 //   SYSTEM  
-#include <Arduino.h>
+#include <string>
+#include <esp_system.h>
+#include <Compat.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 //   UTILITIES  
 #include <Flags.h>
@@ -74,25 +78,11 @@ uint8_t triggerVirtualSideSensor(uint8_t sensor, uint32_t time_ms) {
     return RESULT_OK;
 }
 
-// ================== RGB LED WRAPPERS ==================
-
-// Example wrapper functions for RGB LED control
-uint8_t set_led(uint8_t r, uint8_t g, uint8_t b, uint8_t brightness) {
-    ROBOT::rgb_led.set(r, g, b, brightness);
-    return RESULT_OK;
-}
-
-// led off wrapper
-uint8_t led_off() {
-    ROBOT::rgb_led.off();
-    return RESULT_OK;
-}
-
 uint8_t wrapper_h() {
     // get help
-    String result = ROBOT::shell.get_help("").c_str();
+    std::string result = ROBOT::shell.get_help("");
     #if defined(LOG_ALL) || defined(LOG_CMD)
-        ROBOT::logger.insert_logf(logType::CMDO, "Help information:\n%s", result);
+        ROBOT::logger.insert_logf(logType::CMDO, "Help information:\n%s", result.c_str());
     #endif
     return RESULT_OK;  // return 0 to indicate success
 }
@@ -139,9 +129,9 @@ uint8_t reset_robot() {
     #endif
 
     // Wait for 3 seconds to allow the log message to be sent before restarting
-    vTaskDelay(3000/portTICK_PERIOD_MS);
+    vTaskDelay(pdMS_TO_TICKS(3000));
 
-    ESP.restart();
+    esp_restart();
     return RESULT_OK; // this line will never be reached, but it's here to satisfy the return type
 }
 
@@ -163,8 +153,6 @@ bool start_shell_wrappers() {
 
     ROBOT::shell.create_module("robot", "Module for robot control commands");
     ROBOT::shell.add(testPacket, "test_packet", "Send a long test packet to evaluate multi-packet handling", "robot");
-    ROBOT::shell.add(set_led, "set_led", "Set LED color and brightness", "robot");
-    ROBOT::shell.add(led_off, "led_off", "Turn off the LED", "robot");
     ROBOT::shell.add(triggerVirtualButton, "btn", "Virtually trigger a button", "robot");
     ROBOT::shell.add(triggerVirtualSideSensor, "ssr", "Virtually trigger a side sensor", "robot");
     ROBOT::shell.add(reset_robot, "reset", "Reset the robot", "robot");

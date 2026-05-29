@@ -4,7 +4,6 @@
 // autor: Alison Tristão
 // email: AlisonTristao@hotmail.com
 
-#include <Arduino.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <SharedMessageTypes.h>

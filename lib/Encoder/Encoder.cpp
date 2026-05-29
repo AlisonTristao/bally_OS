@@ -1,4 +1,5 @@
 #include "Encoder.h"
+#include <driver/gpio.h>
 
 // variable static of PCNT
 Encoder *Encoder::usedPCNTs[PCNT_UNIT_MAX] = {
@@ -50,8 +51,8 @@ bool Encoder::init(uint16_t filter) {
 	}
 
     // set up the IO state of hte pin
-    gpio_pad_select_gpio(pinA);
-	gpio_pad_select_gpio(pinB);
+	gpio_reset_pin(pinA);
+	gpio_reset_pin(pinB);
 	gpio_set_direction(pinA, GPIO_MODE_INPUT);
 	gpio_set_direction(pinB, GPIO_MODE_INPUT);
 

@@ -3,6 +3,7 @@
 
 // header
 #include <Pinout.h>
+#include <Compat.h>
 
 // custom libraries
 #include <ArraySensor.h>

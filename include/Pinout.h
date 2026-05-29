@@ -1,9 +1,6 @@
 #ifndef PINOUT_H
 #define PINOUT_H
 
-// native libraries
-#include <Arduino.h>
-
 // logger configuration
 // -> LOG_ALL             // register all logs
 // -> LOG_INFO            // register configuration logs
@@ -51,9 +48,6 @@
 #define BIN1            38
 #define BIN2            39
 #define PWM_B           40
-
-// -------------------- RGB LED (ESP32-S3 SPI) --------------------
-#define LED_RGB_PIN 48
 
 // -------------------- Encoders --------------------
 /*#define ENC_A0          21

@@ -4,6 +4,9 @@
 // header
 #include <Pinout.h>
 
+// std
+#include <string>
+
 // custom libraries
 #include <ArraySensor.h>
 
@@ -35,8 +38,10 @@ stateName calibrate_function() {
 
     // log message
     #if defined(LOG_ALL) || defined(LOG_INFO)
-        ROBOT::logger.insert_log(logType::INFO, ("Calibrate function called: " + String(!calib ? "failed" : "success")).c_str());
-        ROBOT::logger.insert_log(logType::INFO, ("Values:\n\n" + ROBOT::array_sensor.calibrate_status()).c_str());
+        std::string status = std::string("Calibrate function called: ") + (calib ? "success" : "failed");
+        ROBOT::logger.insert_log(logType::INFO, status.c_str());
+        std::string values = std::string("Values:\n\n") + ROBOT::array_sensor.calibrate_status();
+        ROBOT::logger.insert_log(logType::INFO, values.c_str());
     #endif
 
     if(calib)

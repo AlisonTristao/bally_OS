@@ -2,6 +2,8 @@
 #define SHARED_MESSAGE_TYPES_H
 
 #include <stdint.h>
+#include <stddef.h>
+#include <cstring>
 
 // sizes and limits for logger messages, ensuring they are manageable and do not exceed memory limits
 // max espnow size = 250

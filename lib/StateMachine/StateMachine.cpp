@@ -122,14 +122,7 @@ bool StateMachine::run(){
     }
 
     // execute action and use returned state as the next active state
-    try {
-        current_state.store(arr_states[activeState]->action(), std::memory_order_release);
-    } catch(const std::exception& e) {
-        xSemaphoreGive(transitionMutex_);
-        // LOGGER erro
-        reportError("Error in the loop function state machine");
-        return reportError(e.what());
-    }
+    current_state.store(arr_states[activeState]->action(), std::memory_order_release);
 
     // all is okay    
     xSemaphoreGive(transitionMutex_);
@@ -156,14 +149,7 @@ bool StateMachine::next(uint8_t buttons){
         return reportError("State next_state callback is not defined");
     }
 
-    try {
-        current_state.store(arr_states[activeState]->next_state(buttons), std::memory_order_release);
-    } catch(const std::exception& e) {
-        xSemaphoreGive(transitionMutex_);
-        // LOGGER erro
-        reportError("Error in the next function state machine");
-        return reportError(e.what());
-    }
+    current_state.store(arr_states[activeState]->next_state(buttons), std::memory_order_release);
 
     // all is okay
     xSemaphoreGive(transitionMutex_);

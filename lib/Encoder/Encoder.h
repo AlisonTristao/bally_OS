@@ -1,12 +1,14 @@
 #ifndef ENCODER_H
 #define ENCODER_H
-#include <Arduino.h>
+#include <cstdint>
 
 // autor: Alison Tristão
 // email: AlisonTristao@hotmail.com
 
 // WARNING: Not all esp32 chips support the pcnt
 #include <driver/pcnt.h>
+#include <driver/gpio.h>
+#include <esp_attr.h>
 #include <soc/pcnt_struct.h>
 #include "esp_ipc.h"
 

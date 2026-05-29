@@ -1,6 +1,6 @@
 #ifndef WHEELS_H
 #define WHEELS_H
-#include <Arduino.h>
+#include <cstdint>
 
 // sentido da rotação das todas
 enum movement

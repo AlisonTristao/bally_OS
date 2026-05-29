@@ -1,5 +1,4 @@
 #include "Control.h"
-#include <Arduino.h>
 
 Control::Control()
 {

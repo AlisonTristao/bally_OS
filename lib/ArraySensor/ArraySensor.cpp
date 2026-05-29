@@ -1,4 +1,11 @@
 #include "ArraySensor.h"
+#include <Compat.h>
+#include <driver/gpio.h>
+#include <esp_err.h>
+#include <esp_log.h>
+#include <cstdio>
+
+static const char* TAG = "ArraySensor";
 
 ArraySensor::ArraySensor(uint8_t* arr, uint8_t len){
     this->len = len;
@@ -12,17 +19,84 @@ ArraySensor::ArraySensor(uint8_t* arr, uint8_t len){
         min[i] = 4095;
         max[i] = 0;
     }
+
+    adc_channels_.reserve(len);
+    adc_unit_t detected_unit = ADC_UNIT_1;
+    bool unit_set = false;
+
+    for (uint8_t i = 0; i < len; i++) {
+        adc_unit_t unit;
+        adc_channel_t channel;
+        esp_err_t err = adc_oneshot_io_to_channel(static_cast<gpio_num_t>(this->arr[i]), &unit, &channel);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "ADC map failed for GPIO %u: %s", this->arr[i], esp_err_to_name(err));
+            continue;
+        }
+
+        if (!unit_set) {
+            detected_unit = unit;
+            unit_set = true;
+        }
+
+        if (unit != detected_unit) {
+            ESP_LOGE(TAG, "Mixed ADC units are not supported (GPIO %u)", this->arr[i]);
+            continue;
+        }
+
+        adc_channels_.push_back(channel);
+    }
+
+    if (unit_set && adc_channels_.size() == len) {
+        adc_unit_ = detected_unit;
+        adc_oneshot_unit_init_cfg_t init_cfg = {};
+        init_cfg.unit_id = adc_unit_;
+        init_cfg.ulp_mode = ADC_ULP_MODE_DISABLE;
+
+        if (adc_oneshot_new_unit(&init_cfg, &adc_handle_) == ESP_OK) {
+            adc_oneshot_chan_cfg_t chan_cfg = {};
+            chan_cfg.bitwidth = ADC_BITWIDTH_12;
+            chan_cfg.atten = ADC_ATTEN_DB_11;
+
+            bool ok = true;
+            for (auto channel : adc_channels_) {
+                if (adc_oneshot_config_channel(adc_handle_, channel, &chan_cfg) != ESP_OK) {
+                    ok = false;
+                    break;
+                }
+            }
+            adc_ready_ = ok;
+        }
+    }
+
+    if (!adc_ready_) {
+        ESP_LOGW(TAG, "ADC oneshot not ready; sensor reads will return 0");
+    }
 }
 
 ArraySensor::~ArraySensor(){
-    // delete pointers
+    if (adc_handle_ != nullptr) {
+        adc_oneshot_del_unit(adc_handle_);
+        adc_handle_ = nullptr;
+    }
+
+    delete[] arr;
     delete[] min;
     delete[] max;
 }
 
 uint16_t ArraySensor::read(uint8_t index){
+    if (!adc_ready_ || index >= adc_channels_.size())
+        return 0;
+
+    int raw = 0;
+    if (adc_oneshot_read(adc_handle_, adc_channels_[index], &raw) != ESP_OK)
+        return 0;
+
+    if (raw < 0) raw = 0;
+    if (raw > 4095) raw = 4095;
+
     // if the line is black, invert the value
-    return 4095 - analogRead(arr[index]);
+    return static_cast<uint16_t>(4095 - raw);
 }
 
 int16_t ArraySensor::normalize(uint16_t value, uint8_t index){
@@ -59,14 +133,14 @@ bool ArraySensor::calibrate(uint8_t n_samples, uint8_t delay_ms){
     return calibration_ok();
 }
 
-String ArraySensor::calibrate_status(){
+std::string ArraySensor::calibrate_status(){
     // return the calibration status
-    String status;
+    std::string status;
     for(uint8_t i = 0; i < len; i++){
-        status +=   String(min[i])  + 
-                    "-"             + 
-                    String(max[i])  + 
-                    "\n";
+        status += std::to_string(min[i]);
+        status += "-";
+        status += std::to_string(max[i]);
+        status += "\n";
     }
 
     return status;
@@ -94,49 +168,74 @@ double ArraySensor::read_line(){
     return lastPosition;
 }
 
-String ArraySensor::debug(){
-    String status;
-    for(uint8_t i = 0; i < len; i++)
-        status += String(read(i)) + "\t";
+std::string ArraySensor::debug(){
+    std::string status;
+    for(uint8_t i = 0; i < len; i++) {
+        status += std::to_string(read(i));
+        status += "\t";
+    }
     return status;
 }
 
-String ArraySensor::raw(){
-    String status;
-    for(uint8_t i = 0; i < len; i++)
-        status += String(read(i)) + "\t";
+std::string ArraySensor::raw(){
+    std::string status;
+    for(uint8_t i = 0; i < len; i++) {
+        status += std::to_string(read(i));
+        status += "\t";
+    }
     return status;
 }
 
 void ArraySensor::saveCalibration() {
-    preferences.begin("calibration", false);
-    char key[10]; // Buffer to store the keys
-
-    for (uint8_t i = 0; i < len; i++) {
-        snprintf(key, sizeof(key), "min%d", i);
-        preferences.putUInt(key, min[i]);
-
-        snprintf(key, sizeof(key), "max%d", i);
-        preferences.putUInt(key, max[i]);
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open("calibration", NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "NVS open failed: %s", esp_err_to_name(err));
+        return;
     }
 
-    preferences.end();
+    char key[10]; // Buffer to store the keys
+    for (uint8_t i = 0; i < len; i++) {
+        snprintf(key, sizeof(key), "min%u", i);
+        nvs_set_u16(handle, key, min[i]);
+
+        snprintf(key, sizeof(key), "max%u", i);
+        nvs_set_u16(handle, key, max[i]);
+    }
+
+    nvs_commit(handle);
+    nvs_close(handle);
 }
 
 bool ArraySensor::loadCalibration() {
-    
-    if(!preferences.begin("calibration", true)) return false;
-    char key[10]; // Buffer to store the keys
-
-    for (uint8_t i = 0; i < len; i++) {
-        snprintf(key, sizeof(key), "min%d", i);
-        min[i] = preferences.getUInt(key, 0xFFFF);
-
-        snprintf(key, sizeof(key), "max%d", i);
-        max[i] = preferences.getUInt(key, 0x0000);
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open("calibration", NVS_READONLY, &handle);
+    if (err != ESP_OK) {
+        return false;
     }
 
-    preferences.end();
+    char key[10]; // Buffer to store the keys
+    bool ok = true;
+    for (uint8_t i = 0; i < len; i++) {
+        uint16_t min_val = 0xFFFF;
+        uint16_t max_val = 0x0000;
+
+        snprintf(key, sizeof(key), "min%u", i);
+        if (nvs_get_u16(handle, key, &min_val) != ESP_OK)
+            ok = false;
+
+        snprintf(key, sizeof(key), "max%u", i);
+        if (nvs_get_u16(handle, key, &max_val) != ESP_OK)
+            ok = false;
+
+        min[i] = min_val;
+        max[i] = max_val;
+    }
+
+    nvs_close(handle);
+
+    if (!ok)
+        return false;
 
     // check if the calibration is valid
     for (uint8_t i = 0; i < len; i++) {

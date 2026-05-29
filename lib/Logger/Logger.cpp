@@ -1,4 +1,7 @@
 #include <Logger.h>
+#include <Compat.h>
+#include <cstring>
+#include <cstdio>
 
 Logger::Logger()
     : send_callback_(defaultSendCallback) {
@@ -94,8 +97,8 @@ uint8_t Logger::calculate_checksum(const message& msg) {
     // simple checksum calculation by summing all the bytes of the message content, type, packet number, and total packets, modulo 256.
     uint32_t sum = 0;
 
-    // get the length of the content to calculate the checksum, if the content is null, the length is 0
-    const size_t len = (msg.content.byte == nullptr) ? 0 : msg.content.size;
+    // get the length of the content to calculate the checksum
+    const size_t len = msg.content.size;
 
     // sum all the bytes of the message content
     for (size_t i = 0; i < len; ++i) sum += static_cast<uint8_t>(msg.content.byte[i]);
@@ -136,12 +139,10 @@ void Logger::insert_log_impl(const uint8_t* data, size_t len, logType type, uint
         m.content.size      = length;
 
         // copy the payload for the current packet into the message struct
-        if (m.content.byte) {
-            memset(m.content.byte, 0, MAX_CONTENT_SIZE + 1);
-            if (length > 0)
-                memcpy(m.content.byte, data + start, length);
-            m.content.text[length] = '\0';
-        }
+        memset(m.content.byte, 0, MAX_CONTENT_SIZE + 1);
+        if (length > 0)
+            memcpy(m.content.byte, data + start, length);
+        m.content.text[length] = '\0';
 
         // calculate checksum with the sum of the bytes of the message content, type, packet number, and total packets, modulo 256. 
         // This is a simple checksum to verify the integrity of the message on the receiving end.

@@ -1,4 +1,6 @@
 #include "HBridge.h"
+#include <driver/gpio.h>
+#include <driver/ledc.h>
 
 HBridge::HBridge(uint8_t l1, uint8_t l2, uint8_t channelPWM, uint8_t pinPWM)
 {
@@ -11,8 +13,23 @@ HBridge::HBridge(uint8_t l1, uint8_t l2, uint8_t channelPWM, uint8_t pinPWM)
 void HBridge::init()
 {
     // configura o pwm
-    ledcSetup(channelPWM, 5000, 12);
-    ledcAttachPin(pinPWM, channelPWM);
+    ledc_timer_config_t timer_cfg = {};
+    timer_cfg.speed_mode = LEDC_LOW_SPEED_MODE;
+    timer_cfg.timer_num = LEDC_TIMER_0;
+    timer_cfg.duty_resolution = LEDC_TIMER_12_BIT;
+    timer_cfg.freq_hz = 5000;
+    timer_cfg.clk_cfg = LEDC_AUTO_CLK;
+    ledc_timer_config(&timer_cfg);
+
+    ledc_channel_config_t channel_cfg = {};
+    channel_cfg.gpio_num = pinPWM;
+    channel_cfg.speed_mode = LEDC_LOW_SPEED_MODE;
+    channel_cfg.channel = static_cast<ledc_channel_t>(channelPWM);
+    channel_cfg.intr_type = LEDC_INTR_DISABLE;
+    channel_cfg.timer_sel = LEDC_TIMER_0;
+    channel_cfg.duty = 0;
+    channel_cfg.hpoint = 0;
+    ledc_channel_config(&channel_cfg);
     // define a direcao
     mov = STOPPED;
 }
@@ -25,18 +42,18 @@ void HBridge::changeDirection(movement move)
     switch (mov)
     {
     case FORWARD:
-        digitalWrite(l1, HIGH);
-        digitalWrite(l2, LOW);
+        gpio_set_level((gpio_num_t)l1, 1);
+        gpio_set_level((gpio_num_t)l2, 0);
         break;
 
     case BACKWARD:
-        digitalWrite(l1, LOW);
-        digitalWrite(l2, HIGH);
+        gpio_set_level((gpio_num_t)l1, 0);
+        gpio_set_level((gpio_num_t)l2, 1);
         break;
 
     case STOPPED:
-        digitalWrite(l1, HIGH);
-        digitalWrite(l2, HIGH);
+        gpio_set_level((gpio_num_t)l1, 1);
+        gpio_set_level((gpio_num_t)l2, 1);
         break;
 
     default:
@@ -64,11 +81,14 @@ void HBridge::applyPWM(int32_t pwm)
         changeDirection(move);
 
     // aplica o pwm
-    ledcWrite(channelPWM, abs(pwm));
+    uint32_t duty = static_cast<uint32_t>(abs(pwm));
+    ledc_set_duty(LEDC_LOW_SPEED_MODE, static_cast<ledc_channel_t>(channelPWM), duty);
+    ledc_update_duty(LEDC_LOW_SPEED_MODE, static_cast<ledc_channel_t>(channelPWM));
 }
 void HBridge::brake()
 {
     // para o motor
     changeDirection(STOPPED);
-    ledcWrite(channelPWM, 4095);
+    ledc_set_duty(LEDC_LOW_SPEED_MODE, static_cast<ledc_channel_t>(channelPWM), 4095);
+    ledc_update_duty(LEDC_LOW_SPEED_MODE, static_cast<ledc_channel_t>(channelPWM));
 }

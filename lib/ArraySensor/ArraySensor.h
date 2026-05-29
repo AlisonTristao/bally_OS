@@ -1,8 +1,10 @@
 #ifndef ARRAYSENSOR_H
 #define ARRAYSENSOR_H
 
-#include <Arduino.h>
-#include <Preferences.h>
+#include <string>
+#include <vector>
+#include <esp_adc/adc_oneshot.h>
+#include <nvs.h>
 
 // Autor: Alison Tristão
 // Email: AlisonTristao@hotmail.com
@@ -49,7 +51,10 @@ private:
     /**
      * @brief object to save the min and max values of the sensors into EPROM
      */
-    Preferences preferences;
+    adc_oneshot_unit_handle_t adc_handle_ = nullptr;
+    adc_unit_t adc_unit_ = ADC_UNIT_1;
+    std::vector<adc_channel_t> adc_channels_;
+    bool adc_ready_ = false;
 
 public:
     /**
@@ -82,7 +87,7 @@ public:
      * @brief get the status of the calibration
      * @return the min and max values of the sensors
      */
-    String calibrate_status();
+    std::string calibrate_status();
 
     /**
      * @brief calculate the position of the line using the normalized values of the sensors and a gaussian mean
@@ -105,13 +110,13 @@ public:
      * @brief return the normalized values of the sensors
      * @return the normalized values of the sensors
      */
-    String debug();
+    std::string debug();
 
     /**
      * @brief return the values of the sensors
      * @return the values of the sensors
      */
-    String raw();
+    std::string raw();
 };
 
 #endif // ARRAYSENSOR_H

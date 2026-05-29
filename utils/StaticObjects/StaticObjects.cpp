@@ -1,11 +1,31 @@
 #include <StaticObjects.h>
-#include <Arduino.h>
 #include <Pinout.h>
+#include <esp_log.h>
+#include <esp_system.h>
+#include <cstring>
+#include <string>
+#include <cstdio>
+
+static const char* TAG = "ROBOT";
 
 // active instance of the robot class
 ROBOT* ROBOT::instance_ = nullptr;
 
 uint8_t sensor_pins[LEN_SENSOR] = {D0, D1, D2, D3, D4, D5, D6, D7};
+
+static bool gpio_isr_installed = false;
+
+// Define the buttons and side sensors as Flags_in objects with their respective indices
+static FlagsArg btnArgs[] = {
+    {&ROBOT::buttons, 0},
+    {&ROBOT::buttons, 1},
+    {&ROBOT::buttons, 2}
+};
+
+static FlagsArg sideArgs[] = {
+    {&ROBOT::sideSensors, 0},
+    {&ROBOT::sideSensors, 1}
+};
 
 Flags_in ROBOT::buttons("Buttons");
 Flags_in ROBOT::sideSensors("Side Sensors");
@@ -13,7 +33,6 @@ Flags_out ROBOT::leds("LEDs");
 Flags_pwm ROBOT::motors("Motors");
 
 Logger ROBOT::logger;
-RGBLed ROBOT::rgb_led;
 ArraySensor ROBOT::array_sensor(sensor_pins, LEN_SENSOR);
 HBridge ROBOT::motor_left(AIN1, AIN2, CH0, PWM_A);
 HBridge ROBOT::motor_right(BIN1, BIN2, CH1, PWM_B);
@@ -25,10 +44,13 @@ void readMacAddress(){
     // logger the mac address
     uint8_t baseMac[6];
     esp_err_t ret = esp_wifi_get_mac(WIFI_IF_STA, baseMac);
-    Serial.print("MAC Address: ");
-    Serial.printf("%02X:%02X:%02X:%02X:%02X:%02X\n", baseMac[0], baseMac[1], baseMac[2], baseMac[3], baseMac[4], baseMac[5]);
     if (ret == ESP_OK) {
-        ROBOT::logger.insert_log(logType::INFO, ("MAC Address: " + String(baseMac[0], HEX) + ":" + String(baseMac[1], HEX) + ":" + String(baseMac[2], HEX) + ":" + String(baseMac[3], HEX) + ":" + String(baseMac[4], HEX) + ":" + String(baseMac[5], HEX)).c_str());
+        ESP_LOGI(TAG, "MAC Address: %02X:%02X:%02X:%02X:%02X:%02X",
+            baseMac[0], baseMac[1], baseMac[2], baseMac[3], baseMac[4], baseMac[5]);
+        char mac_text[64];
+        snprintf(mac_text, sizeof(mac_text), "MAC Address: %02X:%02X:%02X:%02X:%02X:%02X",
+            baseMac[0], baseMac[1], baseMac[2], baseMac[3], baseMac[4], baseMac[5]);
+        ROBOT::logger.insert_log(logType::INFO, mac_text);
     } else {
         ROBOT::logger.insert_log(logType::ERRO, "Failed to read MAC address");
     }
@@ -43,11 +65,23 @@ void IRAM_ATTR ROBOT::sampleISR(void* arg) {
 
 void ROBOT::configure_interruptions(void *param){
     // set the button interruptions
-    attachInterruptArg(digitalPinToInterrupt(BTN1), Flags_in::isr, &btnArgs[0], FALLING);
-    attachInterruptArg(digitalPinToInterrupt(BTN2), Flags_in::isr, &btnArgs[1], FALLING);
-    attachInterruptArg(digitalPinToInterrupt(BTN3), Flags_in::isr, &btnArgs[2], FALLING);
-    attachInterruptArg(digitalPinToInterrupt(LEFT), Flags_in::isr, &sideArgs[0], RISING);
-    attachInterruptArg(digitalPinToInterrupt(RIGHT), Flags_in::isr, &sideArgs[1], RISING);
+    if (!gpio_isr_installed) {
+        esp_err_t isr_err = gpio_install_isr_service(0);
+        if (isr_err == ESP_OK || isr_err == ESP_ERR_INVALID_STATE)
+            gpio_isr_installed = true;
+    }
+
+    gpio_set_intr_type((gpio_num_t)BTN1, GPIO_INTR_NEGEDGE);
+    gpio_set_intr_type((gpio_num_t)BTN2, GPIO_INTR_NEGEDGE);
+    gpio_set_intr_type((gpio_num_t)BTN3, GPIO_INTR_NEGEDGE);
+    gpio_set_intr_type((gpio_num_t)LEFT, GPIO_INTR_POSEDGE);
+    gpio_set_intr_type((gpio_num_t)RIGHT, GPIO_INTR_POSEDGE);
+
+    gpio_isr_handler_add((gpio_num_t)BTN1, Flags_in::isr, &btnArgs[0]);
+    gpio_isr_handler_add((gpio_num_t)BTN2, Flags_in::isr, &btnArgs[1]);
+    gpio_isr_handler_add((gpio_num_t)BTN3, Flags_in::isr, &btnArgs[2]);
+    gpio_isr_handler_add((gpio_num_t)LEFT, Flags_in::isr, &sideArgs[0]);
+    gpio_isr_handler_add((gpio_num_t)RIGHT, Flags_in::isr, &sideArgs[1]);
     // set the timer interruptions
     #ifdef SAMPLING_ACTIVE
         esp_timer_create_args_t timer_args = {
@@ -73,24 +107,36 @@ bool ROBOT::configurePins() {
     pinMode(UNK0, OUTPUT);
     pinMode(UNK1, OUTPUT);*/
 
-    pinMode(LED_RGB_PIN, OUTPUT);
+    gpio_config_t io_conf = {};
 
-    // H bridge
-    pinMode(AIN1, OUTPUT);
-    pinMode(AIN2, OUTPUT);
-    pinMode(BIN1, OUTPUT);
-    pinMode(BIN2, OUTPUT);
-    pinMode(PWM_A, OUTPUT);
-    pinMode(PWM_B, OUTPUT);
+    // Outputs
+    io_conf.intr_type = GPIO_INTR_DISABLE;
+    io_conf.mode = GPIO_MODE_OUTPUT;
+    io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
+    io_conf.pin_bit_mask = (1ULL << AIN1) |
+                           (1ULL << AIN2) |
+                           (1ULL << BIN1) |
+                           (1ULL << BIN2) |
+                           (1ULL << PWM_A) |
+                           (1ULL << PWM_B);
+    gpio_config(&io_conf);
 
-    // Buttons
-    pinMode(BTN1, INPUT_PULLUP);
-    pinMode(BTN2, INPUT_PULLUP);
-    pinMode(BTN3, INPUT_PULLUP);
+    // Buttons (inputs with pull-up)
+    io_conf.intr_type = GPIO_INTR_DISABLE;
+    io_conf.mode = GPIO_MODE_INPUT;
+    io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    io_conf.pull_up_en = GPIO_PULLUP_ENABLE;
+    io_conf.pin_bit_mask = (1ULL << BTN1) | (1ULL << BTN2) | (1ULL << BTN3);
+    gpio_config(&io_conf);
 
-    // Side sensors
-    pinMode(LEFT, INPUT);
-    pinMode(RIGHT, INPUT);
+    // Side sensors (inputs without pull)
+    io_conf.intr_type = GPIO_INTR_DISABLE;
+    io_conf.mode = GPIO_MODE_INPUT;
+    io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
+    io_conf.pin_bit_mask = (1ULL << LEFT) | (1ULL << RIGHT);
+    gpio_config(&io_conf);
 
     // Encoders
     /*pinMode(ENC_A0, INPUT);
@@ -122,10 +168,47 @@ bool ROBOT::configurePins() {
 
 bool ROBOT::configureCommunication() {
     // configure WiFi and ESP-NOW
-    if (!WiFi.mode(WIFI_STA) || !WiFi.disconnect()) {
-        ROBOT::logger.insert_log(logType::ERRO, "Failed to configure WiFi");
+    esp_err_t err = esp_netif_init();
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        ROBOT::logger.insert_log(logType::ERRO, "Failed to init esp-netif");
         return false;
     }
+
+    err = esp_event_loop_create_default();
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        ROBOT::logger.insert_log(logType::ERRO, "Failed to create event loop");
+        return false;
+    }
+
+    esp_netif_create_default_wifi_sta();
+
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    err = esp_wifi_init(&cfg);
+    if (err != ESP_OK) {
+        ROBOT::logger.insert_log(logType::ERRO, "Failed to init WiFi");
+        return false;
+    }
+
+    err = esp_wifi_set_storage(WIFI_STORAGE_RAM);
+    if (err != ESP_OK) {
+        ROBOT::logger.insert_log(logType::ERRO, "Failed to set WiFi storage");
+        return false;
+    }
+
+    err = esp_wifi_set_mode(WIFI_MODE_STA);
+    if (err != ESP_OK) {
+        ROBOT::logger.insert_log(logType::ERRO, "Failed to set WiFi mode");
+        return false;
+    }
+
+    err = esp_wifi_start();
+    if (err != ESP_OK) {
+        ROBOT::logger.insert_log(logType::ERRO, "Failed to start WiFi");
+        return false;
+    }
+
+    esp_wifi_disconnect();
+    esp_wifi_set_ps(WIFI_PS_NONE);
 
     // initialize ESP-NOW
     if (esp_now_init() != ESP_OK) {
@@ -154,6 +237,7 @@ bool ROBOT::configureCommunication() {
         memcpy(peerInfo.peer_addr, peer_addr, 6);
         peerInfo.channel = 0;
         peerInfo.encrypt = false;
+        peerInfo.ifidx = WIFI_IF_STA;
         esp_now_add_peer(&peerInfo);
     #endif
 
@@ -228,7 +312,7 @@ void ROBOT::executeCommandFromQueue() {
     // check if there is a message in the queue
     if (xQueueReceive(receveivedDataQueue, &receivedMessage, 0) == pdTRUE) {
         // convert the message to a string
-        String command(receivedMessage.content.text);
+        std::string command(receivedMessage.content.text);
         // execute the command and log the result
         executeCommand(command.c_str());
     }
@@ -287,7 +371,9 @@ void ROBOT::routine(void *param){
 }
 
 // Adapter para callback estático de recebimento.
-void ROBOT::handleReceiveStatic(const uint8_t* mac, const uint8_t* incomingData, int len) {
+void ROBOT::handleReceiveStatic(const esp_now_recv_info_t* info, const uint8_t* incomingData, int len) {
+    (void)info;
+    (void)len;
     // verify if the queue is created
     if (instance_->receveivedDataQueue == nullptr) {
         ROBOT::logger.insert_log(logType::ERRO, "Receive callback called but queue is not initialized");

@@ -1,7 +1,10 @@
 #ifndef FLAGS_H
 #define FLAGS_H
 
-#include <Arduino.h>
+#include <string>
+#include <bitset>
+#include <esp_attr.h>
+#include <Compat.h>
 
 #define BIT_0 0
 #define BIT_1 1
@@ -38,7 +41,7 @@ public:
     static constexpr uint8_t MAX_FLAGS = 8;
 
     // Constructor with optional debug name
-    FlagsBase(const String& name = "", uint32_t timeLimit = 100)
+    FlagsBase(const std::string& name = "", uint32_t timeLimit = 100)
         : name(name) {
             for (int i = 0; i < MAX_FLAGS; i++) {
                 this->timeLimit[i] = timeLimit;
@@ -59,12 +62,13 @@ public:
     void checkFlagsDuration();
 
     // String representation (can be overridden)
-    String toString() const {
-        return name + " Flags: " + String(flags.allFlags, BIN);
+    std::string toString() const {
+        std::bitset<8> bits(flags.allFlags);
+        return name + " Flags: " + bits.to_string();
     };
 protected:
     FlagsByte flags;
-    String name;
+    std::string name;
     uint32_t timeLimit[MAX_FLAGS];
 
     bool isValidIndex(uint8_t index) const;
@@ -77,7 +81,7 @@ protected:
 class Flags_in : public FlagsBase {
 public:
     // Constructor with optional debug name
-    Flags_in(const String& name = "") : FlagsBase(name) {}        
+    Flags_in(const std::string& name = "") : FlagsBase(name) {}        
     virtual ~Flags_in() {};
     // Static ISR required for attachInterruptArg
     static void IRAM_ATTR isr(void* arg);
@@ -91,7 +95,7 @@ protected:
 // Digital output flags controlled by software
 class Flags_out : public FlagsBase {
 public:
-    Flags_out(const String& name = "") : FlagsBase(name) {}
+    Flags_out(const std::string& name = "") : FlagsBase(name) {}
     virtual ~Flags_out() {};
     // Sets a specific flag manually
     void setFlag(uint8_t index, uint32_t time);
@@ -101,7 +105,7 @@ public:
 class Flags_pwm : public FlagsBase {
 public:
     // Constructor with optional debug name
-    Flags_pwm(const String& name = "") : FlagsBase(name) {}
+    Flags_pwm(const std::string& name = "") : FlagsBase(name) {}
     virtual ~Flags_pwm() {};
     // Sets PWM value (0–100)
     void setValue(uint8_t index, int8_t value, uint32_t time);
