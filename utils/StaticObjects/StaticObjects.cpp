@@ -122,24 +122,31 @@ bool ROBOT::configurePins() {
 
 bool ROBOT::configureCommunication() {
     // configure WiFi and ESP-NOW
-    if (!WiFi.mode(WIFI_STA) || !WiFi.disconnect()) {
-        ROBOT::logger.insert_log(logType::ERRO, "Failed to configure WiFi");
+    if (!WiFi.mode(WIFI_STA)) {
+        ROBOT::logger.insert_log(logType::ERRO, "Failed to configure WiFi mode");
         return false;
     }
 
+    // disconnect is best-effort; avoid failing if already disconnected
+    WiFi.disconnect();
+    delay(50);
+
     // initialize ESP-NOW
-    if (esp_now_init() != ESP_OK) {
+    esp_err_t err = esp_now_init();
+    if (err != ESP_OK) {
         ROBOT::logger.insert_log(logType::ERRO, "Failed to initialize ESP-NOW");
         return false;
     }
 
     // configure the ESP-NOW callbacks
-    if (esp_now_register_recv_cb(handleReceiveStatic) != ESP_OK) {
+    err = esp_now_register_recv_cb(handleReceiveStatic);
+    if (err != ESP_OK) {
         ROBOT::logger.insert_log(logType::ERRO, "Failed to register receive callback");
         return false;
     }
 
-    if (esp_now_register_send_cb(handleSendStatic) != ESP_OK) {
+    err = esp_now_register_send_cb(handleSendStatic);
+    if (err != ESP_OK) {
         ROBOT::logger.insert_log(logType::ERRO, "Failed to register send callback");
         return false;
     }
@@ -154,7 +161,14 @@ bool ROBOT::configureCommunication() {
         memcpy(peerInfo.peer_addr, peer_addr, 6);
         peerInfo.channel = 0;
         peerInfo.encrypt = false;
-        esp_now_add_peer(&peerInfo);
+        peerInfo.ifidx = WIFI_IF_STA;
+        err = esp_now_add_peer(&peerInfo);
+        if (err != ESP_OK && err != ESP_ERR_ESPNOW_EXIST) {
+            ROBOT::logger.insert_log(logType::ERRO, "Failed to add ESP-NOW peer");
+            return false;
+        }
+    #else
+        #warning "MAC_ADDR not defined; ESP-NOW peer not added"
     #endif
 
     return true;
@@ -194,7 +208,17 @@ bool ROBOT::init() {
     if (!configurePins())
         return false;
 
-    // configure communication (wifi and esp-now)  
+    // initialize the logger
+	logger.begin();
+
+    // create the queue for the received data from the ESP-NOW
+    receveivedDataQueue = xQueueCreate(10, sizeof(message));
+    if (receveivedDataQueue == nullptr) {
+        ROBOT::logger.insert_log(logType::ERRO, "Failed to create receive queue");
+        return false;
+    }
+
+    // configure WiFi and ESP-NOW before any send attempts
     if (!configureCommunication())
         return false;
         
@@ -204,9 +228,6 @@ bool ROBOT::init() {
 
     // set time for reset the flags signals
     setTimeLimit();
-
-    // create the queue for the received data from the ESP-NOW
-    receveivedDataQueue = xQueueCreate(10, sizeof(message));
 
     // log message 
 	ROBOT::logger.insert_log(logType::INFO, "Welcome! the car is starting...");

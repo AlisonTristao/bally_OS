@@ -9,7 +9,7 @@
 // + 4 byte para o length
 // therefore, max message size is 250 - 10 = 240 bytes
 #define MAX_PACKET_SIZE         250 // if we change the transport protocol, we can increase this value
-#define PROTOCOL_OVERHEAD_SIZE  14
+#define PROTOCOL_OVERHEAD_SIZE  20
 #define MAX_CONTENT_SIZE        ((MAX_PACKET_SIZE - PROTOCOL_OVERHEAD_SIZE) -1) // -1 to ensure we have space for the null terminator
 #define MAX_PACKETS_IN_RAM      32   // limit for messages in memory - watch out for available ram limits
 #define LOGGER_MUTEX_TIMEOUT_MS 100  // time in ms to wait for the logger to be available - used to avoid deleting messages during printing
