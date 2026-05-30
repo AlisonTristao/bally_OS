@@ -14,7 +14,7 @@ Flags_pwm ROBOT::motors("Motors");
 
 Logger ROBOT::logger;
 RGBLed ROBOT::rgb_led;
-ArraySensor ROBOT::array_sensor(sensor_pins, LEN_SENSOR);
+ArraySensor<LEN_SENSOR> ROBOT::array_sensor(sensor_pins);
 HBridge ROBOT::motor_left(AIN1, AIN2, CH0, PWM_A);
 HBridge ROBOT::motor_right(BIN1, BIN2, CH1, PWM_B);
 Control ROBOT::control;
