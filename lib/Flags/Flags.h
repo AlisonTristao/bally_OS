@@ -3,6 +3,7 @@
 
 #include <Arduino.h>
 
+// the BIT_s 
 #define BIT_0 0
 #define BIT_1 1
 #define BIT_2 2
@@ -51,10 +52,6 @@ public:
     // Returns all flags as a byte
     uint8_t getFlags() const;
 
-    // Sets time limit in milliseconds
-    void setTimeLimit(uint8_t index, uint32_t time);
-    void setTimeLimit(uint32_t time);
-
     // Checks and clears flags based on duration
     void checkFlagsDuration();
 
@@ -67,6 +64,7 @@ protected:
     String name;
     uint32_t timeLimit[MAX_FLAGS];
 
+    // Validates if the index is within bounds
     bool isValidIndex(uint8_t index) const;
 
     // Updates flags based on current time
@@ -83,6 +81,9 @@ public:
     static void IRAM_ATTR isr(void* arg);
     // Sets a specific flag from an ISR
     void setFlag(uint8_t index);
+    // Sets time limit in milliseconds
+    void setTimeLimit(uint8_t index, uint32_t time);
+    void setTimeLimit(uint32_t time);
 protected:
     // Handles flag update triggered by interrupt
     void IRAM_ATTR handleUpdate(uint8_t index);
@@ -105,9 +106,6 @@ public:
     virtual ~Flags_pwm() {};
     // Sets PWM value (0–100)
     void setValue(uint8_t index, int8_t value, uint32_t time);
-    void setValue(uint8_t index, int8_t value) {
-        setValue(index, value, timeLimit[index]);
-    }
 
     // Gets PWM value
     int16_t getValue(uint8_t index);

@@ -43,9 +43,9 @@ void IRAM_ATTR ROBOT::sampleISR(void* arg) {
 
 void ROBOT::configure_interruptions(void *param){
     // set the button interruptions
-    attachInterruptArg(digitalPinToInterrupt(BTN1), Flags_in::isr, &btnArgs[0], FALLING);
-    attachInterruptArg(digitalPinToInterrupt(BTN2), Flags_in::isr, &btnArgs[1], FALLING);
-    attachInterruptArg(digitalPinToInterrupt(BTN3), Flags_in::isr, &btnArgs[2], FALLING);
+    attachInterruptArg(digitalPinToInterrupt(BIT_0), Flags_in::isr, &btnArgs[0], FALLING);
+    attachInterruptArg(digitalPinToInterrupt(BIT_1), Flags_in::isr, &btnArgs[1], FALLING);
+    attachInterruptArg(digitalPinToInterrupt(BIT_2), Flags_in::isr, &btnArgs[2], FALLING);
     attachInterruptArg(digitalPinToInterrupt(LEFT), Flags_in::isr, &sideArgs[0], RISING);
     attachInterruptArg(digitalPinToInterrupt(RIGHT), Flags_in::isr, &sideArgs[1], RISING);
     // set the timer interruptions
@@ -84,9 +84,9 @@ bool ROBOT::configurePins() {
     pinMode(PWM_B, OUTPUT);
 
     // Buttons
-    pinMode(BTN1, INPUT_PULLUP);
-    pinMode(BTN2, INPUT_PULLUP);
-    pinMode(BTN3, INPUT_PULLUP);
+    pinMode(BIT_0, INPUT_PULLUP);
+    pinMode(BIT_1, INPUT_PULLUP);
+    pinMode(BIT_2, INPUT_PULLUP);
 
     // Side sensors
     pinMode(LEFT, INPUT);
@@ -178,8 +178,6 @@ void ROBOT::setTimeLimit() {
     // set the time limit for the flags, to reset them after a certain time
     buttons.setTimeLimit(DELAY_FLAGS);
     sideSensors.setTimeLimit(DELAY_FLAGS);
-    leds.setTimeLimit(DELAY_FLAGS);
-    motors.setTimeLimit(DELAY_FLAGS);
 }
 
 void ROBOT::resetFlags() {
@@ -192,8 +190,8 @@ void ROBOT::resetFlags() {
 
 void ROBOT::setOutputs() {
     // define the outputs value based on the flags
-    ROBOT::motor_left.applyPWM(ROBOT::motors.getValue(0));
-    ROBOT::motor_right.applyPWM(ROBOT::motors.getValue(1));
+    ROBOT::motor_left.applyPWM(ROBOT::motors.getValue(MOTOR_LEFT_idx));
+    ROBOT::motor_right.applyPWM(ROBOT::motors.getValue(MOTOR_RIGHT_idx));
 
     // set the leds based on the flags
     // ainda nao existe leds

@@ -145,14 +145,17 @@ uint8_t reset_robot() {
     return RESULT_OK; // this line will never be reached, but it's here to satisfy the return type
 }
 
-// wrapper to apply a pwm value to the motors, using the Flags_pwm class
-uint8_t set_motor_pwm(uint8_t motor, int16_t pwm_value) {
-    if (motor > 1) {
-        ROBOT::logger.insert_logf(logType::ERRO, "Invalid motor index {%d}. Expected: 0 or 1", motor);
-        return RESULT_ERROR;
-    }
+// apll
 
-    ROBOT::motors.setValue(motor, pwm_value);
+// wrapper to apply a pwm value to the motors, using the Flags_pwm class
+uint8_t set_pwm(uint8_t motor, int8_t pwm_value, uint32_t time_ms) {
+    ROBOT::motors.setValue(motor, pwm_value, time_ms);
+    return RESULT_OK;
+}
+
+uint8_t set_pwm_pair(int8_t pwm_left, int8_t pwm_right, uint32_t time_ms) {
+    ROBOT::motors.setValue(MOTOR_LEFT_idx, pwm_left, time_ms);
+    ROBOT::motors.setValue(MOTOR_RIGHT_idx, pwm_right, time_ms);
     return RESULT_OK;
 }
 
@@ -168,6 +171,8 @@ bool start_shell_wrappers() {
     ROBOT::shell.add(triggerVirtualButton, "btn", "Virtually trigger a button", "robot");
     ROBOT::shell.add(triggerVirtualSideSensor, "ssr", "Virtually trigger a side sensor", "robot");
     ROBOT::shell.add(reset_robot, "reset", "Reset the robot", "robot");
+    ROBOT::shell.add(set_pwm, "set_pwm", "Set PWM value for a motor (0 for left, 1 for right)", "robot");
+    ROBOT::shell.add(set_pwm_pair, "set_pwm_pair", "Set PWM values for both motors at once", "robot");
 
     #if defined(LOG_ALL) || defined(LOG_INFO)
         ROBOT::logger.insert_log(logType::INFO, "Shell started");

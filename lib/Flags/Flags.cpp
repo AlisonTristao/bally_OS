@@ -10,18 +10,6 @@ bool FlagsBase::isValidIndex(uint8_t index) const {
     return index < MAX_FLAGS;
 }
 
-void FlagsBase::setTimeLimit(uint8_t index, uint32_t time) {
-    if (!isValidIndex(index))
-        return;
-
-    timeLimit[index] = time;
-}
-
-void FlagsBase::setTimeLimit(uint32_t time) {
-    for (int i = 0; i < MAX_FLAGS; i++)
-        timeLimit[i] = time;
-}
-
 void FlagsBase::checkFlagsDuration() {
     refreshFlags(millis());
 }
@@ -34,6 +22,18 @@ void FlagsBase::refreshFlags(uint32_t currentTime) {
 }
 
 // ===== Flags_in =====
+
+void Flags_in::setTimeLimit(uint8_t index, uint32_t time) {
+    if (!isValidIndex(index))
+        return;
+
+    timeLimit[index] = time;
+}
+
+void Flags_in::setTimeLimit(uint32_t time) {
+    for (int i = 0; i < MAX_FLAGS; i++)
+        timeLimit[i] = time;
+}
 
 void IRAM_ATTR Flags_in::isr(void* arg) {
     FlagsArg* data = static_cast<FlagsArg*>(arg);

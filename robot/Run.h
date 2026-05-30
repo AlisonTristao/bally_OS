@@ -46,8 +46,11 @@ stateName run_function() {
     if(velLeft > 2*PWM)        velLeft = 2*PWM;
     if(velLeft < -2*PWM)       velLeft = -2*PWM;    
     
-    ROBOT::motor_left.applyPWM((int32_t)velLeft);
-    ROBOT::motor_right.applyPWM((int32_t)velRight);
+    ROBOT::motors.setValue(MOTOR_LEFT_idx, velLeft, CONTROL_TIME_MS * 2);
+    ROBOT::motors.setValue(MOTOR_RIGHT_idx, velRight, CONTROL_TIME_MS * 2);
+
+    //ROBOT::motor_left.applyPWM((int32_t)velLeft);
+    //ROBOT::motor_right.applyPWM((int32_t)velRight);
 
     while (millis() - timer_ms < CONTROL_TIME_MS);
 
