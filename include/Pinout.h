@@ -74,14 +74,15 @@
 //#define BZR             6*/
 
 // -------------------- Sensor --------------------
-#define D0        18
-#define D1        17
-#define D2        16
-#define D3        15
-#define D4        7
-#define D5        6
-#define D6        5
-#define D7        4
+#define LEN_SENSOR      8       // quantidade de sensores
+#define D0              18
+#define D1              17
+#define D2              16
+#define D3              15
+#define D4              7
+#define D5              6
+#define D6              5
+#define D7              4
 
 // -------------------- I2C devices --------------------
 /*#define SDA             4

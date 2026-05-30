@@ -59,7 +59,7 @@ public:
 
     // peripheral objects
     static RGBLed rgb_led;
-    static ArraySensor array_sensor;
+    static ArraySensor<LEN_SENSOR> array_sensor;
 private:
     // private peripheral objects
     static HBridge motor_left;
