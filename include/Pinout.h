@@ -74,7 +74,6 @@
 //#define BZR             6*/
 
 // -------------------- Sensor --------------------
-#define LEN_SENSOR      8       // quantidade de sensores
 #define D0              18
 #define D1              17
 #define D2              16
