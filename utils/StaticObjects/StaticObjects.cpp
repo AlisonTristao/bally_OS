@@ -5,7 +5,7 @@
 // active instance of the robot class
 ROBOT* ROBOT::instance_ = nullptr;
 
-uint8_t sensor_pins[LEN_SENSOR] = {D0, D1, D2, D3, D4, D5, D6, D7};
+const uint8_t sensor_pins[LEN_SENSOR] = {D0, D1, D2, D3, D4, D5, D6, D7};
 
 Flags_in ROBOT::buttons("Buttons");
 Flags_in ROBOT::sideSensors("Side Sensors");
