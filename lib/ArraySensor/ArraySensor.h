@@ -1,8 +1,8 @@
 #ifndef ARRAYSENSOR_H
 #define ARRAYSENSOR_H
 
-#include <Arduino.h>
 #include <Preferences.h>
+#include <cstdint>
 
 // Autor: Alison Tristão
 // Email: AlisonTristao@hotmail.com
@@ -82,13 +82,13 @@ public:
      * @brief get the status of the calibration
      * @return the min and max values of the sensors
      */
-    String calibrate_status();
+    std::string calibrate_status();
 
     /**
      * @brief calculate the position of the line using the normalized values of the sensors and a gaussian mean
      * @return the position of the line with values between 0 and 1000 * len of sensors
      */
-    double read_line();
+    double get_line_position();
 
     /**
      * @brief save the min and max values of the sensors into EPROM to use in the next time
@@ -105,13 +105,13 @@ public:
      * @brief return the normalized values of the sensors
      * @return the normalized values of the sensors
      */
-    String debug();
+    std::string debug();
 
     /**
      * @brief return the values of the sensors
      * @return the values of the sensors
      */
-    String raw();
+    std::string raw();
 };
 
 #endif // ARRAYSENSOR_H

@@ -124,7 +124,7 @@ void setup() {
 							2, 								 
 							NULL, 		
 							// this task run in the secondary core to avoid blocking the main loop					
-							SECONDARY_CORE);				
+							SECONDARY_CORE);
 }
 
 // main loop focused on running the state machine function, 

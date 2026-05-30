@@ -19,7 +19,6 @@ public:
     void init();
     void applyPWM(int32_t pwm);
     void brake();
-
 private:
     void changeDirection(movement mov);
     movement mov;

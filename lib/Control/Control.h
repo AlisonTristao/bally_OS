@@ -3,7 +3,6 @@
 
 // autor Greg
 #include <cstdint>
-#include <Arduino.h>
 
 class Control
 {

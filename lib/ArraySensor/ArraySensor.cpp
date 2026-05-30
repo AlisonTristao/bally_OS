@@ -59,20 +59,20 @@ bool ArraySensor::calibrate(uint8_t n_samples, uint8_t delay_ms){
     return calibration_ok();
 }
 
-String ArraySensor::calibrate_status(){
+std::string ArraySensor::calibrate_status(){
     // return the calibration status
-    String status;
+    std::string status;
     for(uint8_t i = 0; i < len; i++){
-        status +=   String(min[i])  + 
+        status +=   std::to_string(min[i])  + 
                     "-"             + 
-                    String(max[i])  + 
+                    std::to_string(max[i])  + 
                     "\n";
     }
 
     return status;
 }
 
-double ArraySensor::read_line(){
+double ArraySensor::get_line_position(){
     double value = 0, measure = 0;
     bool line = false;
     uint16_t val = 0;
@@ -94,17 +94,17 @@ double ArraySensor::read_line(){
     return lastPosition;
 }
 
-String ArraySensor::debug(){
-    String status;
+std::string ArraySensor::debug(){
+    std::string status;
     for(uint8_t i = 0; i < len; i++)
-        status += String(read(i)) + "\t";
+        status += std::to_string(read(i)) + "\t";
     return status;
 }
 
-String ArraySensor::raw(){
-    String status;
+std::string ArraySensor::raw(){
+    std::string status;
     for(uint8_t i = 0; i < len; i++)
-        status += String(read(i)) + "\t";
+        status += std::to_string(read(i)) + "\t";
     return status;
 }
 

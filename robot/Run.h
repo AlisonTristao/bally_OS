@@ -29,7 +29,7 @@ stateName run_function() {
     timer_ms = millis();
 
     // calcula a posicao da linha
-    double position = (ROBOT::array_sensor.read_line() - 4500)/100;
+    double position = (ROBOT::array_sensor.get_line_position() - 4500)/100;
 
     // calcula o controle das rodas
     double pd_w = ROBOT::control.simplePD(4.0, 0.20, position, CONTROL_TIME_MS/1000.0);
