@@ -4,7 +4,7 @@
 // header
 #include <Pinout.h>
 #include <Wrapper.h>
-#include <StaticObjects.h>
+#include <BallyRobot.h>
 
 stateName setup_to_wait() {
     // log message

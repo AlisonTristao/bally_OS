@@ -19,7 +19,7 @@
 #include <Flags.h>
 #include <Logger.h>
 #include <StateMachine.h>
-#include <StaticObjects.h>
+#include <BallyRobot.h>
 
 //  ROBOT STATE MACHINE 
 #include <Setup.h>  
@@ -53,20 +53,10 @@ bool printLoggerSerial(const uint8_t *data, size_t len) {
 	return true; // return true if the message was printed successfully
 }
 
-static bool esp_now_send_wrapper(const uint8_t *data, size_t len) {
-    #ifdef MAC_ADDR
-        uint8_t peer_addr[6] = {MAC_ADDR};
-        esp_err_t result = esp_now_send(peer_addr, data, len);
-        return result == ESP_OK;
-    #else
-        return false;
-    #endif
-}
-
 void setup() {
 	// start serial communication for debuggind when the espnow is not working
 	// using USB CDC communication, the baud rate is not relevant
-	Serial.begin(3000000); 
+	Serial.begin(BAUDRATE); 
 
 	// init static objects and espnow settings
 	if(!robot.init()) {
@@ -77,12 +67,23 @@ void setup() {
 		ESP.restart(); // there nothing we can do...
 	}
 
-	// define the callbacks for the logger and state machine
-	// in this case, the logger will use the esp_now_send function to send the logs, 
-	// and the state machine will save the error messages in the logger
-	//robot.logger.set_send_callback(esp_now_send); // now, the logger send the messages using esp-now
-	robot.logger.set_send_callback(esp_now_send_wrapper);
-	robot.machine.setErrorCallback(robot.staticInsertLog);
+	// define the callbacks for the logger
+	robot.logger.set_send_callback([](const uint8_t *data, size_t len) {
+		uint8_t peer_mac[6] = {MAC_ADDR};
+        return (esp_now_send(peer_mac, data, len)) == ESP_OK; // send the log message using esp-now
+	});
+
+	// define a default callback for the state machine errors, to log the error messages using the logger
+	robot.machine.setErrorCallback([](const char* message) {
+		if (message != nullptr)
+			robot.logger.insert_log(logType::ERRO, message); // log the error message using the logger
+	});
+
+	// define the callback for the shell output, to log the command outputs using the logger
+	robot.shell.set_output_callback([](const std::string& text) {
+        if (!text.empty())
+            robot.logger.insert_log(logType::DEBG, text.c_str());
+    });
 
 	// init state machine
 	// ATTENTION: the state machine must be initialized after the set the callbacks

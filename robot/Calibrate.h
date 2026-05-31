@@ -8,7 +8,7 @@
 #include <ArraySensor.h>
 
 // static library
-#include <StaticObjects.h>
+#include <BallyRobot.h>
 
 stateName calibrate_to_wait() {
     // log message

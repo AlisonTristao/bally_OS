@@ -10,7 +10,6 @@
 // -> LOG_TELEMETRY       // register operational logs
 // -> LOG_ERROR           // register error logs
 // -> LOG_DEBUG           // register debug logs
-// -> LOG_VERBOSE         // print log messages in real time
 
 // sampling activation
 // -> SAMPLING_ACTIVE

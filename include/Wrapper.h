@@ -8,7 +8,7 @@
 #include <Flags.h>
 #include <Logger.h>
 #include <StateMachine.h>
-#include <StaticObjects.h>
+#include <BallyRobot.h>
 
 //   EXTERNAL LIBRARIES  
 #include <TinyShell.h>
@@ -88,22 +88,6 @@ uint8_t led_off() {
     return RESULT_OK;
 }
 
-uint8_t wrapper_h() {
-    // get help
-    String result = ROBOT::shell.get_help("").c_str();
-    #if defined(LOG_ALL) || defined(LOG_CMD)
-        ROBOT::logger.insert_logf(logType::CMDO, "Help information:\n%s", result);
-    #endif
-    return RESULT_OK;  // return 0 to indicate success
-}
-
-uint8_t wrapper_types_help() {
-    #if defined(LOG_ALL) || defined(LOG_CMD)
-        ROBOT::logger.insert_log(logType::INFO, "Type aliases used by shell:\nu8: uint8_t\nu16: uint16_t\nu32: uint32_t\ni8: int8_t\ni16: int16_t\ni32: int32_t\nstr: string\nb: bool\nf32: float\nf64: double");
-    #endif
-    return RESULT_OK;
-}
-
 uint8_t testPacket() {
     // envia um texto grande para testar o envio de varios pacotes
     // o texto é uma citacao de "Dom Casmurro", de Machado de Assis
@@ -160,10 +144,6 @@ uint8_t set_pwm_pair(int8_t pwm_left, int8_t pwm_right, uint32_t time_ms) {
 }
 
 bool start_shell_wrappers() {
-    ROBOT::shell.create_module("help", "Module for help and information");
-    ROBOT::shell.add(wrapper_h, "h", "List all modules", "help");
-    ROBOT::shell.add(wrapper_types_help, "types", "Show type aliases (u8, i32, str...)", "help");
-
     ROBOT::shell.create_module("robot", "Module for robot control commands");
     ROBOT::shell.add(testPacket, "test_packet", "Send a long test packet to evaluate multi-packet handling", "robot");
     ROBOT::shell.add(set_led, "set_led", "Set LED color and brightness", "robot");

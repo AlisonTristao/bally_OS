@@ -35,9 +35,9 @@ public:
 
     // initialize the robot, configure the pins, the wifi and the esp-now settings
     bool init();
-
-    // log state machine errors in the logger
-    static void staticInsertLog(const char* message);
+    static void* getInstance() {
+        return static_cast<void*>(instance_);
+    }
 
     // routine to be executed in parallel processing
     static void routine(void *param);

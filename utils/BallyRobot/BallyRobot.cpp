@@ -1,4 +1,4 @@
-#include <StaticObjects.h>
+#include <BallyRobot.h>
 #include <Arduino.h>
 #include <Pinout.h>
 
@@ -235,10 +235,6 @@ bool ROBOT::init() {
     return true;
 }
 
-void ROBOT::staticInsertLog(const char* message) {
-    logger.insert_log(logType::ERRO, message);
-}
-
 void ROBOT::executeCommandFromQueue() {
     // check if there is a message in the queue, if not, return
     if(uxQueueMessagesWaiting(instance_->receveivedDataQueue) == 0) 
@@ -255,10 +251,7 @@ void ROBOT::executeCommandFromQueue() {
 
 void ROBOT::executeCommand(const char* command) const {
     // execute the command in the shell and get the result
-    std::string result = shell.run_command_line(command);
-
-    // log the command and the result
-    logger.insert_log(logType::CMDO, result.c_str());
+    uint8_t result = shell.run_command_line(command);
 }
 
 void ROBOT::checkStateMachine() {

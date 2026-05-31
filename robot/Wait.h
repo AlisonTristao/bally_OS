@@ -5,7 +5,7 @@
 #include <Pinout.h>
 
 // static libraries
-#include <StaticObjects.h>
+#include <BallyRobot.h>
 
 stateName wait_to_debug() {
     // log message

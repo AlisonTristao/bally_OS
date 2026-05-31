@@ -3,7 +3,7 @@
 
 // static library includes
 #include <Logger.h>
-#include <StaticObjects.h>
+#include <BallyRobot.h>
 
 stateName debug_to_finish() {
     // log message

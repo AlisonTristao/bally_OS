@@ -2,7 +2,7 @@
 #define FINISH_H
 
 // static objects
-#include <StaticObjects.h>
+#include <BallyRobot.h>
 
 stateName finish_to_wait() {
     // log message
