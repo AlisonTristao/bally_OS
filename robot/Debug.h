@@ -5,12 +5,12 @@
 #include <Logger.h>
 #include <BallyRobot.h>
 
-extern ROBOT robot;
+ROBOT& debug_robot_instance = ROBOT::getInstance();
 
 stateName debug_to_finish() {
     // log message
     #if defined(LOG_ALL) || defined(LOG_INFO)
-        robot.logger.insert_log(logType::INFO, "state_changed: debug -> finish");
+        debug_robot_instance.logger.insert_log(logType::INFO, "state_changed: debug -> finish");
     #endif
 
     // return the stateName of the next state
@@ -20,7 +20,7 @@ stateName debug_to_finish() {
 stateName debug_to_wait() {
     // log message
     #if defined(LOG_ALL) || defined(LOG_INFO)
-        robot.logger.insert_log(logType::INFO, "state_changed: debug -> wait");
+        debug_robot_instance.logger.insert_log(logType::INFO, "state_changed: debug -> wait");
     #endif
 
     // return the stateName of the next state
@@ -30,7 +30,7 @@ stateName debug_to_wait() {
 stateName debug_function() {
     // log message
     #if defined(LOG_ALL) || defined(LOG_INFO)
-        robot.logger.insert_log(logType::INFO, (robot.array_sensor.debug()).c_str());
+        debug_robot_instance.logger.insert_log(logType::INFO, (debug_robot_instance.array_sensor.debug()).c_str());
     #endif
 
     // safety delay default outside RUN

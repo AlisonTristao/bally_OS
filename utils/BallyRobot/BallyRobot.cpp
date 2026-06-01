@@ -30,11 +30,6 @@ static const char* TAG = "ROBOT_CORE"; // Tag para os logs nativos do ESP-IDF
 // active instance of the robot class
 ROBOT* ROBOT::instance_ = nullptr;
 
-Flags_in ROBOT::buttons("Buttons");
-Flags_in ROBOT::sideSensors("Side Sensors");
-Flags_out ROBOT::leds("LEDs");
-Flags_pwm ROBOT::motors("Motors");
-
 Logger ROBOT::logger;
 
 // ==============================================================================
@@ -215,15 +210,15 @@ void ROBOT::setTimeLimit() {
 }
 
 void ROBOT::resetFlags() {
-    ROBOT::buttons.checkFlagsDuration();
-    ROBOT::sideSensors.checkFlagsDuration();
-    ROBOT::leds.checkFlagsDuration();
-    ROBOT::motors.checkFlagsDuration();
+    buttons.checkFlagsDuration();
+    sideSensors.checkFlagsDuration();
+    leds.checkFlagsDuration();
+    motors.checkFlagsDuration();
 }
 
 void ROBOT::setOutputs() {
-    ROBOT::motor_left.applyPWM(ROBOT::motors.getValue(MOTOR_LEFT_idx));
-    ROBOT::motor_right.applyPWM(ROBOT::motors.getValue(MOTOR_RIGHT_idx));
+    motor_left.applyPWM(motors.getValue(MOTOR_LEFT_idx));
+    motor_right.applyPWM(motors.getValue(MOTOR_RIGHT_idx));
 }
 
 void ROBOT::executeCommandFromQueue() {
@@ -338,7 +333,7 @@ void ROBOT::startWrappers() {
         // set the flag of the button with the given index
         if (btn_idx >= Flags_in::MAX_FLAGS)
             return RESULT_ERROR;
-        ROBOT::buttons.setFlag(btn_idx);
+        instance_->buttons.setFlag(btn_idx);
         return RESULT_OK;
     }, "btn", "Virtually trigger a button", "robot");
 
@@ -346,7 +341,7 @@ void ROBOT::startWrappers() {
         // set the flag of the side sensor with the given index
         if (ssr_idx >= Flags_in::MAX_FLAGS)
             return RESULT_ERROR;
-        ROBOT::sideSensors.setFlag(ssr_idx);
+        instance_->sideSensors.setFlag(ssr_idx);
         return RESULT_OK;
     }, "ssr", "Virtually trigger a side sensor", "robot");
 
@@ -354,13 +349,13 @@ void ROBOT::startWrappers() {
         // set the PWM value for the motor with the given index
         if (led_idx >= Flags_in::MAX_FLAGS)
             return RESULT_ERROR;
-        ROBOT::motors.setValue(led_idx, pwm_value, time);
+        instance_->motors.setValue(led_idx, pwm_value, time);
         return RESULT_OK;
     }, "set_pwm", "Set PWM value for a motor (0 for left, 1 for right)", "robot");
 
     shell.add([](int8_t left_pwm, int8_t right_pwm, uint32_t time) -> uint8_t {
-        ROBOT::motors.setValue(MOTOR_LEFT_idx, left_pwm, time);
-        ROBOT::motors.setValue(MOTOR_RIGHT_idx, right_pwm, time);
+        instance_->motors.setValue(MOTOR_LEFT_idx, left_pwm, time);
+        instance_->motors.setValue(MOTOR_RIGHT_idx, right_pwm, time);
         return RESULT_OK;
     }, "set_pwm_pair", "Set PWM values for both motors at once", "robot");
 }

@@ -35,7 +35,7 @@
 #include <Error.h>
 
 //  robot instante
-ROBOT robot; // this obj must be global to be accessible from the state machine functions and the callbacks
+ROBOT& robot = ROBOT::getInstance();
 
 // main tag for logging
 static const char* TAG = "ROBOT_MAIN";

@@ -29,33 +29,24 @@ const uint8_t sensor_pins[LEN_SENSOR] = {D0, D1, D2, D3, D4, D5, D6, D7};
 
 class ROBOT {
 public:
-    // default constructor
-    ROBOT() :   machine(NONE, NULL, NULL),
-                array_sensor(sensor_pins),
-                motor_left(AIN1, AIN2, CH0, PWM_A), 
-                motor_right(BIN1, BIN2, CH1, PWM_B),
-                encoder_left(ENC_A0, ENC_A1), 
-                encoder_right(ENC_B0, ENC_B1),
-                EKF(),
-                btnArgs{{&buttons, BTN1_idx},
-                        {&buttons, BTN2_idx},
-                        {&buttons, BTN3_idx}},
-                sideArgs{{&sideSensors, SENSOR_LEFT_idx},
-                         {&sideSensors, SENSOR_RIGHT_idx}}
-                //imu(Wire, 0x68), 
-                {
-        // save the instance of the robot class to be used in the static functions
-        instance_ = this;
+    // singleton pattern
+    // getInstance returns a reference to the single instance of the ROBOT class
+    // we use this to acess the robot inside all files without needing to pass the instance as a parameter
+    static ROBOT& getInstance() {
+        static ROBOT instance;
+        return instance;
+    }
+    void* getInstancePtr() {
+        return static_cast<void*>(instance_);
     }
 
-    // default destructor
+    // destructor, copy etc
     virtual ~ROBOT() {};
+    ROBOT(const ROBOT&) = delete;
+    ROBOT& operator=(const ROBOT&) = delete;
 
     // initialize the robot, configure the pins, the wifi and the esp-now settings
     bool init();
-    static void* getInstance() {
-        return static_cast<void*>(instance_);
-    }
 
     // routine to be executed in parallel processing
     static void routine(void *param);
@@ -72,6 +63,29 @@ public:
     TinyShell shell;
     ArraySensor<LEN_SENSOR> array_sensor;
 private:
+    // default constructor
+    ROBOT() :   machine(NONE, NULL, NULL),
+                array_sensor(sensor_pins),
+                motor_left(AIN1, AIN2, CH0, PWM_A), 
+                motor_right(BIN1, BIN2, CH1, PWM_B),
+                encoder_left(ENC_A0, ENC_A1), 
+                encoder_right(ENC_B0, ENC_B1),
+                EKF(),
+                buttons("Buttons"),
+                sideSensors("Side Sensors"),
+                leds("LEDs"),
+                motors("Motors"),
+                btnArgs{{&buttons, BTN1_idx},
+                        {&buttons, BTN2_idx},
+                        {&buttons, BTN3_idx}},
+                sideArgs{{&sideSensors, SENSOR_LEFT_idx},
+                         {&sideSensors, SENSOR_RIGHT_idx}}
+                //imu(Wire, 0x68), 
+                {
+        // save the instance of the robot class to be used in the static functions
+        instance_ = this;
+    }
+
     // private peripheral objects
     HBridge motor_left;
     HBridge motor_right;
@@ -81,10 +95,10 @@ private:
     TinyEKF EKF;
 
     // Signals and flags for buttons, sensors, LEDs, and motors
-    static Flags_in buttons;
-    static Flags_in sideSensors;
-    static Flags_out leds;
-    static Flags_pwm motors;
+    Flags_in buttons;
+    Flags_in sideSensors;
+    Flags_out leds;
+    Flags_pwm motors;
     FlagsArg btnArgs[3];
     FlagsArg sideArgs[2];
 
