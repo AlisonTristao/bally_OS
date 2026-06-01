@@ -1,4 +1,4 @@
-//  standard libraries
+// standard libraries
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <esp_err.h>
@@ -9,11 +9,11 @@
 // projetct header
 #include <Settings.h>
 
-//  external library 
+// external library 
 #include <TinyShell.h>
 #include <TinyEKF.h>
 
-//  custom library
+// custom library
 #include <ArraySensor.h>
 #include <Encoder.h>
 #include <HBridge.h>
@@ -24,7 +24,7 @@
 // main module 
 #include <BallyRobot.h>
 
-//  robot state machine 
+// robot state machine 
 #include <Setup.h>  
 #include <Wait.h>
 #include <Calibrate.h>
@@ -34,7 +34,7 @@
 #include <Telemetry.h>
 #include <Error.h>
 
-//  robot instante
+// robot instante
 ROBOT& robot = ROBOT::getInstance();
 
 // main tag for logging
