@@ -121,7 +121,7 @@ private:
     void checkStateMachine();
 
     // queue for the logs to be sent in the parallel processing
-    QueueHandle_t receveivedDataQueue;
+    QueueHandle_t receivedDataQueue;
 };
 
 // Define the buttons and side sensors as Flags_in objects with their respective indices
