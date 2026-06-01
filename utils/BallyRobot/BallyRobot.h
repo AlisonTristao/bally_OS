@@ -107,10 +107,10 @@ private:
     float getSpeedFromEncoders();
     float getOmegaFromEncoders();
 
-    // Callbacks for ESP-NOW (moved from EspNow.h)
+    // Callbacks for ESP-NOW 
     static void handleReceiveStatic(const uint8_t* mac, const uint8_t* incomingData, int len);
 
-    // Callbacks for ESP-NOW (moved from EspNow.h)
+    // Callbacks for ESP-NOW
     static void handleSendStatic(const uint8_t* mac, esp_now_send_status_t status);
 
     // reset the flags: buttons, side sensors, leds and motors
