@@ -24,16 +24,26 @@
 #include <Logger.h>
 #include <StateMachine.h>
 
+// array of the sensor pins, used to initialize the array sensor
+const uint8_t sensor_pins[LEN_SENSOR] = {D0, D1, D2, D3, D4, D5, D6, D7};
+
 class ROBOT {
 public:
     // default constructor
     ROBOT() :   machine(NONE, NULL, NULL),
+                array_sensor(sensor_pins),
                 motor_left(AIN1, AIN2, CH0, PWM_A), 
                 motor_right(BIN1, BIN2, CH1, PWM_B),
                 encoder_left(ENC_A0, ENC_A1), 
                 encoder_right(ENC_B0, ENC_B1),
+                EKF(),
+                btnArgs{{&buttons, BTN1_idx},
+                        {&buttons, BTN2_idx},
+                        {&buttons, BTN3_idx}},
+                sideArgs{{&sideSensors, SENSOR_LEFT_idx},
+                         {&sideSensors, SENSOR_RIGHT_idx}}
                 //imu(Wire, 0x68), 
-                EKF() {
+                {
         // save the instance of the robot class to be used in the static functions
         instance_ = this;
     }
@@ -56,19 +66,11 @@ public:
     // run the EKF to estimate the state of the robot
     void runEKF();
 
-    // Signals and flags for buttons, sensors, LEDs, and motors
-    static Flags_in buttons;
-    static Flags_in sideSensors;
-    static Flags_out leds;
-    static Flags_pwm motors;
-
     // core utility objects
     static Logger logger;
     StateMachine machine;
     TinyShell shell;
-
-    // peripheral objects
-    static ArraySensor<LEN_SENSOR> array_sensor;
+    ArraySensor<LEN_SENSOR> array_sensor;
 private:
     // private peripheral objects
     HBridge motor_left;
@@ -77,6 +79,14 @@ private:
     Encoder encoder_right;
     //ICM42688 imu;
     TinyEKF EKF;
+
+    // Signals and flags for buttons, sensors, LEDs, and motors
+    static Flags_in buttons;
+    static Flags_in sideSensors;
+    static Flags_out leds;
+    static Flags_pwm motors;
+    FlagsArg btnArgs[3];
+    FlagsArg sideArgs[2];
 
     // save a instance of the ROBOT class to be used in the static functions
     static ROBOT* instance_;

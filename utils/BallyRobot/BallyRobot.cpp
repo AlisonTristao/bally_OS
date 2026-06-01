@@ -30,28 +30,12 @@ static const char* TAG = "ROBOT_CORE"; // Tag para os logs nativos do ESP-IDF
 // active instance of the robot class
 ROBOT* ROBOT::instance_ = nullptr;
 
-// Assumindo que D0, D1... são macros numéricas dos pinos no seu Settings.h
-const uint8_t sensor_pins[LEN_SENSOR] = {D0, D1, D2, D3, D4, D5, D6, D7};
-
 Flags_in ROBOT::buttons("Buttons");
 Flags_in ROBOT::sideSensors("Side Sensors");
 Flags_out ROBOT::leds("LEDs");
 Flags_pwm ROBOT::motors("Motors");
 
 Logger ROBOT::logger;
-ArraySensor<LEN_SENSOR> ROBOT::array_sensor(sensor_pins);
-
-// Define the buttons and side sensors as Flags_in objects with their respective indices
-static FlagsArg btnArgs[] = {
-    {&ROBOT::buttons, BTN1_idx},
-    {&ROBOT::buttons, BTN2_idx},
-    {&ROBOT::buttons, BTN3_idx}
-};
-
-static FlagsArg sideArgs[] = {
-    {&ROBOT::sideSensors, SENSOR_LEFT_idx},
-    {&ROBOT::sideSensors, SENSOR_RIGHT_idx}
-};
 
 // ==============================================================================
 // HELPER FUNCTIONS
@@ -110,19 +94,19 @@ void ROBOT::configure_interruptions(void *param){
 
     // Configura o tipo de interrupção (FALLING/RISING) e atrela a função ISR
     gpio_set_intr_type((gpio_num_t)BIT_0, GPIO_INTR_NEGEDGE); // FALLING
-    gpio_isr_handler_add((gpio_num_t)BIT_0, Flags_in::isr, &btnArgs[0]);
+    gpio_isr_handler_add((gpio_num_t)BIT_0, Flags_in::isr, &instance_->btnArgs[0]);
 
     gpio_set_intr_type((gpio_num_t)BIT_1, GPIO_INTR_NEGEDGE);
-    gpio_isr_handler_add((gpio_num_t)BIT_1, Flags_in::isr, &btnArgs[1]);
+    gpio_isr_handler_add((gpio_num_t)BIT_1, Flags_in::isr, &instance_->btnArgs[1]);
 
     gpio_set_intr_type((gpio_num_t)BIT_2, GPIO_INTR_NEGEDGE);
-    gpio_isr_handler_add((gpio_num_t)BIT_2, Flags_in::isr, &btnArgs[2]);
+    gpio_isr_handler_add((gpio_num_t)BIT_2, Flags_in::isr, &instance_->btnArgs[2]);
 
     gpio_set_intr_type((gpio_num_t)LEFT, GPIO_INTR_POSEDGE); // RISING
-    gpio_isr_handler_add((gpio_num_t)LEFT, Flags_in::isr, &sideArgs[0]);
+    gpio_isr_handler_add((gpio_num_t)LEFT, Flags_in::isr, &instance_->sideArgs[0]);
 
     gpio_set_intr_type((gpio_num_t)RIGHT, GPIO_INTR_POSEDGE);
-    gpio_isr_handler_add((gpio_num_t)RIGHT, Flags_in::isr, &sideArgs[1]);
+    gpio_isr_handler_add((gpio_num_t)RIGHT, Flags_in::isr, &instance_->sideArgs[1]);
 
     vTaskDelete(NULL);
 }
@@ -131,7 +115,7 @@ bool ROBOT::configurePins() {
     const gpio_num_t out_pins[] = {
         (gpio_num_t)LED_RGB_PIN, (gpio_num_t)AIN1, (gpio_num_t)AIN2, 
         (gpio_num_t)BIN1, (gpio_num_t)BIN2, (gpio_num_t)PWM_A, 
-        (gpio_num_t)PWM_B, (gpio_num_t)BZR
+        (gpio_num_t)PWM_B//, (gpio_num_t)BZR
     };
     for(auto pin : out_pins) {
         gpio_reset_pin(pin);
