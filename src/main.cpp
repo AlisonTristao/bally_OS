@@ -1,4 +1,4 @@
-//  SYSTEM & FRAMEWORK 
+//  standard libraries
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <esp_err.h>
@@ -6,24 +6,25 @@
 #include <esp_system.h>  
 #include <esp_now.h>     
 
-//  PROJECT HEADERS 
+// projetct header
 #include <Settings.h>
 
-//  EXTERNAL LIBRARIES 
+//  external library 
 #include <TinyShell.h>
+#include <TinyEKF.h>
 
-//  CUSTOM MODULES 
+//  custom library
 #include <ArraySensor.h>
 #include <Encoder.h>
 #include <HBridge.h>
-
-//  UTILITIES 
 #include <Flags.h>
 #include <Logger.h>
 #include <StateMachine.h>
+
+// main module 
 #include <BallyRobot.h>
 
-//  ROBOT STATE MACHINE 
+//  robot state machine 
 #include <Setup.h>  
 #include <Wait.h>
 #include <Calibrate.h>
@@ -32,6 +33,9 @@
 #include <Finish.h>
 #include <Telemetry.h>
 #include <Error.h>
+
+//  robot instante
+ROBOT robot; // this obj must be global to be accessible from the state machine functions and the callbacks
 
 // main tag for logging
 static const char* TAG = "ROBOT_MAIN";
@@ -46,10 +50,6 @@ StateMachine state6(FINISH,     finish_function,    next_state_finish);
 StateMachine state7(TELEMETRY,  telemetry_function, next_state_telemetry);
 StateMachine state8(ERROR,      error_function,     next_state_error);
 
-// ROBOT INSTANCE
-ROBOT robot;
-
-// O compilador C++ precisa dessa diretiva para achar o ponto de entrada
 extern "C" void app_main(void) {    
     // init static objects and espnow settings
     if(!robot.init()) {

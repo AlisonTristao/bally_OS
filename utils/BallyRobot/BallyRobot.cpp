@@ -40,8 +40,6 @@ Flags_pwm ROBOT::motors("Motors");
 
 Logger ROBOT::logger;
 ArraySensor<LEN_SENSOR> ROBOT::array_sensor(sensor_pins);
-TinyShell ROBOT::shell;
-StateMachine ROBOT::machine(NONE, NULL, NULL);
 
 // Define the buttons and side sensors as Flags_in objects with their respective indices
 static FlagsArg btnArgs[] = {
@@ -72,6 +70,35 @@ static void readMacAddress() {
     } else {
         ROBOT::logger.insert_log(logType::ERRO, "Failed to read MAC address");
     }
+}
+
+
+uint8_t testPacket() {
+    // envia um texto grande para testar o envio de varios pacotes
+    // o texto é uma citacao de "Dom Casmurro", de Machado de Assis
+    const char* long_text =
+        "Uma noite, ao chegar a casa,\n"
+        "encontrei um bilhete de minha mãe, dizendo que ela e meu pai\n"
+        "haviam saído para jantar, e que eu deveria me comportar.\n"
+        "Fiquei sozinho em casa, e a solidão me envolveu como um manto.\n"
+        "Sentei-me à janela, olhando para as estrelas,\n"
+        "e pensei em tudo o que havia acontecido em minha vida até então.\n"
+        "As lembranças de minha infância, de meus pais, de minha escola,\n"
+        "de meus amigos, tudo isso passou diante de meus olhos como um filme.\n"
+        "E então, percebi que a vida era como um rio, que corria sem parar,\n"
+        "levando-nos para lugares desconhecidos, e que nós éramos como folhas,\n"
+        "flutuando na correnteza, sem saber onde iríamos parar. Foi uma\n"
+        "noite de reflexão profunda, e eu me senti mais maduro, mais consciente\n"
+        "de mim mesmo e do mundo ao meu redor. E assim, adormeci, com a cabeça\n"
+        "cheia de pensamentos e o coração cheio de emoções, sabendo que a vida\n"
+        "continuaria a me surpreender, a me desafiar, e que eu teria que enfrentar\n"
+        "tudo isso com coragem e determinação.";
+
+    // When info logs are enabled, push to logger to validate its packetization path.
+    #if defined(LOG_ALL) || defined(LOG_INFO)
+        ROBOT::logger.insert_log(logType::INFO, long_text);
+        return RESULT_OK;
+    #endif
 }
 
 // ==============================================================================
@@ -228,7 +255,7 @@ void ROBOT::executeCommandFromQueue() {
 }
 
 void ROBOT::executeCommand(const char* command) const {
-    shell.run_command_line(command);
+    instance_->shell.run_command_line(command);
 }
 
 void ROBOT::checkStateMachine() {
@@ -318,6 +345,45 @@ void ROBOT::runEKF() {
     instance_->EKF.update(z, u);
 }
 
+void ROBOT::startWrappers() {
+    // commands for testing and debugging
+    shell.create_module("robot", "Module for robot control commands");
+    shell.add(testPacket, "test_packet", "Send a long test packet to evaluate multi-packet handling", "robot");
+
+    shell.add([](uint8_t btn_idx) -> uint8_t {
+        // set the flag of the button with the given index
+        if (btn_idx >= Flags_in::MAX_FLAGS)
+            return RESULT_ERROR;
+        ROBOT::buttons.setFlag(btn_idx);
+        return RESULT_OK;
+    }, "btn", "Virtually trigger a button", "robot");
+
+    shell.add([](uint8_t ssr_idx) -> uint8_t {
+        // set the flag of the side sensor with the given index
+        if (ssr_idx >= Flags_in::MAX_FLAGS)
+            return RESULT_ERROR;
+        ROBOT::sideSensors.setFlag(ssr_idx);
+        return RESULT_OK;
+    }, "ssr", "Virtually trigger a side sensor", "robot");
+
+    shell.add([](uint8_t led_idx, uint8_t pwm_value, uint32_t time) -> uint8_t {
+        // set the PWM value for the motor with the given index
+        if (led_idx >= Flags_in::MAX_FLAGS)
+            return RESULT_ERROR;
+        ROBOT::motors.setValue(led_idx, pwm_value, time);
+        return RESULT_OK;
+    }, "set_pwm", "Set PWM value for a motor (0 for left, 1 for right)", "robot");
+
+    shell.add([](uint8_t left_pwm, uint8_t right_pwm, uint32_t time) -> uint8_t {
+        // set the PWM values for both motors
+        if (left_pwm >= Flags_in::MAX_FLAGS || right_pwm >= Flags_in::MAX_FLAGS)
+            return RESULT_ERROR;
+        ROBOT::motors.setValue(MOTOR_LEFT_idx, left_pwm, time);
+        ROBOT::motors.setValue(MOTOR_RIGHT_idx, right_pwm, time);
+        return RESULT_OK;
+    }, "set_pwm_pair", "Set PWM values for both motors at once", "robot");
+}
+
 // ==============================================================================
 // MAIN TASKS & INITIALIZATION
 // ==============================================================================
@@ -383,6 +449,7 @@ bool ROBOT::init() {
     //}
 
     setTimeLimit();
+    startWrappers();
     initEKF();
 
     ROBOT::logger.insert_log(logType::INFO, "Welcome! the car is starting...");

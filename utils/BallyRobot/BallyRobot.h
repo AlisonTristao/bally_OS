@@ -27,8 +27,8 @@
 class ROBOT {
 public:
     // default constructor
-    // default constructor
-    ROBOT() :   motor_left(AIN1, AIN2, CH0, PWM_A), 
+    ROBOT() :   machine(NONE, NULL, NULL),
+                motor_left(AIN1, AIN2, CH0, PWM_A), 
                 motor_right(BIN1, BIN2, CH1, PWM_B),
                 encoder_left(ENC_A0, ENC_A1), 
                 encoder_right(ENC_B0, ENC_B1),
@@ -64,8 +64,8 @@ public:
 
     // core utility objects
     static Logger logger;
-    static StateMachine machine;
-    static TinyShell shell;
+    StateMachine machine;
+    TinyShell shell;
 
     // peripheral objects
     static ArraySensor<LEN_SENSOR> array_sensor;
@@ -89,6 +89,9 @@ private:
 
     // configure the wifi and the esp-now settings for the robot
     bool configureCommunication();
+
+    // start wrappers
+    void startWrappers();
 
     // set the time limit for the flags, to reset them after a certain time
     void setTimeLimit();

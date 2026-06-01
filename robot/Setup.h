@@ -3,7 +3,6 @@
 
 // header
 #include <Settings.h>
-#include <Wrapper.h>
 #include <BallyRobot.h>
 
 stateName setup_to_wait() {
@@ -27,10 +26,6 @@ stateName setup_to_error() {
 }
 
 stateName setup_function() {
-    // init shell wrappers
-    if (!start_shell_wrappers())
-        return setup_to_error();
-
     // log message
     #if defined(LOG_ALL) || defined(LOG_INFO)
         ROBOT::logger.insert_log(logType::INFO, "Setup function called");
