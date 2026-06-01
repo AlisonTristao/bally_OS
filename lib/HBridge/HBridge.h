@@ -1,6 +1,9 @@
 #ifndef WHEELS_H
 #define WHEELS_H
-#include <Arduino.h>
+
+#include <cstdint>
+#include "driver/gpio.h"
+#include "driver/ledc.h"
 
 #define SUPLIMIT 100
 #define INFLIMIT -100
@@ -26,6 +29,7 @@ class HBridge {
         void choiceDirection(int32_t pwm);
         int32_t convertPWM(int32_t pwm);
         int32_t saturate(int32_t pwm);
+        int32_t pwm;
         movement mov;
         const uint8_t l1;
         const uint8_t l2;

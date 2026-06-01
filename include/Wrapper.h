@@ -1,9 +1,6 @@
 #ifndef WRAPPER_H
 #define WRAPPER_H
 
-//   SYSTEM  
-#include <Arduino.h>
-
 //   UTILITIES  
 #include <Flags.h>
 #include <Logger.h>
@@ -71,20 +68,6 @@ uint8_t triggerVirtualSideSensor(uint8_t sensor, uint32_t time_ms) {
     return RESULT_OK;
 }
 
-// ================== RGB LED WRAPPERS ==================
-
-// Example wrapper functions for RGB LED control
-uint8_t set_led(uint8_t r, uint8_t g, uint8_t b, uint8_t brightness) {
-    ROBOT::rgb_led.set(r, g, b, brightness);
-    return RESULT_OK;
-}
-
-// led off wrapper
-uint8_t led_off() {
-    ROBOT::rgb_led.off();
-    return RESULT_OK;
-}
-
 uint8_t testPacket() {
     // envia um texto grande para testar o envio de varios pacotes
     // o texto é uma citacao de "Dom Casmurro", de Machado de Assis
@@ -113,21 +96,6 @@ uint8_t testPacket() {
     #endif
 }
 
-// reset the robot using the shell
-uint8_t reset_robot() {
-    #if defined(LOG_ALL) || defined(LOG_CMD)
-        ROBOT::logger.insert_log(logType::CMDO, "Resetting robot in 3s...");
-    #endif
-
-    // Wait for 3 seconds to allow the log message to be sent before restarting
-    vTaskDelay(3000/portTICK_PERIOD_MS);
-
-    ESP.restart();
-    return RESULT_OK; // this line will never be reached, but it's here to satisfy the return type
-}
-
-// apll
-
 // wrapper to apply a pwm value to the motors, using the Flags_pwm class
 uint8_t set_pwm(uint8_t motor, int8_t pwm_value, uint32_t time_ms) {
     ROBOT::motors.setValue(motor, pwm_value, time_ms);
@@ -143,11 +111,8 @@ uint8_t set_pwm_pair(int8_t pwm_left, int8_t pwm_right, uint32_t time_ms) {
 bool start_shell_wrappers() {
     ROBOT::shell.create_module("robot", "Module for robot control commands");
     ROBOT::shell.add(testPacket, "test_packet", "Send a long test packet to evaluate multi-packet handling", "robot");
-    ROBOT::shell.add(set_led, "set_led", "Set LED color and brightness", "robot");
-    ROBOT::shell.add(led_off, "led_off", "Turn off the LED", "robot");
     ROBOT::shell.add(triggerVirtualButton, "btn", "Virtually trigger a button", "robot");
     ROBOT::shell.add(triggerVirtualSideSensor, "ssr", "Virtually trigger a side sensor", "robot");
-    ROBOT::shell.add(reset_robot, "reset", "Reset the robot", "robot");
     ROBOT::shell.add(set_pwm, "set_pwm", "Set PWM value for a motor (0 for left, 1 for right)", "robot");
     ROBOT::shell.add(set_pwm_pair, "set_pwm_pair", "Set PWM values for both motors at once", "robot");
     return true;

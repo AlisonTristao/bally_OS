@@ -1,14 +1,36 @@
 #include <BallyRobot.h>
-#include <Arduino.h>
 #include <Settings.h>
+
+// ESP-IDF Includes
+#include <cstring>
+#include <string>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/queue.h"
+#include "esp_log.h"
+#include "esp_timer.h"
+#include "driver/gpio.h"
+#include "esp_wifi.h"
+#include "esp_now.h"
+#include "esp_netif.h"
+#include "esp_event.h"
+#include "esp_mac.h"
+#include "nvs_flash.h"
+#include <cmath>
+#ifndef PI
+#define PI 3.14159265358979323846
+#endif
 
 // ==============================================================================
 // STATIC MEMBER INITIALIZATION
 // ==============================================================================
 
+static const char* TAG = "ROBOT_CORE"; // Tag para os logs nativos do ESP-IDF
+
 // active instance of the robot class
 ROBOT* ROBOT::instance_ = nullptr;
 
+// Assumindo que D0, D1... são macros numéricas dos pinos no seu Settings.h
 const uint8_t sensor_pins[LEN_SENSOR] = {D0, D1, D2, D3, D4, D5, D6, D7};
 
 Flags_in ROBOT::buttons("Buttons");
@@ -17,11 +39,21 @@ Flags_out ROBOT::leds("LEDs");
 Flags_pwm ROBOT::motors("Motors");
 
 Logger ROBOT::logger;
-RGBLed ROBOT::rgb_led;
 ArraySensor<LEN_SENSOR> ROBOT::array_sensor(sensor_pins);
-Control ROBOT::control;
 TinyShell ROBOT::shell;
 StateMachine ROBOT::machine(NONE, NULL, NULL);
+
+// Define the buttons and side sensors as Flags_in objects with their respective indices
+static FlagsArg btnArgs[] = {
+    {&ROBOT::buttons, BTN1_idx},
+    {&ROBOT::buttons, BTN2_idx},
+    {&ROBOT::buttons, BTN3_idx}
+};
+
+static FlagsArg sideArgs[] = {
+    {&ROBOT::sideSensors, SENSOR_LEFT_idx},
+    {&ROBOT::sideSensors, SENSOR_RIGHT_idx}
+};
 
 // ==============================================================================
 // HELPER FUNCTIONS
@@ -34,8 +66,8 @@ static void readMacAddress() {
         char macStr[18];
         snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X", 
                  baseMac[0], baseMac[1], baseMac[2], baseMac[3], baseMac[4], baseMac[5]);
-        Serial.print("MAC Address: ");
-        Serial.println(macStr);
+        
+        ESP_LOGI(TAG, "MAC Address: %s", macStr); // Substitui Serial.println
         ROBOT::logger.insert_logf(logType::INFO, "MAC Address: %s", macStr);
     } else {
         ROBOT::logger.insert_log(logType::ERRO, "Failed to read MAC address");
@@ -49,60 +81,77 @@ static void readMacAddress() {
 void ROBOT::configure_interruptions(void *param){
     (void)param; // Suppress unused parameter warning
 
-    // set the button interruptions
-    attachInterruptArg(digitalPinToInterrupt(BIT_0), Flags_in::isr, &btnArgs[0], FALLING);
-    attachInterruptArg(digitalPinToInterrupt(BIT_1), Flags_in::isr, &btnArgs[1], FALLING);
-    attachInterruptArg(digitalPinToInterrupt(BIT_2), Flags_in::isr, &btnArgs[2], FALLING);
-    attachInterruptArg(digitalPinToInterrupt(LEFT), Flags_in::isr, &sideArgs[0], RISING);
-    attachInterruptArg(digitalPinToInterrupt(RIGHT), Flags_in::isr, &sideArgs[1], RISING);
-    // delete this task
+    // Configura o tipo de interrupção (FALLING/RISING) e atrela a função ISR
+    gpio_set_intr_type((gpio_num_t)BIT_0, GPIO_INTR_NEGEDGE); // FALLING
+    gpio_isr_handler_add((gpio_num_t)BIT_0, Flags_in::isr, &btnArgs[0]);
+
+    gpio_set_intr_type((gpio_num_t)BIT_1, GPIO_INTR_NEGEDGE);
+    gpio_isr_handler_add((gpio_num_t)BIT_1, Flags_in::isr, &btnArgs[1]);
+
+    gpio_set_intr_type((gpio_num_t)BIT_2, GPIO_INTR_NEGEDGE);
+    gpio_isr_handler_add((gpio_num_t)BIT_2, Flags_in::isr, &btnArgs[2]);
+
+    gpio_set_intr_type((gpio_num_t)LEFT, GPIO_INTR_POSEDGE); // RISING
+    gpio_isr_handler_add((gpio_num_t)LEFT, Flags_in::isr, &sideArgs[0]);
+
+    gpio_set_intr_type((gpio_num_t)RIGHT, GPIO_INTR_POSEDGE);
+    gpio_isr_handler_add((gpio_num_t)RIGHT, Flags_in::isr, &sideArgs[1]);
+
     vTaskDelete(NULL);
 }
 
 bool ROBOT::configurePins() {
-    // RGB LED
-    pinMode(LED_RGB_PIN, OUTPUT);
+    const gpio_num_t out_pins[] = {
+        (gpio_num_t)LED_RGB_PIN, (gpio_num_t)AIN1, (gpio_num_t)AIN2, 
+        (gpio_num_t)BIN1, (gpio_num_t)BIN2, (gpio_num_t)PWM_A, 
+        (gpio_num_t)PWM_B, (gpio_num_t)BZR
+    };
+    for(auto pin : out_pins) {
+        gpio_reset_pin(pin);
+        gpio_set_direction(pin, GPIO_MODE_OUTPUT);
+    }
 
-    // H bridge
-    pinMode(AIN1, OUTPUT);
-    pinMode(AIN2, OUTPUT);
-    pinMode(BIN1, OUTPUT);
-    pinMode(BIN2, OUTPUT);
-    pinMode(PWM_A, OUTPUT);
-    pinMode(PWM_B, OUTPUT);
+    const gpio_num_t in_pins[] = {
+        (gpio_num_t)LEFT, (gpio_num_t)RIGHT, 
+        (gpio_num_t)ENC_A0, (gpio_num_t)ENC_A1, 
+        (gpio_num_t)ENC_B0, (gpio_num_t)ENC_B1
+    };
+    for(auto pin : in_pins) {
+        gpio_reset_pin(pin);
+        gpio_set_direction(pin, GPIO_MODE_INPUT);
+    }
 
-    // Buttons
-    pinMode(BIT_0, INPUT_PULLUP);
-    pinMode(BIT_1, INPUT_PULLUP);
-    pinMode(BIT_2, INPUT_PULLUP);
+    const gpio_num_t btn_pins[] = {
+        (gpio_num_t)BIT_0, (gpio_num_t)BIT_1, (gpio_num_t)BIT_2
+    };
+    for(auto pin : btn_pins) {
+        gpio_reset_pin(pin);
+        gpio_set_direction(pin, GPIO_MODE_INPUT);
+        gpio_set_pull_mode(pin, GPIO_PULLUP_ONLY);
+    }
 
-    // Side sensors
-    pinMode(LEFT, INPUT);
-    pinMode(RIGHT, INPUT);
-
-    // Encoders
-    pinMode(ENC_A0, INPUT);
-    pinMode(ENC_A1, INPUT);
-    pinMode(ENC_B0, INPUT);
-    pinMode(ENC_B1, INPUT);
-
-    // Buzzer
-    pinMode(BZR, OUTPUT);
-
-    // i2c communication
-    return Wire.begin(SDA, SCL);
+    return true;
 }
 
 bool ROBOT::configureCommunication() {
-    // configure WiFi and ESP-NOW
-    if (!WiFi.mode(WIFI_STA)) {
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        nvs_flash_erase();
+        nvs_flash_init();
+    }
+
+    esp_netif_init();
+    esp_event_loop_create_default();
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    esp_wifi_init(&cfg);
+    esp_wifi_set_storage(WIFI_STORAGE_RAM);
+    
+    if (esp_wifi_set_mode(WIFI_MODE_STA) != ESP_OK || esp_wifi_start() != ESP_OK) {
         ROBOT::logger.insert_log(logType::ERRO, "Failed to configure WiFi mode");
         return false;
     }
 
-    // disconnect is best-effort; avoid failing if already disconnected
-    WiFi.disconnect();
-    delay(50);
+    vTaskDelay(50 / portTICK_PERIOD_MS);
 
     // initialize ESP-NOW
     esp_err_t err = esp_now_init();
@@ -124,10 +173,8 @@ bool ROBOT::configureCommunication() {
         return false;
     }
 
-    // log the MAC address
     readMacAddress();
 
-    // add peer if MAC_ADDR is defined
     #ifdef MAC_ADDR
         uint8_t peer_addr[6] = {MAC_ADDR};
         esp_now_peer_info_t peerInfo = {};
@@ -152,13 +199,11 @@ bool ROBOT::configureCommunication() {
 // ==============================================================================
 
 void ROBOT::setTimeLimit() {
-    // set the time limit for the flags, to reset them after a certain time
     buttons.setTimeLimit(DELAY_FLAGS);
     sideSensors.setTimeLimit(DELAY_FLAGS);
 }
 
 void ROBOT::resetFlags() {
-    // check flags duration
     ROBOT::buttons.checkFlagsDuration();
     ROBOT::sideSensors.checkFlagsDuration();
     ROBOT::leds.checkFlagsDuration();
@@ -166,39 +211,30 @@ void ROBOT::resetFlags() {
 }
 
 void ROBOT::setOutputs() {
-    // define the outputs value based on the flags
     ROBOT::motor_left.applyPWM(ROBOT::motors.getValue(MOTOR_LEFT_idx));
     ROBOT::motor_right.applyPWM(ROBOT::motors.getValue(MOTOR_RIGHT_idx));
-
-    // LEDs implementation pending
 }
 
 void ROBOT::executeCommandFromQueue() {
-    // check if there is a message in the queue, if not, return
     if(uxQueueMessagesWaiting(instance_->receivedDataQueue) == 0) 
         return;
+    
     message receivedMessage;
-    // check if there is a message in the queue
     if (xQueueReceive(receivedDataQueue, &receivedMessage, 0) == pdTRUE) {
-        // convert the message to a string
-        String command(receivedMessage.content.text);
-        // execute the command and log the result
+        // Substituída a classe String do Arduino pela std::string do C++
+        std::string command(receivedMessage.content.text);
         executeCommand(command.c_str());
     }
 }
 
 void ROBOT::executeCommand(const char* command) const {
-    // execute the command in the shell
     shell.run_command_line(command);
 }
 
 void ROBOT::checkStateMachine() {
-    // check the state machine every DELAY_FLAGS milliseconds
-    if (millis() - instance_->stateMachineTimer > DELAY_FLAGS) {
-        // check the next state of the state machine
+    if ((uint32_t)(esp_timer_get_time() / 1000ULL) - instance_->stateMachineTimer > DELAY_FLAGS) {
         ROBOT::machine.next(ROBOT::buttons.getFlags());
-        // update the last state check time
-        instance_->stateMachineTimer = millis();  
+        instance_->stateMachineTimer = (uint32_t)(esp_timer_get_time() / 1000ULL);  
     }   
 }
 
@@ -206,28 +242,26 @@ void ROBOT::checkStateMachine() {
 // COMMUNICATION CALLBACKS
 // ==============================================================================
 
-// Adapter para callback estático de recebimento.
-void ROBOT::handleReceiveStatic(const uint8_t* mac, const uint8_t* incomingData, int len) {
-    (void)mac;
+void ROBOT::handleReceiveStatic(const esp_now_recv_info_t *recv_info, const uint8_t *incomingData, int len) {
+    const uint8_t* mac = recv_info->src_addr;
+    (void)mac; 
     (void)len;
 
-    // verify if the queue is created
     if (instance_->receivedDataQueue == nullptr) {
         ROBOT::logger.insert_log(logType::ERRO, "Receive callback called but queue is not initialized");
         return;
     }
 
-    // add the buffer to the queue to be processed in the parallel processing
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
     xQueueSendFromISR(instance_->receivedDataQueue, incomingData, &xHigherPriorityTaskWoken);
+    if (xHigherPriorityTaskWoken == pdTRUE) {
+        portYIELD_FROM_ISR();
+    }
 }
 
-// Adapter para callback estático de envio.
-void ROBOT::handleSendStatic(const uint8_t* mac, esp_now_send_status_t status) {
-    (void)mac;
+void ROBOT::handleSendStatic(const wifi_tx_info_t *tx_info, esp_now_send_status_t status) {
+    (void)tx_info;
     (void)status;
-
-    // Currently, we do not have a send callback set up, but this is where you would handle it if needed.
 }
 
 // ==============================================================================
@@ -258,32 +292,28 @@ void ROBOT::initEKF() {
 }
 
 float ROBOT::getSpeedFromEncoders() {
-    // calculate the speed of the robot based on the encoders values
-    float left_speed = encoder_left.getCountDiff() * ENCODER_PPR * WHEEL_RADIUS * 2.0f * PI * FREQ_EKF; // distance traveled by the left wheel in meters
-    float right_speed = encoder_right.getCountDiff() * ENCODER_PPR * WHEEL_RADIUS * 2.0f * PI * FREQ_EKF; // distance traveled by the right wheel in meters
-    float speed = (left_speed + right_speed) / 2.0f; // average speed of the two wheels
-    return speed;
+    float left_speed = encoder_left.getCountDiff() * ENCODER_PPR * WHEEL_RADIUS * 2.0f * PI * FREQ_EKF;
+    float right_speed = encoder_right.getCountDiff() * ENCODER_PPR * WHEEL_RADIUS * 2.0f * PI * FREQ_EKF;
+    return (left_speed + right_speed) / 2.0f;
 }
 
 float ROBOT::getOmegaFromEncoders() {
-    // calculate the angular velocity of the robot based on the encoders values
-    float left_speed = encoder_left.getCountDiff() * ENCODER_PPR * WHEEL_RADIUS * 2.0f * PI * FREQ_EKF; // distance traveled by the left wheel in meters
-    float right_speed = encoder_right.getCountDiff() * ENCODER_PPR * WHEEL_RADIUS * 2.0f * PI * FREQ_EKF; // distance traveled by the right wheel in meters
-    float omega = (right_speed - left_speed) / EKF_WHEEL_BASE; // difference in speed divided by wheel base
-    return omega;
+    float left_speed = encoder_left.getCountDiff() * ENCODER_PPR * WHEEL_RADIUS * 2.0f * PI * FREQ_EKF;
+    float right_speed = encoder_right.getCountDiff() * ENCODER_PPR * WHEEL_RADIUS * 2.0f * PI * FREQ_EKF;
+    return (right_speed - left_speed) / EKF_WHEEL_BASE;
 }
 
 void ROBOT::runEKF() {
-    constexpr float kDegToRad = 0.01745329252f;
-    // get the input control signals (motor commands) and the measurements (encoders and IMU)
     float u[2] = {static_cast<float>(instance_->motors.getValue(MOTOR_RIGHT_idx)),
                   static_cast<float>(instance_->motors.getValue(MOTOR_LEFT_idx))};
     float z[5] = {instance_->getSpeedFromEncoders(), 
                   instance_->getOmegaFromEncoders(), 
-                  instance_->imu.gyrZ() * kDegToRad,
-                  instance_->imu.accX() * 9.81f, 
-                  instance_->imu.accY() * 9.81f};
-    // run EKF prediction and update
+                  0,
+                  0,
+                  0};
+                  //instance_->imu.gyrZ() * kDegToRad,
+                  //instance_->imu.accX() * 9.81f, 
+                  //instance_->imu.accY() * 9.81f};
     instance_->EKF.predict(u);
     instance_->EKF.update(z, u);
 }
@@ -293,74 +323,51 @@ void ROBOT::runEKF() {
 // ==============================================================================
 
 void ROBOT::routine(void *param){
-    (void)param; // Suppress unused parameter warning
+    (void)param; 
 
-    // if the robot is not initialized, we cannot run the routine
     while (!instance_->initialized)
-        vTaskDelay(100/portTICK_PERIOD_MS);
+        vTaskDelay(pdMS_TO_TICKS(100));
 
-    // log message  
     #if defined(LOG_ALL) || defined(LOG_INFO)
         ROBOT::logger.insert_log(logType::INFO, "Parallel processing initialized");
     #endif
 
-    // main loop of the parallel processing
-    while(true) {	
-        // logger print live
+    while(true) {   
         ROBOT::logger.flush_logs();
-
-        // execute the commands from the queue
         instance_->executeCommandFromQueue();
-
-        // reset the flags if the time limit is reached
         instance_->resetFlags();
-
-        // set the outputs signal based on the flags
         instance_->setOutputs();
-
-        // check the state machine to change the state if the conditions are met
         instance_->checkStateMachine();
-            
-        // sample delay... (wait for the whatchdog to be ready)
-        vTaskDelay(1/portTICK_PERIOD_MS);
+        vTaskDelay(pdMS_TO_TICKS(WDOG_TIMEOUT_MS));
     }
 }
 
 bool ROBOT::init() {
-    // avoid initializing more than once
     if (initialized)    
         return true;
+    
+    // general setup for gpio, i2c, and other peripherals
+    gpio_install_isr_service(0);
 
-    // start serial communication for debuggind when the espnow is not working
-	// using USB CDC communication, the baud rate is not relevant
-	Serial.begin(BAUDRATE); 
-
-    // configure the pins (OUTPUT, INPUT, etc) and the i2c communication
+    // configure the pins and i2c
     if (!configurePins())
         return false;
 
-    // initialize the logger
-	logger.begin();
-
-    // initialize the shell
+    logger.begin();
     shell.begin();
 
-    // create the queue for the received data from the ESP-NOW
     receivedDataQueue = xQueueCreate(10, sizeof(message));
     if (receivedDataQueue == nullptr) {
         ROBOT::logger.insert_log(logType::ERRO, "Failed to create receive queue");
         return false;
     }
 
-    // configure WiFi and ESP-NOW before any send attempts
     if (!configureCommunication())
         return false;
         
-    // configure motor (init the channel PWM and set the initial state)
     motor_left.init();
     motor_right.init();
 
-    // configure the encoders
     if (!encoder_left.init()) {
         ROBOT::logger.insert_log(logType::ERRO, "Failed to initialize left encoder");
         return false;
@@ -370,22 +377,16 @@ bool ROBOT::init() {
         return false;
     }
 
-    // configure the imu
-    if (!imu.begin()) {
-        ROBOT::logger.insert_log(logType::ERRO, "Failed to initialize IMU");
-        return false;
-    }
+    //if (!imu.begin()) {
+    //    ROBOT::logger.insert_log(logType::ERRO, "Failed to initialize IMU");
+    //    return false;
+    //}
 
-    // set time for reset the flags signals
     setTimeLimit();
-
-    // init the EKF
     initEKF();
 
-    // log message 
-	ROBOT::logger.insert_log(logType::INFO, "Welcome! the car is starting...");
+    ROBOT::logger.insert_log(logType::INFO, "Welcome! the car is starting...");
 
-    // return true if everything is ok
     initialized = true;
     return true;
 }

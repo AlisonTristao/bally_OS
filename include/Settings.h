@@ -1,8 +1,6 @@
 #ifndef SETTINGS_H
 #define SETTINGS_H
 
-#include <Arduino.h>
-
 // logger configuration (build flags)
 // -> LOG_ALL
 // -> LOG_INFO
@@ -13,6 +11,7 @@
 #define SAMPLE_MICROS   10000   // 10ms 100Hz - EKF sample rate
 #define SAMPLE_MILLIS   (SAMPLE_MICROS / 1000) // sample rate in ms
 #define FREQ_EKF        (1.0f / (SAMPLE_MICROS * 0.000001f))
+#define WDOG_TIMEOUT_MS 10      // 10ms - watchdog timeout for the main loop, this is important to reset the robot in case of a deadlock or infinite loop
 #define DELAY_FLAGS     250     // 250ms - time to reset flags and check state changes
 #define CONTROL_TIME_MS 1
 
@@ -102,8 +101,8 @@
 #define D7              4
 
 // -------------------- I2C devices --------------------
-#define SDA             4
-#define SCL             5
+#define SDA_pin         4
+#define SCL_pin         5
 
 // -------------------- Voltage dividers --------------------
 #define BAT             7

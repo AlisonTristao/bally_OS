@@ -1,5 +1,10 @@
 #include <Logger.h>
 
+#include "esp_timer.h"
+
+#include <cstring>
+#include <cstdio>
+
 Logger::Logger()
     : send_callback_(defaultSendCallback) {
     mutex_ = nullptr;
@@ -15,6 +20,7 @@ Logger::~Logger() {
 void Logger::begin() {
     // verifiy if the logger is already initialized to avoid inserting duplicate logs and creating multiple mutexes
     if (initialized_) return;
+
     initialized_ = true;
 
     // create the mutex for the logger to ensure thread safety when multiple tasks are inserting logs concurrently
@@ -24,9 +30,14 @@ void Logger::begin() {
 
 bool Logger::wait_for_mutex() {
     if (mutex_ == nullptr) return false;
-    // insert a debug to indicate 
-    //insert_log(logType::DEBG, "Waiting for mutex...");
-    return xSemaphoreTake(mutex_, portMAX_DELAY) == pdTRUE;
+
+    return xSemaphoreTake(mutex_, pdMS_TO_TICKS(2)) == pdTRUE;
+}
+
+bool Logger::check_mutex() {
+    if (mutex_ == nullptr) return false;
+
+    return xSemaphoreTake(mutex_, 0) == pdTRUE;
 }
 
 void Logger::free_mutex() {
@@ -40,12 +51,14 @@ void Logger::set_send_callback(SendCallback callback) {
 
     // set the callback, if the callback is null, use the default callback that does nothing
     send_callback_ = (callback != nullptr) ? callback : defaultSendCallback;
+
     free_mutex();
 }
 
 bool Logger::defaultSendCallback(const uint8_t *data, size_t len) {
     (void)data;
     (void)len;
+
     return false;
 }
 
@@ -70,7 +83,8 @@ void Logger::insert_logf(logType type, const char* format, ...) {
         
         // convert the formatted buffer to bytes and call the implementation
         const uint8_t* data = reinterpret_cast<const uint8_t*>(buffer);
-        insert_log_impl(data, final_len, type, millis());
+
+        insert_log_impl(data, final_len, type, (uint32_t)(esp_timer_get_time() / 1000ULL));
     }
 
     // always release the mutex after the operation
@@ -78,15 +92,18 @@ void Logger::insert_logf(logType type, const char* format, ...) {
 }
 
 void Logger::insert_log(logType type, const char* msg) {
+    if (msg == nullptr) return;
+
     // verify the mutex is created and try to take it before inserting the log, 
     // to ensure thread safety when multiple tasks are inserting logs concurrently
     if (!wait_for_mutex()) return;
 
     // convert the string to send as bytes
-    const uint8_t* data = reinterpret_cast<const uint8_t*>(const_cast<char*>(msg));
+    const uint8_t* data = reinterpret_cast<const uint8_t*>(msg);
 
     // insert the log message into the buffer, using the current timestamp in milliseconds for the log entry
-    insert_log_impl(data, strlen(msg), type, millis());
+    insert_log_impl(data, strlen(msg), type, (uint32_t)(esp_timer_get_time() / 1000ULL));
+
     free_mutex();
 }
 
@@ -95,7 +112,7 @@ uint8_t Logger::calculate_checksum(const message& msg) {
     uint32_t sum = 0;
 
     // get the length of the content to calculate the checksum, if the content is null, the length is 0
-    const size_t len = (msg.content.byte == nullptr) ? 0 : msg.content.size;
+    const size_t len = msg.content.size;
 
     // sum all the bytes of the message content
     for (size_t i = 0; i < len; ++i) sum += static_cast<uint8_t>(msg.content.byte[i]);
@@ -104,6 +121,7 @@ uint8_t Logger::calculate_checksum(const message& msg) {
     sum += static_cast<uint8_t>(msg.type);
     sum += static_cast<uint16_t>(msg.packet_number);
     sum += static_cast<uint16_t>(msg.total_packets);
+
     return static_cast<uint8_t>(sum % 256);
 }
 
@@ -125,10 +143,8 @@ void Logger::insert_log_impl(const uint8_t* data, size_t len, logType type, uint
 
         // warning - if the buffer is full and the logger is not sending the messages fast enough, 
         // we will start overwriting the old messages in the buffer,
-        if (message_count >= MAX_PACKETS_IN_RAM)
-            message_count = 0;
+        message& m = messages[write_index];
 
-        message& m          = messages[message_count++];
         m.timer             = ts;
         m.type              = type;
         m.packet_number     = i + 1;
@@ -136,65 +152,67 @@ void Logger::insert_log_impl(const uint8_t* data, size_t len, logType type, uint
         m.content.size      = length;
 
         // copy the payload for the current packet into the message struct
-        if (m.content.byte) {
-            memset(m.content.byte, 0, MAX_CONTENT_SIZE + 1);
-            if (length > 0)
-                memcpy(m.content.byte, data + start, length);
-            m.content.text[length] = '\0';
-        }
+        memset(m.content.byte, 0, MAX_CONTENT_SIZE + 1);
+        memcpy(m.content.byte, data + start, length);
 
         // calculate checksum with the sum of the bytes of the message content, type, packet number, and total packets, modulo 256. 
         // This is a simple checksum to verify the integrity of the message on the receiving end.
         m.checksum = calculate_checksum(m);
+
+        write_index = (write_index + 1) % MAX_PACKETS_IN_RAM;
+
+        if (pending_count < MAX_PACKETS_IN_RAM) {
+            pending_count++;
+        } else {
+            read_index = (read_index + 1) % MAX_PACKETS_IN_RAM;
+        }
     }
 }
 
 void Logger::reset_loop_counter() {
     if (wait_for_mutex()) {
-        if (message_count == MAX_PACKETS_IN_RAM)
-            message_count = 0;
+        write_index = 0;
+        read_index = 0;
+        pending_count = 0;
+
         free_mutex();
     }
 }
 
 void Logger::flush_logs() {
-    // verify the mutex is created and try to take it before sending the logs,
+    // temporary buffer to hold the messages to be sent, this allows us to release the mutex before sending the messages,
+    // which is important to avoid blocking the logger when sending messages, 
+    // especially if the send callback is slow or if there are many messages to send
+    static message local_messages[MAX_PACKETS_IN_RAM];
+
+    uint32_t local_count = 0;
+
+    // wait for the mutex to safely access the messages buffer and copy the messages to the local buffer
     if (!wait_for_mutex()) return;
 
-    // get the init and the end index for the messages to send, 
-    // this metod send the messagens using a circular buffer.
-    uint32_t start = last_index;
-    uint32_t end = message_count;
-
-    // just verify the indexes to be in the correct range
-    if (start >= MAX_PACKETS_IN_RAM)   start = 0;
-    if (end > MAX_PACKETS_IN_RAM)      end = MAX_PACKETS_IN_RAM;
-    if (start == end) {
+    if (pending_count == 0) {
         free_mutex();
-        return; // nothing to send
-    }     
-
-    // send the messages from the buffer using the configured send callback, 
-    // starting from the last index and going up to the current message count.
-    auto send_entry = [this](uint32_t idx) {
-        send_callback_(reinterpret_cast<const uint8_t*>(&messages[idx]), sizeof(messages[idx]));
-    };
-
-    // logic to send the messages in the correct order, using a circular buffer
-    if (start < end) {
-        for (uint32_t i = start; i < end; ++i)
-            send_entry(i);
-    } else {
-        // Buffer wrapped: send from last_index to end of array and then from 0 to message_count.
-        for (uint32_t i = start; i < MAX_PACKETS_IN_RAM; ++i)
-            send_entry(i);
-
-        for (uint32_t i = 0; i < end; ++i)
-            send_entry(i);
+        return;
     }
-    
-    // to change the last index to the current message count, we need to take the mutex
-    last_index = (end == MAX_PACKETS_IN_RAM) ? 0 : end;
-    free_mutex();
-}
 
+    uint32_t idx = read_index;
+
+    // copy the messages from the messages buffer to the local buffer
+    for (uint32_t i = 0; i < pending_count; ++i) {
+        local_messages[local_count++] = messages[idx];
+        idx = (idx + 1) % MAX_PACKETS_IN_RAM;
+    }
+
+    read_index = write_index;
+    pending_count = 0;
+
+    free_mutex();
+
+    // send the messages in the local buffer using the configured send callback
+    for (uint32_t i = 0; i < local_count; ++i) {
+        send_callback_(
+            reinterpret_cast<const uint8_t*>(&local_messages[i]),
+            sizeof(local_messages[i])
+        );
+    }
+}

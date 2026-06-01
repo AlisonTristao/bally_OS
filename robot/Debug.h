@@ -31,9 +31,9 @@ stateName debug_function() {
         ROBOT::logger.insert_log(logType::INFO, (ROBOT::array_sensor.debug()).c_str());
     #endif
 
-    // safety default outside RUN
-    delay(10);
-
+    // safety delay default outside RUN
+    vTaskDelay(DELAY_SAMPLE/portTICK_PERIOD_MS);
+    
     return DEBUG;
 }
 

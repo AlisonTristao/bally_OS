@@ -4,7 +4,7 @@
 // autor: Alison Tristão
 // email: AlisonTristao@hotmail.com
 
-#include <Arduino.h>
+#include <cstdint>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <SharedMessageTypes.h>
@@ -54,8 +54,10 @@ public:
 private:
     // private members for the logger
     message messages[MAX_PACKETS_IN_RAM] = {};
-    uint32_t message_count = 0;
-    uint32_t last_index = 0;
+    uint32_t write_index = 0;
+    uint32_t read_index = 0;
+    uint32_t pending_count = 0;
+
     SemaphoreHandle_t mutex_ = NULL;
     SendCallback send_callback_;
     bool initialized_ = false;

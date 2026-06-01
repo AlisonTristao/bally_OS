@@ -1,24 +1,20 @@
+
 #include "Encoder.h"
 
 // variable static of PCNT
-Encoder *Encoder::usedPCNTs[PCNT_UNIT_MAX] = {
-	NULL,
+Encoder *Encoder::usedPCNTs[4] = {
+    NULL,
 };
 
 bool Encoder::isr_installed = false;
 uint8_t Encoder::core_to_run_ISR = 1;
 
-// enable ISR on core
-static void IRAM_ATTR install_ISR_on_core(void *param) {
-	esp_err_t *result = (esp_err_t*) param;
-	*result = pcnt_isr_service_install(0);
-}
-
 // observe the counter overflow
-static void IRAM_ATTR pcnt_overflow_handle(void *param) {   
-	// resolve the counter overflow
-	Encoder *esp32enc = static_cast<Encoder*>(param);
-	esp32enc->overflow();
+static bool pcnt_overflow_handle(pcnt_unit_handle_t unit, const pcnt_watch_event_data_t *edata, void *user_ctx) {   
+    // resolve the counter overflow
+    Encoder *esp32enc = static_cast<Encoder*>(user_ctx);
+    esp32enc->overflow(edata->watch_point_value);
+    return false;
 }
 
 // constructor
@@ -26,152 +22,119 @@ Encoder::Encoder(uint8_t pinA, uint8_t pinB){
     this->pinA = (gpio_num_t) pinA;
     this->pinB = (gpio_num_t) pinB;
     this->counter = 0;
+    this->unit = NULL;
+    this->channel_a = NULL;
+    this->channel_b = NULL;
 }
 
 // destructor
 Encoder::~Encoder(){
-    pcnt_counter_pause(unit);
-	pcnt_isr_handler_remove(this->enc_config.unit);
-	Encoder::usedPCNTs[unit] = NULL;
+    if(unit) {
+        pcnt_unit_stop(unit);
+        pcnt_unit_disable(unit);
+        if(channel_a) pcnt_del_channel(channel_a);
+        if(channel_b) pcnt_del_channel(channel_b);
+        pcnt_del_unit(unit);
+    }
 }
 
 // init configuration of encoder
 bool Encoder::init(uint16_t filter) {
-    // choose the free pulse counters
-	for (uint8_t i = 0; i <= PCNT_UNIT_MAX; i++) {
-		if (Encoder::usedPCNTs[i] == NULL) {
-            // verify the amount of PCNT
-            if(i == PCNT_UNIT_MAX) return false;
-            // select the PCNT unit not used
-            usedPCNTs[i] = this;
-            unit = (pcnt_unit_t) i;
-            break;
-		}
-	}
-
-    // set up the IO state of hte pin
-    gpio_pad_select_gpio(pinA);
-	gpio_pad_select_gpio(pinB);
-	gpio_set_direction(pinA, GPIO_MODE_INPUT);
-	gpio_set_direction(pinB, GPIO_MODE_INPUT);
-
-    /* --- set encoder PCNT configuration --- */
-
-	// configure channel 0
-	enc_config.pulse_gpio_num   = pinA;                 // Encoder pin A
-	enc_config.ctrl_gpio_num    = pinB;                 // Encoder pin B
-	enc_config.unit             = unit;                 // PCNT Unit
-	enc_config.channel          = PCNT_CHANNEL_0;       // PCNT Channel
-	enc_config.pos_mode         = PCNT_COUNT_DEC;       // Rising-Edge
-	enc_config.neg_mode         = PCNT_COUNT_INC;	    // Falling-Edge
-	enc_config.lctrl_mode       = PCNT_MODE_KEEP;	    // Rising A on HIGH B = CW Step
-	enc_config.hctrl_mode       = PCNT_MODE_REVERSE;    // Rising A on LOW B = CCW Step
-	enc_config.counter_h_lim    = INT16_MAX;            // High limit
-	enc_config.counter_l_lim    = INT16_MIN;            // Low limit
+    pcnt_unit_config_t unit_config = {};
+    unit_config.high_limit = 32767;
+    unit_config.low_limit = -32768;
 
     // initialize PCNT unit
-	pcnt_unit_config(&enc_config);
+    if (pcnt_new_unit(&unit_config, &unit) != ESP_OK) return false;
+
+    pcnt_chan_config_t chan_a_config = {};
+    chan_a_config.edge_gpio_num = pinA;
+    chan_a_config.level_gpio_num = pinB;
+    pcnt_new_channel(unit, &chan_a_config, &channel_a);
+
+    pcnt_chan_config_t chan_b_config = {};
+    chan_b_config.edge_gpio_num = pinB;
+    chan_b_config.level_gpio_num = pinA;
+    pcnt_new_channel(unit, &chan_b_config, &channel_b);
+
+    // configure channel 0
+    pcnt_channel_set_edge_action(channel_a, PCNT_CHANNEL_EDGE_ACTION_DECREASE, PCNT_CHANNEL_EDGE_ACTION_INCREASE);
+    pcnt_channel_set_level_action(channel_a, PCNT_CHANNEL_LEVEL_ACTION_INVERSE, PCNT_CHANNEL_LEVEL_ACTION_KEEP);
 
     // configure channel 1
-	enc_config.pulse_gpio_num   = pinB;                 // make prior control into signal
-	enc_config.ctrl_gpio_num    = pinA;                 // and prior signal into control
-	enc_config.channel          = PCNT_CHANNEL_1;       // channel 1
-	enc_config.lctrl_mode       = PCNT_MODE_REVERSE;    // Rising B on HIGH A = CW Step 
-	enc_config.hctrl_mode       = PCNT_MODE_KEEP;       // Rising B on LOW A = CCW Step 
-
-    // initialize PCNT unit
-	pcnt_unit_config(&enc_config);
+    pcnt_channel_set_edge_action(channel_b, PCNT_CHANNEL_EDGE_ACTION_DECREASE, PCNT_CHANNEL_EDGE_ACTION_INCREASE);
+    pcnt_channel_set_level_action(channel_b, PCNT_CHANNEL_LEVEL_ACTION_KEEP, PCNT_CHANNEL_LEVEL_ACTION_INVERSE);
 
     // saturate the filter value
     if(filter >= 1023) filter = 1023;
 
     // filter the signal
-    if (filter == 0) {
-        pcnt_filter_disable(unit);
-    } else {
-        pcnt_set_filter_value(unit, filter);
-        pcnt_filter_enable(unit);
+    if (filter > 0) {
+        pcnt_glitch_filter_config_t filter_config = {};
+        filter_config.max_glitch_ns = filter * 1000;
+        pcnt_unit_set_glitch_filter(unit, &filter_config);
     }
 
     /* enable events on maximum and minimum limit values */
-	pcnt_event_enable(unit, PCNT_EVT_H_LIM);
-	pcnt_event_enable(unit, PCNT_EVT_L_LIM);
-    
+    pcnt_unit_add_watch_point(unit, 32767);
+    pcnt_unit_add_watch_point(unit, -32768);
+
     // configure ISR of PCNT
-    if(!isr_installed) {
-        esp_err_t result = ESP_FAIL;
-        esp_err_t er = esp_ipc_call_blocking(core_to_run_ISR, install_ISR_on_core, &result);
-
-        // return the result of the configuration
-        if(er != ESP_OK) return false;
-
-        isr_installed = true;
-    }
+    pcnt_event_callbacks_t cbs = {};
+    cbs.on_reach = pcnt_overflow_handle;
 
     // add ISR handler for this unit 
-    if(pcnt_isr_handler_add(unit, pcnt_overflow_handle, this) != ESP_OK) return false;
-	
+    if(pcnt_unit_register_event_callbacks(unit, &cbs, this) != ESP_OK) return false;
+    
     // pcnt prepared for use
-	pcnt_counter_clear(unit);
-	pcnt_intr_enable(unit);
-	pcnt_counter_resume(unit);
+    pcnt_unit_enable(unit);
+    pcnt_unit_clear_count(unit);
+    pcnt_unit_start(unit);
     return true;
 }
 
 int64_t Encoder::getCountRaw() {
-	int16_t c;
-	int64_t compensate = 0;
-
-	pcnt_get_counter_value(unit, &c);
-
-	if (PCNT.int_st.val & BIT(unit)) {
-		if (PCNT.status_unit[unit].cnt_thr_h_lim_lat_un) {
-			compensate = enc_config.counter_h_lim;
-		} else if (PCNT.status_unit[unit].cnt_thr_l_lim_lat_un) {
-			compensate = enc_config.counter_l_lim;
-		}
-	}
-
-	return compensate + c;
+    int c = 0;
+    if(unit) pcnt_unit_get_count(unit, &c);
+    return c;
 }
 
 int64_t Encoder::getCount() {
-	int64_t result = counter + getCountRaw();
-	return result;
+    int64_t result = counter + getCountRaw();
+    return result;
 }
 
 int64_t Encoder::getCountDiff() {
-	int64_t current_count = getCount();
-	int64_t diff = current_count - last_counter;
-	last_counter = current_count;
-	return diff;
+    int64_t current_count = getCount();
+    int64_t diff = current_count - last_counter;
+    last_counter = current_count;
+    return diff;
 }
 
-void Encoder::overflow() {
-	// check the counter overflow
-	if (PCNT.status_unit[unit].cnt_thr_h_lim_lat_un) {
+void Encoder::overflow(int watch_val) {
+    // check the counter overflow
+    if (watch_val == 32767) {
         // increment the counter and clear PCNT
-		counter += enc_config.counter_h_lim;
-	} else if (PCNT.status_unit[unit].cnt_thr_l_lim_lat_un) {
+        counter += 32767;
+    } else if (watch_val == -32768) {
         // decrement the counter and clear PCNT
-		counter += enc_config.counter_l_lim;
+        counter += -32768;
     }
-	// clear PCNT
-	pcnt_counter_clear(unit);
+    // clear PCNT
 }
 
 void Encoder::clearPCNT() {
-	// clear the PCNT
-	pcnt_counter_clear(unit);
-	counter = 0;
+    // clear the PCNT
+    if(unit) pcnt_unit_clear_count(unit);
+    counter = 0;
 }
 
 void Encoder::pausePCNT() {
-	// pause the PCNT
-	pcnt_counter_pause(unit);
+    // pause the PCNT
+    if(unit) pcnt_unit_stop(unit);
 }
 
 void Encoder::resumePCNT() {
-	// resume the PCNT
-	pcnt_counter_resume(unit);
+    // resume the PCNT
+    if(unit) pcnt_unit_start(unit);
 }

@@ -1,25 +1,24 @@
 #ifndef ROBOT_STATIC_OBJECTS_H
 #define ROBOT_STATIC_OBJECTS_H
 
-#include <Arduino.h>
-
+#include <cstdint>
 #include <esp_timer.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
-#include <WiFi.h>
-#include <Wire.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 
 #include <Settings.h>
-#include <RGBLed.h>
 
 #include <ArraySensor.h>
 #include <Encoder.h>
 #include <HBridge.h>
-#include <Control.h>
 
 #include <TinyShell.h>
 #include <TinyEKF.h>
-#include <ICM42688.h>
+//#include "driver/i2c.h"
+//#include <ICM42688.h>
+//#include <Wire.h> // pendencia - parar de usar isso aqui - Arduino 
 
 #include <Flags.h>
 #include <Logger.h>
@@ -28,11 +27,13 @@
 class ROBOT {
 public:
     // default constructor
+    // default constructor
     ROBOT() :   motor_left(AIN1, AIN2, CH0, PWM_A), 
                 motor_right(BIN1, BIN2, CH1, PWM_B),
                 encoder_left(ENC_A0, ENC_A1), 
-                encoder_right(ENC_B0, ENC_B1), 
-                imu(Wire, 0x68), EKF() {
+                encoder_right(ENC_B0, ENC_B1),
+                //imu(Wire, 0x68), 
+                EKF() {
         // save the instance of the robot class to be used in the static functions
         instance_ = this;
     }
@@ -65,10 +66,8 @@ public:
     static Logger logger;
     static StateMachine machine;
     static TinyShell shell;
-    static Control control;
 
     // peripheral objects
-    static RGBLed rgb_led;
     static ArraySensor<LEN_SENSOR> array_sensor;
 private:
     // private peripheral objects
@@ -76,7 +75,7 @@ private:
     HBridge motor_right;
     Encoder encoder_left;
     Encoder encoder_right;
-    ICM42688 imu;
+    //ICM42688 imu;
     TinyEKF EKF;
 
     // save a instance of the ROBOT class to be used in the static functions
@@ -108,10 +107,10 @@ private:
     float getOmegaFromEncoders();
 
     // Callbacks for ESP-NOW 
-    static void handleReceiveStatic(const uint8_t* mac, const uint8_t* incomingData, int len);
+    static void handleReceiveStatic(const esp_now_recv_info_t *recv_info, const uint8_t *incomingData, int len);
 
     // Callbacks for ESP-NOW
-    static void handleSendStatic(const uint8_t* mac, esp_now_send_status_t status);
+    static void handleSendStatic(const wifi_tx_info_t *tx_info, esp_now_send_status_t status) ;
 
     // reset the flags: buttons, side sensors, leds and motors
     void resetFlags();
@@ -122,18 +121,6 @@ private:
 
     // queue for the logs to be sent in the parallel processing
     QueueHandle_t receivedDataQueue;
-};
-
-// Define the buttons and side sensors as Flags_in objects with their respective indices
-static FlagsArg btnArgs[] = {
-    {&ROBOT::buttons, BTN1_idx},
-    {&ROBOT::buttons, BTN2_idx},
-    {&ROBOT::buttons, BTN3_idx}
-};
-
-static FlagsArg sideArgs[] = {
-    {&ROBOT::sideSensors, SENSOR_LEFT_idx},
-    {&ROBOT::sideSensors, SENSOR_RIGHT_idx}
 };
 
 #endif

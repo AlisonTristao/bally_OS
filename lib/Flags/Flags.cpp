@@ -1,4 +1,5 @@
 #include "Flags.h"
+#include "esp_attr.h"
 
 // ===== FlagsBase =====
 
@@ -11,7 +12,7 @@ bool FlagsBase::isValidIndex(uint8_t index) const {
 }
 
 void FlagsBase::checkFlagsDuration() {
-    refreshFlags(millis());
+    refreshFlags((uint32_t)(esp_timer_get_time() / 1000ULL));
 }
 
 void FlagsBase::refreshFlags(uint32_t currentTime) {
@@ -35,7 +36,7 @@ void Flags_in::setTimeLimit(uint32_t time) {
         timeLimit[i] = time;
 }
 
-void IRAM_ATTR Flags_in::isr(void* arg) {
+void Flags_in::isr(void* arg) {
     FlagsArg* data = static_cast<FlagsArg*>(arg);
 
     if (data == nullptr || data->obj == nullptr)
@@ -48,15 +49,15 @@ void Flags_in::setFlag(uint8_t index) {
     if (!isValidIndex(index))
         return;
 
-    flags.time[index] = millis();
+    flags.time[index] = (uint32_t)(esp_timer_get_time() / 1000ULL);
     flags.allFlags |= (1 << index);
 }
 
-void IRAM_ATTR Flags_in::handleUpdate(uint8_t index) {
+void Flags_in::handleUpdate(uint8_t index) {
     if (!isValidIndex(index))
         return;
 
-    uint32_t now = millis();
+    uint32_t now = (uint32_t)(esp_timer_get_time() / 1000ULL);
 
     // Check if enough time has passed since last activation
     if (!(now - flags.time[index] >= timeLimit[index]))
@@ -72,7 +73,7 @@ void Flags_out::setFlag(uint8_t index, uint32_t time) {
     if (!isValidIndex(index))
         return;
 
-    flags.time[index] = millis();
+    flags.time[index] = (uint32_t)(esp_timer_get_time() / 1000ULL);
     flags.allFlags |= (1 << index);
     timeLimit[index] = time;
 }
@@ -88,7 +89,7 @@ void Flags_pwm::setValue(uint8_t index, int8_t value, uint32_t time) {
     value = (value < -100) ? -100 : value;
 
     pwmValues[index] = value;
-    flags.time[index] = millis();
+    flags.time[index] = (uint32_t)(esp_timer_get_time() / 1000ULL);
     timeLimit[index] = time;
     flags.allFlags |= (1 << index);
 }

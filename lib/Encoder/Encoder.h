@@ -1,17 +1,16 @@
 #ifndef ENCODER_H
 #define ENCODER_H
-#include <Arduino.h>
 
 // autor: Alison Tristão
 // email: AlisonTristao@hotmail.com
 
 // WARNING: Not all esp32 chips support the pcnt
-#include <driver/pcnt.h>
-#include <soc/pcnt_struct.h>
+#include "driver/pulse_cnt.h"
+#include "driver/gpio.h"
 #include "esp_ipc.h"
 
 /**********************/
-/*  Class Of Encoder  */
+/* Class Of Encoder  */
 /**********************/  
 
 class Encoder{
@@ -24,12 +23,9 @@ class Encoder{
         /**
          * @brief unit of the PCNT
          */
-        pcnt_unit_t unit;
-
-        /**
-         * @brief configuration of the PCNT
-         */
-        pcnt_config_t enc_config;
+        pcnt_unit_handle_t unit;
+        pcnt_channel_handle_t channel_a;
+        pcnt_channel_handle_t channel_b;
 
         /**
          * @brief saves the counter of the encoder when the pcnt overflows
@@ -53,7 +49,7 @@ class Encoder{
         /**
          * @brief array of used PCNTs
          */
-        static Encoder *usedPCNTs[PCNT_UNIT_MAX];
+        static Encoder *usedPCNTs[4];
     public:
         /**
          * @brief Constructor of Encoder - this library is used to read an encoder using the PCNT
@@ -73,7 +69,7 @@ class Encoder{
         /**
          * @brief ISR of the encoder - this function is called when the pulse counter overflows and saves the actual value and clears the pulse counter
          */
-        void overflow();
+        void overflow(int watch_val);
 
         /**
          * @brief get the counter of the encoder

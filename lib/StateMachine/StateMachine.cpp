@@ -16,7 +16,7 @@ StateMachine::StateMachine(stateName state, stateName (*action)(), stateName (*n
     arr_states[number] = this;
 
     if (transitionMutex_ == nullptr) {
-        transitionMutex_ = xSemaphoreCreateMutex();
+        transitionMutex_ = xSemaphoreCreateRecursiveMutex();
     }
 }
 

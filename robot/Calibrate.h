@@ -35,14 +35,9 @@ stateName calibrate_function() {
 
     // log message
     #if defined(LOG_ALL) || defined(LOG_INFO)
-        ROBOT::logger.insert_log(logType::INFO, ("Calibrate function called: " + String(!calib ? "failed" : "success")).c_str());
+        ROBOT::logger.insert_log(logType::INFO, ("Calibrate function called: " + std::string(!calib ? "failed" : "success")).c_str());
         ROBOT::logger.insert_log(logType::INFO, ("Values:\n\n" + ROBOT::array_sensor.calibrate_status()).c_str());
     #endif
-
-    if(calib)
-        ROBOT::array_sensor.saveCalibration();
-    else 
-        return calibrate_to_error();
 
     return calibrate_to_wait();
 }
