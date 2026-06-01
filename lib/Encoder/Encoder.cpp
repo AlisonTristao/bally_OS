@@ -140,6 +140,13 @@ int64_t Encoder::getCount() {
 	return result;
 }
 
+int64_t Encoder::getCountDiff() {
+	int64_t current_count = getCount();
+	int64_t diff = current_count - last_counter;
+	last_counter = current_count;
+	return diff;
+}
+
 void Encoder::overflow() {
 	// check the counter overflow
 	if (PCNT.status_unit[unit].cnt_thr_h_lim_lat_un) {

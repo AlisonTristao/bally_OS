@@ -2,7 +2,7 @@
 #define TELEMETRY_H
 
 // header
-#include <Pinout.h>
+#include <Settings.h>
 
 stateName telemetry_to_wait() {
     // log message

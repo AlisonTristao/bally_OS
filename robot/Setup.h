@@ -2,7 +2,7 @@
 #define SETUP_H
 
 // header
-#include <Pinout.h>
+#include <Settings.h>
 #include <Wrapper.h>
 #include <BallyRobot.h>
 

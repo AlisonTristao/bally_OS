@@ -2,7 +2,7 @@
 #define WAIT_H
 
 // header
-#include <Pinout.h>
+#include <Settings.h>
 
 // static libraries
 #include <BallyRobot.h>

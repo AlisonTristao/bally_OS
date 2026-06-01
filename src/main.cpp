@@ -4,7 +4,7 @@
 #include <esp_err.h>
 
 //  PROJECT HEADERS 
-#include <Pinout.h>
+#include <Settings.h>
 
 //  EXTERNAL LIBRARIES 
 #include <TinyShell.h>

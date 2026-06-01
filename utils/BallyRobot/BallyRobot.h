@@ -9,7 +9,7 @@
 #include <WiFi.h>
 #include <Wire.h>
 
-#include <Pinout.h>
+#include <Settings.h>
 #include <RGBLed.h>
 
 #include <ArraySensor.h>
@@ -107,10 +107,6 @@ private:
     float getSpeedFromEncoders();
     float getOmegaFromEncoders();
 
-    // Interrupt/timer handling
-    esp_timer_handle_t timer_get_handle;
-    static void sampleISR(void* arg);
-
     // Callbacks for ESP-NOW (moved from EspNow.h)
     static void handleReceiveStatic(const uint8_t* mac, const uint8_t* incomingData, int len);
 
@@ -127,17 +123,6 @@ private:
     // queue for the logs to be sent in the parallel processing
     QueueHandle_t receveivedDataQueue;
 };
-
-// alias to rename de BIT_s with the buttons, side sensors, leds and motors flags
-#define BTN1_idx            0
-#define BTN2_idx            1
-#define BTN3_idx            2
-#define SENSOR_LEFT_idx     0
-#define SENSOR_RIGHT_idx    1
-#define LED1_idx            0
-#define LED2_idx            1
-#define MOTOR_LEFT_idx      0
-#define MOTOR_RIGHT_idx     1
 
 // Define the buttons and side sensors as Flags_in objects with their respective indices
 static FlagsArg btnArgs[] = {

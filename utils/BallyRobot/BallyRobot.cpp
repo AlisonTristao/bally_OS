@@ -1,6 +1,6 @@
 #include <BallyRobot.h>
 #include <Arduino.h>
-#include <Pinout.h>
+#include <Settings.h>
 
 // active instance of the robot class
 ROBOT* ROBOT::instance_ = nullptr;
@@ -32,13 +32,6 @@ void readMacAddress(){
     }
 }
 
-// sample ISR (IRAM resident)
-void IRAM_ATTR ROBOT::sampleISR(void* arg) {
-    #if defined(LOG_ALL) || defined(LOG_TELEMETRY)
-        // nothing 
-    #endif
-}
-
 void ROBOT::configure_interruptions(void *param){
     // set the button interruptions
     attachInterruptArg(digitalPinToInterrupt(BIT_0), Flags_in::isr, &btnArgs[0], FALLING);
@@ -46,18 +39,6 @@ void ROBOT::configure_interruptions(void *param){
     attachInterruptArg(digitalPinToInterrupt(BIT_2), Flags_in::isr, &btnArgs[2], FALLING);
     attachInterruptArg(digitalPinToInterrupt(LEFT), Flags_in::isr, &sideArgs[0], RISING);
     attachInterruptArg(digitalPinToInterrupt(RIGHT), Flags_in::isr, &sideArgs[1], RISING);
-    // set the timer interruptions
-    #ifdef SAMPLING_ACTIVE
-        esp_timer_create_args_t timer_args = {
-          .callback = &ROBOT::sampleISR,
-          .arg = NULL,
-          .name = "timer_get_values"
-        };
-
-        // try init the timer interrupt
-        bool ok = !(esp_timer_create(&timer_args, &ROBOT::timer_get_handle) != ESP_OK
-                    || esp_timer_start_periodic(ROBOT::timer_get_handle, SAMPLE_MICROS) != ESP_OK);
-    #endif
     // delete this task
     vTaskDelete(NULL);
 }
@@ -282,12 +263,13 @@ float ROBOT::getOmegaFromEncoders() {
 }
 
 void ROBOT::runEKF() {
+    constexpr float kDegToRad = 0.01745329252f;
     // get the input control signals (motor commands) and the measurements (encoders and IMU)
-    float u[2] = {instance_->motors.getValue(MOTOR_RIGHT_idx), 
-                  instance_->motors.getValue(MOTOR_LEFT_idx)};
+    float u[2] = {static_cast<float>(instance_->motors.getValue(MOTOR_RIGHT_idx)),
+                  static_cast<float>(instance_->motors.getValue(MOTOR_LEFT_idx))};
     float z[5] = {instance_->getSpeedFromEncoders(), 
                   instance_->getOmegaFromEncoders(), 
-                  instance_->imu.gyrZ() * (M_PI / 180.0f), 
+                  instance_->imu.gyrZ() * kDegToRad,
                   instance_->imu.accX() * 9.81f, 
                   instance_->imu.accY() * 9.81f};
     // run EKF prediction and update

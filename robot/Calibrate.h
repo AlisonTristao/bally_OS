@@ -2,7 +2,7 @@
 #define CALIBRATE_H
 
 // header
-#include <Pinout.h>
+#include <Settings.h>
 
 // custom libraries
 #include <ArraySensor.h>
