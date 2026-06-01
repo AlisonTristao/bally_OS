@@ -374,10 +374,7 @@ void ROBOT::startWrappers() {
         return RESULT_OK;
     }, "set_pwm", "Set PWM value for a motor (0 for left, 1 for right)", "robot");
 
-    shell.add([](uint8_t left_pwm, uint8_t right_pwm, uint32_t time) -> uint8_t {
-        // set the PWM values for both motors
-        if (left_pwm >= Flags_in::MAX_FLAGS || right_pwm >= Flags_in::MAX_FLAGS)
-            return RESULT_ERROR;
+    shell.add([](int8_t left_pwm, int8_t right_pwm, uint32_t time) -> uint8_t {
         ROBOT::motors.setValue(MOTOR_LEFT_idx, left_pwm, time);
         ROBOT::motors.setValue(MOTOR_RIGHT_idx, right_pwm, time);
         return RESULT_OK;

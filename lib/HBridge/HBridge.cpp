@@ -49,7 +49,7 @@ void HBridge::changeDirection(movement move) {
 }
 
 int32_t HBridge::convertPWM(int32_t pwm) {
-    return (dead_zone + (pwm/SUPLIMIT) * (SUPLIMIT - dead_zone)) * gain;
+    return (dead_zone + (abs(pwm)/SUPLIMIT) * (SUPLIMIT - dead_zone)) * gain;
 }
 
 int32_t HBridge::saturate(int32_t pwm) {
