@@ -7,6 +7,7 @@
 #include <esp_now.h>
 #include <esp_wifi.h>
 #include <WiFi.h>
+#include <Wire.h>
 
 #include <Pinout.h>
 #include <RGBLed.h>
@@ -17,6 +18,8 @@
 #include <Control.h>
 
 #include <TinyShell.h>
+#include <TinyEKF.h>
+#include <ICM42688.h>
 
 #include <Flags.h>
 #include <Logger.h>
@@ -25,7 +28,11 @@
 class ROBOT {
 public:
     // default constructor
-    ROBOT() {
+    ROBOT() :   motor_left(AIN1, AIN2, CH0, PWM_A), 
+                motor_right(BIN1, BIN2, CH1, PWM_B),
+                encoder_left(ENC_A0, ENC_A1), 
+                encoder_right(ENC_B0, ENC_B1), 
+                imu(Wire, 0x68), EKF() {
         // save the instance of the robot class to be used in the static functions
         instance_ = this;
     }
@@ -45,6 +52,9 @@ public:
     // configure the interruptions for the buttons and side sensors
     static void configure_interruptions(void *param);
 
+    // run the EKF to estimate the state of the robot
+    void runEKF();
+
     // Signals and flags for buttons, sensors, LEDs, and motors
     static Flags_in buttons;
     static Flags_in sideSensors;
@@ -62,12 +72,18 @@ public:
     static ArraySensor<LEN_SENSOR> array_sensor;
 private:
     // private peripheral objects
-    static HBridge motor_left;
-    static HBridge motor_right;
+    HBridge motor_left;
+    HBridge motor_right;
+    Encoder encoder_left;
+    Encoder encoder_right;
+    ICM42688 imu;
+    TinyEKF EKF;
 
     // save a instance of the ROBOT class to be used in the static functions
     static ROBOT* instance_;
     bool initialized = false;
+
+    void initEKF();
 
     // configure the pins, the i2c communication and other settings for the robot
     bool configurePins();
@@ -86,6 +102,10 @@ private:
 
     // set the outputs flags (leds and motors) to 0 after the time limit is reached
     void setOutputs();
+
+    // get the speed of the robot based on the encoders values
+    float getSpeedFromEncoders();
+    float getOmegaFromEncoders();
 
     // Interrupt/timer handling
     esp_timer_handle_t timer_get_handle;

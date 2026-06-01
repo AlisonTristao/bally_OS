@@ -44,20 +44,7 @@ StateMachine state8(ERROR, 		error_function,		next_state_error);
 // ROBOT INSTANCE
 ROBOT robot;
 
-// callback to print the logger messages in the serial monitor, used when the esp-now is not working
-bool printLoggerSerial(const uint8_t *data, size_t len) {
-	// convert the data to message and print the content text
-	message logMessage;
-	memcpy(&logMessage, data, sizeof(message));
-	Serial.println(logMessage.content.text);
-	return true; // return true if the message was printed successfully
-}
-
 void setup() {
-	// start serial communication for debuggind when the espnow is not working
-	// using USB CDC communication, the baud rate is not relevant
-	Serial.begin(BAUDRATE); 
-
 	// init static objects and espnow settings
 	if(!robot.init()) {
 		for (uint8_t i = 0; i < 10; i++) {

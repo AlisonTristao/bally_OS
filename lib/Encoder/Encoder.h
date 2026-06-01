@@ -37,6 +37,11 @@ class Encoder{
         int64_t counter = 0;
 
         /**
+         * @brief saves the last counter of the encoder to calculate the difference
+         */
+        int64_t last_counter = 0;
+
+        /**
          * @brief get the raw counter of the encoder
          * @return the raw counter of the encoder
          */
@@ -75,6 +80,12 @@ class Encoder{
          * @return the counter of the encoder
          */
         int64_t getCount();
+
+        /**
+         * @brief get the diference of the counter of the encoder since the last time this function was called
+         * @return the diference of the counter of the encoder since the last time this function
+         */
+        int64_t getCountDiff();
 
         /**
          * @brief clear the counter of the encoder

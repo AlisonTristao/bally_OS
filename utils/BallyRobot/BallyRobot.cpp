@@ -15,8 +15,6 @@ Flags_pwm ROBOT::motors("Motors");
 Logger ROBOT::logger;
 RGBLed ROBOT::rgb_led;
 ArraySensor<LEN_SENSOR> ROBOT::array_sensor(sensor_pins);
-HBridge ROBOT::motor_left(AIN1, AIN2, CH0, PWM_A);
-HBridge ROBOT::motor_right(BIN1, BIN2, CH1, PWM_B);
 Control ROBOT::control;
 TinyShell ROBOT::shell;
 StateMachine ROBOT::machine(NONE, NULL, NULL);
@@ -197,44 +195,6 @@ void ROBOT::setOutputs() {
     // ainda nao existe leds
 }
 
-bool ROBOT::init() {
-    // avoid initializing more than once
-    if (initialized)    
-        return true;
-
-    // configure the pins (OUTPUT, INPUT, etc) and the i2c communication
-    if (!configurePins())
-        return false;
-
-    // initialize the logger
-	logger.begin();
-
-    // create the queue for the received data from the ESP-NOW
-    receveivedDataQueue = xQueueCreate(10, sizeof(message));
-    if (receveivedDataQueue == nullptr) {
-        ROBOT::logger.insert_log(logType::ERRO, "Failed to create receive queue");
-        return false;
-    }
-
-    // configure WiFi and ESP-NOW before any send attempts
-    if (!configureCommunication())
-        return false;
-        
-    // configure motor (init the channel PWM and set the initial state)
-    motor_left.init();
-    motor_right.init();
-
-    // set time for reset the flags signals
-    setTimeLimit();
-
-    // log message 
-	ROBOT::logger.insert_log(logType::INFO, "Welcome! the car is starting...");
-
-    // return true if everything is ok
-    initialized = true;
-    return true;
-}
-
 void ROBOT::executeCommandFromQueue() {
     // check if there is a message in the queue, if not, return
     if(uxQueueMessagesWaiting(instance_->receveivedDataQueue) == 0) 
@@ -262,6 +222,77 @@ void ROBOT::checkStateMachine() {
         // update the last state check time
         instance_->stateMachineTimer = millis();  
     }   
+}
+
+// Adapter para callback estático de recebimento.
+void ROBOT::handleReceiveStatic(const uint8_t* mac, const uint8_t* incomingData, int len) {
+    // verify if the queue is created
+    if (instance_->receveivedDataQueue == nullptr) {
+        ROBOT::logger.insert_log(logType::ERRO, "Receive callback called but queue is not initialized");
+        return;
+    }
+
+    // add the buffer to the queue to be processed in the parallel processing
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    xQueueSendFromISR(instance_->receveivedDataQueue, incomingData, &xHigherPriorityTaskWoken);
+}
+
+// Adapter para callback estático de envio.
+void ROBOT::handleSendStatic(const uint8_t* mac, esp_now_send_status_t status) {
+    // Currently, we do not have a send callback set up, but this is where you would handle it if needed.
+}
+
+void ROBOT::initEKF() {
+    float x0[3] = {0.0f, 0.0f, 0.0f};
+    float P0[3][3] = {
+        {INITIAL_P, 0.0f, 0.0f},
+        {0.0f, INITIAL_P, 0.0f},
+        {0.0f, 0.0f, INITIAL_P}
+    };
+    float Q[3][3] = {
+        {V_NOISE, 0.0f,  0.0f},  
+        {0.0f,  W_NOISE, 0.0f},   
+        {0.0f,  0.0f,  B_NOISE} 
+    };
+    float R[5][5] = {
+        {ENC_NOISE, 0.0f, 0.0f, 0.0f, 0.0f},
+        {0.0f, ENC_NOISE, 0.0f, 0.0f, 0.0f}, 
+        {0.0f, 0.0f, GYRO_NOISE, 0.0f, 0.0f}, 
+        {0.0f, 0.0f, 0.0f, ACCEL_NOISE, 0.0f},
+        {0.0f, 0.0f, 0.0f, 0.0f, ACCEL_NOISE}
+    };
+
+    EKF.init(x0, P0, Q, R);
+}
+
+float ROBOT::getSpeedFromEncoders() {
+    // calculate the speed of the robot based on the encoders values
+    float left_speed = encoder_left.getCountDiff() * ENCODER_PPR * WHEEL_RADIUS * 2.0f * PI * FREQ_EKF; // distance traveled by the left wheel in meters
+    float right_speed = encoder_right.getCountDiff() * ENCODER_PPR * WHEEL_RADIUS * 2.0f * PI * FREQ_EKF; // distance traveled by the right wheel in meters
+    float speed = (left_speed + right_speed) / 2.0f; // average speed of the two wheels
+    return speed;
+}
+
+float ROBOT::getOmegaFromEncoders() {
+    // calculate the angular velocity of the robot based on the encoders values
+    float left_speed = encoder_left.getCountDiff() * ENCODER_PPR * WHEEL_RADIUS * 2.0f * PI * FREQ_EKF; // distance traveled by the left wheel in meters
+    float right_speed = encoder_right.getCountDiff() * ENCODER_PPR * WHEEL_RADIUS * 2.0f * PI * FREQ_EKF; // distance traveled by the right wheel in meters
+    float omega = (right_speed - left_speed) / EKF_WHEEL_BASE; // difference in speed divided by wheel base
+    return omega;
+}
+
+void ROBOT::runEKF() {
+    // get the input control signals (motor commands) and the measurements (encoders and IMU)
+    float u[2] = {instance_->motors.getValue(MOTOR_RIGHT_idx), 
+                  instance_->motors.getValue(MOTOR_LEFT_idx)};
+    float z[5] = {instance_->getSpeedFromEncoders(), 
+                  instance_->getOmegaFromEncoders(), 
+                  instance_->imu.gyrZ() * (M_PI / 180.0f), 
+                  instance_->imu.accX() * 9.81f, 
+                  instance_->imu.accY() * 9.81f};
+    // run EKF prediction and update
+    instance_->EKF.predict(u);
+    instance_->EKF.update(z, u);
 }
 
 void ROBOT::routine(void *param){
@@ -298,20 +329,63 @@ void ROBOT::routine(void *param){
     }
 }
 
-// Adapter para callback estático de recebimento.
-void ROBOT::handleReceiveStatic(const uint8_t* mac, const uint8_t* incomingData, int len) {
-    // verify if the queue is created
-    if (instance_->receveivedDataQueue == nullptr) {
-        ROBOT::logger.insert_log(logType::ERRO, "Receive callback called but queue is not initialized");
-        return;
+bool ROBOT::init() {
+    // avoid initializing more than once
+    if (initialized)    
+        return true;
+
+    // start serial communication for debuggind when the espnow is not working
+	// using USB CDC communication, the baud rate is not relevant
+	Serial.begin(BAUDRATE); 
+
+    // configure the pins (OUTPUT, INPUT, etc) and the i2c communication
+    if (!configurePins())
+        return false;
+
+    // initialize the logger
+	logger.begin();
+
+    // create the queue for the received data from the ESP-NOW
+    receveivedDataQueue = xQueueCreate(10, sizeof(message));
+    if (receveivedDataQueue == nullptr) {
+        ROBOT::logger.insert_log(logType::ERRO, "Failed to create receive queue");
+        return false;
     }
 
-    // add the buffer to the queue to be processed in the parallel processing
-    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-    xQueueSendFromISR(instance_->receveivedDataQueue, incomingData, &xHigherPriorityTaskWoken);
-}
+    // configure WiFi and ESP-NOW before any send attempts
+    if (!configureCommunication())
+        return false;
+        
+    // configure motor (init the channel PWM and set the initial state)
+    motor_left.init();
+    motor_right.init();
 
-// Adapter para callback estático de envio.
-void ROBOT::handleSendStatic(const uint8_t* mac, esp_now_send_status_t status) {
-    // Currently, we do not have a send callback set up, but this is where you would handle it if needed.
+    // configure the encoders
+    if (!encoder_left.init()) {
+        ROBOT::logger.insert_log(logType::ERRO, "Failed to initialize left encoder");
+        return false;
+    }
+    if (!encoder_right.init()) {
+        ROBOT::logger.insert_log(logType::ERRO, "Failed to initialize right encoder");
+        return false;
+    }
+
+    // configure the imu
+    if (!imu.begin()) {
+        ROBOT::logger.insert_log(logType::ERRO, "Failed to initialize IMU");
+        return false;
+    }
+
+    // set time for reset the flags signals
+    setTimeLimit();
+
+    // init the EKF
+    initEKF();
+
+    // log message 
+	ROBOT::logger.insert_log(logType::INFO, "Welcome! the car is starting...");
+
+    // return true if everything is ok
+    initialized = true;
+    return true;
 }
