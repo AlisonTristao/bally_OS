@@ -29,9 +29,6 @@ uint8_t triggerVirtualButton(uint8_t button) {
     ROBOT::buttons.setFlag(button);
     // Log the action
     ROBOT::logger.insert_logf(logType::INFO, "button {%d} virtually triggered", button);
-    // The duration is controlled by the flags system (checkFlagsDuration)
-    // If you want to force the time, you can implement a timer/task to clear the flag after time_ms
-
     return RESULT_OK;
 }
 
@@ -153,10 +150,6 @@ bool start_shell_wrappers() {
     ROBOT::shell.add(reset_robot, "reset", "Reset the robot", "robot");
     ROBOT::shell.add(set_pwm, "set_pwm", "Set PWM value for a motor (0 for left, 1 for right)", "robot");
     ROBOT::shell.add(set_pwm_pair, "set_pwm_pair", "Set PWM values for both motors at once", "robot");
-
-    #if defined(LOG_ALL) || defined(LOG_INFO)
-        ROBOT::logger.insert_log(logType::INFO, "Shell started");
-    #endif
     return true;
 }
 

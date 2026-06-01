@@ -76,8 +76,8 @@
 // -------------------- Encoders --------------------
 #define ENC_A0          21
 #define ENC_A1          47
-#define ENC_B0          20
-#define ENC_B1          19
+#define ENC_B0          45
+#define ENC_B1          46
 
 // -------------------- Buttons --------------------
 #define BTN1            1

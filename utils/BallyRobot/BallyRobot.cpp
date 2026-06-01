@@ -2,6 +2,10 @@
 #include <Arduino.h>
 #include <Settings.h>
 
+// ==============================================================================
+// STATIC MEMBER INITIALIZATION
+// ==============================================================================
+
 // active instance of the robot class
 ROBOT* ROBOT::instance_ = nullptr;
 
@@ -19,20 +23,32 @@ Control ROBOT::control;
 TinyShell ROBOT::shell;
 StateMachine ROBOT::machine(NONE, NULL, NULL);
 
-void readMacAddress(){
-    // logger the mac address
+// ==============================================================================
+// HELPER FUNCTIONS
+// ==============================================================================
+
+static void readMacAddress() {
     uint8_t baseMac[6];
     esp_err_t ret = esp_wifi_get_mac(WIFI_IF_STA, baseMac);
-    Serial.print("MAC Address: ");
-    Serial.printf("%02X:%02X:%02X:%02X:%02X:%02X\n", baseMac[0], baseMac[1], baseMac[2], baseMac[3], baseMac[4], baseMac[5]);
     if (ret == ESP_OK) {
-        ROBOT::logger.insert_log(logType::INFO, ("MAC Address: " + String(baseMac[0], HEX) + ":" + String(baseMac[1], HEX) + ":" + String(baseMac[2], HEX) + ":" + String(baseMac[3], HEX) + ":" + String(baseMac[4], HEX) + ":" + String(baseMac[5], HEX)).c_str());
+        char macStr[18];
+        snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X", 
+                 baseMac[0], baseMac[1], baseMac[2], baseMac[3], baseMac[4], baseMac[5]);
+        Serial.print("MAC Address: ");
+        Serial.println(macStr);
+        ROBOT::logger.insert_logf(logType::INFO, "MAC Address: %s", macStr);
     } else {
         ROBOT::logger.insert_log(logType::ERRO, "Failed to read MAC address");
     }
 }
 
+// ==============================================================================
+// HARDWARE CONFIGURATION
+// ==============================================================================
+
 void ROBOT::configure_interruptions(void *param){
+    (void)param; // Suppress unused parameter warning
+
     // set the button interruptions
     attachInterruptArg(digitalPinToInterrupt(BIT_0), Flags_in::isr, &btnArgs[0], FALLING);
     attachInterruptArg(digitalPinToInterrupt(BIT_1), Flags_in::isr, &btnArgs[1], FALLING);
@@ -44,14 +60,7 @@ void ROBOT::configure_interruptions(void *param){
 }
 
 bool ROBOT::configurePins() {
-    // array of leds
-    /*pinMode(YELLOW, OUTPUT);
-    pinMode(RED, OUTPUT);
-    pinMode(BLUE, OUTPUT);
-    pinMode(GREEN, OUTPUT);
-    pinMode(UNK0, OUTPUT);
-    pinMode(UNK1, OUTPUT);*/
-
+    // RGB LED
     pinMode(LED_RGB_PIN, OUTPUT);
 
     // H bridge
@@ -72,7 +81,7 @@ bool ROBOT::configurePins() {
     pinMode(RIGHT, INPUT);
 
     // Encoders
-    /*pinMode(ENC_A0, INPUT);
+    pinMode(ENC_A0, INPUT);
     pinMode(ENC_A1, INPUT);
     pinMode(ENC_B0, INPUT);
     pinMode(ENC_B1, INPUT);
@@ -80,23 +89,8 @@ bool ROBOT::configurePins() {
     // Buzzer
     pinMode(BZR, OUTPUT);
 
-    // Multiplex
-    pinMode(SIG, INPUT);
-    pinMode(C0, OUTPUT);
-    pinMode(C1, OUTPUT);
-    pinMode(C2, OUTPUT);
-    pinMode(C3, OUTPUT);
-
-    // Bat
-    pinMode(BAT, INPUT);
-
     // i2c communication
-    bool i2c = Wire.begin(SDA, SCL);
-    
-    // all pins configured
-    return i2c;*/
-
-    return true;
+    return Wire.begin(SDA, SCL);
 }
 
 bool ROBOT::configureCommunication() {
@@ -153,6 +147,10 @@ bool ROBOT::configureCommunication() {
     return true;
 }
 
+// ==============================================================================
+// CONTROL & LOGIC
+// ==============================================================================
+
 void ROBOT::setTimeLimit() {
     // set the time limit for the flags, to reset them after a certain time
     buttons.setTimeLimit(DELAY_FLAGS);
@@ -172,17 +170,16 @@ void ROBOT::setOutputs() {
     ROBOT::motor_left.applyPWM(ROBOT::motors.getValue(MOTOR_LEFT_idx));
     ROBOT::motor_right.applyPWM(ROBOT::motors.getValue(MOTOR_RIGHT_idx));
 
-    // set the leds based on the flags
-    // ainda nao existe leds
+    // LEDs implementation pending
 }
 
 void ROBOT::executeCommandFromQueue() {
     // check if there is a message in the queue, if not, return
-    if(uxQueueMessagesWaiting(instance_->receveivedDataQueue) == 0) 
+    if(uxQueueMessagesWaiting(instance_->receivedDataQueue) == 0) 
         return;
     message receivedMessage;
     // check if there is a message in the queue
-    if (xQueueReceive(receveivedDataQueue, &receivedMessage, 0) == pdTRUE) {
+    if (xQueueReceive(receivedDataQueue, &receivedMessage, 0) == pdTRUE) {
         // convert the message to a string
         String command(receivedMessage.content.text);
         // execute the command and log the result
@@ -191,8 +188,8 @@ void ROBOT::executeCommandFromQueue() {
 }
 
 void ROBOT::executeCommand(const char* command) const {
-    // execute the command in the shell and get the result
-    uint8_t result = shell.run_command_line(command);
+    // execute the command in the shell
+    shell.run_command_line(command);
 }
 
 void ROBOT::checkStateMachine() {
@@ -205,23 +202,37 @@ void ROBOT::checkStateMachine() {
     }   
 }
 
+// ==============================================================================
+// COMMUNICATION CALLBACKS
+// ==============================================================================
+
 // Adapter para callback estático de recebimento.
 void ROBOT::handleReceiveStatic(const uint8_t* mac, const uint8_t* incomingData, int len) {
+    (void)mac;
+    (void)len;
+
     // verify if the queue is created
-    if (instance_->receveivedDataQueue == nullptr) {
+    if (instance_->receivedDataQueue == nullptr) {
         ROBOT::logger.insert_log(logType::ERRO, "Receive callback called but queue is not initialized");
         return;
     }
 
     // add the buffer to the queue to be processed in the parallel processing
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-    xQueueSendFromISR(instance_->receveivedDataQueue, incomingData, &xHigherPriorityTaskWoken);
+    xQueueSendFromISR(instance_->receivedDataQueue, incomingData, &xHigherPriorityTaskWoken);
 }
 
 // Adapter para callback estático de envio.
 void ROBOT::handleSendStatic(const uint8_t* mac, esp_now_send_status_t status) {
+    (void)mac;
+    (void)status;
+
     // Currently, we do not have a send callback set up, but this is where you would handle it if needed.
 }
+
+// ==============================================================================
+// EKF & SENSORS
+// ==============================================================================
 
 void ROBOT::initEKF() {
     float x0[3] = {0.0f, 0.0f, 0.0f};
@@ -277,7 +288,13 @@ void ROBOT::runEKF() {
     instance_->EKF.update(z, u);
 }
 
+// ==============================================================================
+// MAIN TASKS & INITIALIZATION
+// ==============================================================================
+
 void ROBOT::routine(void *param){
+    (void)param; // Suppress unused parameter warning
+
     // if the robot is not initialized, we cannot run the routine
     while (!instance_->initialized)
         vTaskDelay(100/portTICK_PERIOD_MS);
@@ -290,9 +307,7 @@ void ROBOT::routine(void *param){
     // main loop of the parallel processing
     while(true) {	
         // logger print live
-        #ifdef LOG_VERBOSE
-            ROBOT::logger.flush_logs();
-        #endif
+        ROBOT::logger.flush_logs();
 
         // execute the commands from the queue
         instance_->executeCommandFromQueue();
@@ -327,9 +342,12 @@ bool ROBOT::init() {
     // initialize the logger
 	logger.begin();
 
+    // initialize the shell
+    shell.begin();
+
     // create the queue for the received data from the ESP-NOW
-    receveivedDataQueue = xQueueCreate(10, sizeof(message));
-    if (receveivedDataQueue == nullptr) {
+    receivedDataQueue = xQueueCreate(10, sizeof(message));
+    if (receivedDataQueue == nullptr) {
         ROBOT::logger.insert_log(logType::ERRO, "Failed to create receive queue");
         return false;
     }

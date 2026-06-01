@@ -46,13 +46,9 @@ ROBOT robot;
 
 void setup() {
 	// init static objects and espnow settings
-	if(!robot.init()) {
-		for (uint8_t i = 0; i < 10; i++) {
+	if(!robot.init())
+		while(true)
 			Serial.println("Failed to initialize the robot");
-			delay(1000); // wait 10s for the user to see the message before restarting
-		}	
-		ESP.restart(); // there nothing we can do...
-	}
 
 	// define the callbacks for the logger
 	robot.logger.set_send_callback([](const uint8_t *data, size_t len) {
