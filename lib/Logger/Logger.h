@@ -21,7 +21,15 @@ public:
 
     // initialize metods
     Logger();
-    ~Logger();
+    ~Logger() {
+        // delete the mutex
+        if (mutex_ == nullptr)
+            return; 
+        vSemaphoreDelete(mutex_);
+        mutex_ = nullptr;
+    };
+    Logger(const Logger&) = delete;
+    Logger& operator=(const Logger&) = delete;
     void begin();
 
     // acess methods for the logger

@@ -39,7 +39,13 @@ class StateMachine{
          * @param next_state: the function to verify the next state
          */
         StateMachine(stateName state, stateName (*action)(), stateName (*next_state)(uint8_t buttons));
-        ~StateMachine(){};
+        ~StateMachine(){
+            // delete the mutex
+            if (transitionMutex_ == nullptr)
+                return;
+            vSemaphoreDelete(transitionMutex_);
+            transitionMutex_ = nullptr;
+        };
 
         /**
          * @brief get the value of the state

@@ -10,13 +10,6 @@ Logger::Logger()
     mutex_ = nullptr;
 }
 
-Logger::~Logger() {
-    if (mutex_ != nullptr) {
-        vSemaphoreDelete(mutex_);
-        mutex_ = nullptr;
-    }
-}
-
 void Logger::begin() {
     // verifiy if the logger is already initialized to avoid inserting duplicate logs and creating multiple mutexes
     if (initialized_) return;

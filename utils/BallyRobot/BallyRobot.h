@@ -41,7 +41,13 @@ public:
     }
 
     // destructor, copy etc
-    virtual ~ROBOT() {};
+    virtual ~ROBOT() {
+        // delete the queue
+        if (receivedDataQueue == nullptr)
+            return;
+        vQueueDelete(receivedDataQueue);
+        receivedDataQueue = nullptr;
+    };
     ROBOT(const ROBOT&) = delete;
     ROBOT& operator=(const ROBOT&) = delete;
 
