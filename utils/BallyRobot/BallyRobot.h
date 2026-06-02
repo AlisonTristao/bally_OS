@@ -80,12 +80,7 @@ private:
                 buttons("Buttons"),
                 sideSensors("Side Sensors"),
                 leds("LEDs"),
-                motors("Motors"),
-                btnArgs{{&buttons, BTN1_idx},
-                        {&buttons, BTN2_idx},
-                        {&buttons, BTN3_idx}},
-                sideArgs{{&sideSensors, SENSOR_LEFT_idx},
-                         {&sideSensors, SENSOR_RIGHT_idx}}
+                motors("Motors")
                 //imu(Wire, 0x68), 
                 {
         // save the instance of the robot class to be used in the static functions
@@ -105,8 +100,6 @@ private:
     Flags_in sideSensors;
     Flags_out leds;
     Flags_pwm motors;
-    FlagsArg btnArgs[3];
-    FlagsArg sideArgs[2];
 
     // save a instance of the ROBOT class to be used in the static functions
     static ROBOT* instance_;

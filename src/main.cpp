@@ -37,6 +37,12 @@
 // robot instante
 ROBOT& robot = ROBOT::getInstance();
 
+// monitor to report system stats
+#ifdef ENABLE_SYSTEM_MONITOR
+    #include <SystemMonitor.h>
+    SystemMonitor monitor;
+#endif
+
 // main tag for logging
 static const char* TAG = "ROBOT_MAIN";
 
@@ -117,6 +123,31 @@ extern "C" void app_main(void) {
         APP_CPU_NUM 
     );
 
+    // init the system monitor to report the system stats in the logs
+    #ifdef ENABLE_SYSTEM_MONITOR
+        monitor.begin();
+        monitor.setCallback([](const std::string& data) {
+            if (!data.empty())
+                robot.logger.insert_log(logType::DEBG, data.c_str());
+        });
+
+        // init the task to report the system stats periodically, every 5 seconds
+        xTaskCreatePinnedToCore(
+            [](void* param) {
+                SystemMonitor* monitor = static_cast<SystemMonitor*>(param);
+                while (true) {
+                    monitor->report();
+                    vTaskDelay(pdMS_TO_TICKS(SYSMONITOR_FREQ_MS)); // report every SYSMONITOR_FREQ_MS milliseconds
+                }
+            },
+            "system_monitor",
+            4*1024, // 4kb
+            &monitor,
+            1,
+            NULL,
+            APP_CPU_NUM
+        );
+    #endif
     
     // main loop focused on running the state machine function, 
     // the parallel processing is responsible for the rest

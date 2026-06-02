@@ -87,21 +87,32 @@ uint8_t testPacket() {
 void ROBOT::configure_interruptions(void *param){
     (void)param; // Suppress unused parameter warning
 
-    // Configura o tipo de interrupção (FALLING/RISING) e atrela a função ISR
+    // set the interrupt type for the buttons and side sensors, 
+    // and add the corresponding ISR handlers to set the flags when the interrupts are triggered
     gpio_set_intr_type((gpio_num_t)BIT_0, GPIO_INTR_NEGEDGE); // FALLING
-    gpio_isr_handler_add((gpio_num_t)BIT_0, Flags_in::isr, &instance_->btnArgs[0]);
+    gpio_isr_handler_add((gpio_num_t)BIT_0, [](void* arg) {
+        instance_->buttons.setFlag(BIT_0);
+    }, nullptr);
 
     gpio_set_intr_type((gpio_num_t)BIT_1, GPIO_INTR_NEGEDGE);
-    gpio_isr_handler_add((gpio_num_t)BIT_1, Flags_in::isr, &instance_->btnArgs[1]);
+    gpio_isr_handler_add((gpio_num_t)BIT_1, [](void* arg) {
+        instance_->buttons.setFlag(BIT_1);
+    }, nullptr);
 
     gpio_set_intr_type((gpio_num_t)BIT_2, GPIO_INTR_NEGEDGE);
-    gpio_isr_handler_add((gpio_num_t)BIT_2, Flags_in::isr, &instance_->btnArgs[2]);
+    gpio_isr_handler_add((gpio_num_t)BIT_2, [](void* arg) {
+        instance_->buttons.setFlag(BIT_2);
+    }, nullptr);
 
     gpio_set_intr_type((gpio_num_t)LEFT, GPIO_INTR_POSEDGE); // RISING
-    gpio_isr_handler_add((gpio_num_t)LEFT, Flags_in::isr, &instance_->sideArgs[0]);
+    gpio_isr_handler_add((gpio_num_t)LEFT, [](void* arg) {
+        instance_->sideSensors.setFlag(BIT_0);
+    }, nullptr);
 
     gpio_set_intr_type((gpio_num_t)RIGHT, GPIO_INTR_POSEDGE);
-    gpio_isr_handler_add((gpio_num_t)RIGHT, Flags_in::isr, &instance_->sideArgs[1]);
+    gpio_isr_handler_add((gpio_num_t)RIGHT, [](void* arg) {
+        instance_->sideSensors.setFlag(BIT_1);
+    }, nullptr);
 
     vTaskDelete(NULL);
 }

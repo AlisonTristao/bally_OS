@@ -75,8 +75,6 @@ public:
     // Constructor with optional debug name
     Flags_in(const std::string& name = "") : FlagsBase(name) {}        
     virtual ~Flags_in() {};
-    // Static ISR required for attachInterruptArg
-    static void isr(void* arg);
     // Sets a specific flag from an ISR
     void setFlag(uint8_t index);
     // Sets time limit in milliseconds
@@ -109,12 +107,6 @@ public:
     int16_t getValue(uint8_t index);
 protected:
     int16_t pwmValues[8] = {0, 0, 0, 0, 0, 0, 0, 0}; // stores PWM values per channel
-};
-
-// used to pass the object and index to the ISR
-struct FlagsArg {
-    Flags_in* obj;
-    uint8_t index;
 };
 
 #endif // FLAGS_H

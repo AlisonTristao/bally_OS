@@ -36,15 +36,6 @@ void Flags_in::setTimeLimit(uint32_t time) {
         timeLimit[i] = time;
 }
 
-void Flags_in::isr(void* arg) {
-    FlagsArg* data = static_cast<FlagsArg*>(arg);
-
-    if (data == nullptr || data->obj == nullptr)
-        return;
-
-    data->obj->handleUpdate(data->index);
-}
-
 void Flags_in::setFlag(uint8_t index) {
     if (!isValidIndex(index))
         return;
