@@ -309,14 +309,14 @@ void ROBOT::initEKF() {
 }
 
 float ROBOT::getSpeedFromEncoders() {
-    float left_speed = encoder_left.getCountDiff() * ENCODER_PPR * WHEEL_RADIUS * 2.0f * PI * FREQ_EKF;
-    float right_speed = encoder_right.getCountDiff() * ENCODER_PPR * WHEEL_RADIUS * 2.0f * PI * FREQ_EKF;
+    float left_speed = encoder_left.getCountDiff()/ENCODER_PPR * WHEEL_RADIUS * 2.0f * PI * FREQ_EKF;
+    float right_speed = encoder_right.getCountDiff()/ENCODER_PPR * WHEEL_RADIUS * 2.0f * PI * FREQ_EKF;
     return (left_speed + right_speed) / 2.0f;
 }
 
 float ROBOT::getOmegaFromEncoders() {
-    float left_speed = encoder_left.getCountDiff() * ENCODER_PPR * WHEEL_RADIUS * 2.0f * PI * FREQ_EKF;
-    float right_speed = encoder_right.getCountDiff() * ENCODER_PPR * WHEEL_RADIUS * 2.0f * PI * FREQ_EKF;
+    float left_speed = encoder_left.getCountDiff()/ENCODER_PPR * WHEEL_RADIUS * 2.0f * PI * FREQ_EKF;
+    float right_speed = encoder_right.getCountDiff()/ENCODER_PPR * WHEEL_RADIUS * 2.0f * PI * FREQ_EKF;
     return (right_speed - left_speed) / EKF_WHEEL_BASE;
 }
 
