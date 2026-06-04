@@ -1,9 +1,15 @@
-# =========================================================
-# Configuracoes Customizadas do Projeto
-# =========================================================
-
-# Habilita os recursos avançados de rastreamento do FreeRTOS
+# Configurações do FreeRTOS (que já tínhamos feito)
 CONFIG_FREERTOS_USE_TRACE_FACILITY=y
-
-# Habilita o timer de hardware para contar os ciclos de CPU
 CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
+
+# Habilita o suporte à RAM externa
+CONFIG_SPIRAM=y
+
+# Inicializa a PSRAM automaticamente durante o boot
+CONFIG_SPIRAM_BOOT_INIT=y
+
+# Força o modo Octal (Exclusivo para a sua placa N16R8)
+CONFIG_SPIRAM_MODE_OCT=y
+
+# Protege a RAM interna: alocações menores que 4KB não vão para a PSRAM
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096

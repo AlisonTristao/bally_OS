@@ -119,9 +119,9 @@ void ROBOT::configure_interruptions(void *param){
 
 bool ROBOT::configurePins() {
     const gpio_num_t out_pins[] = {
-        (gpio_num_t)LED_RGB_PIN, (gpio_num_t)AIN1, (gpio_num_t)AIN2, 
+        (gpio_num_t)LED_RGB_PIN, /*(gpio_num_t)AIN1, (gpio_num_t)AIN2,
         (gpio_num_t)BIN1, (gpio_num_t)BIN2, (gpio_num_t)PWM_A, 
-        (gpio_num_t)PWM_B//, (gpio_num_t)BZR
+        (gpio_num_t)PWM_B//, (gpio_num_t)BZR*/
     };
     for(auto pin : out_pins) {
         gpio_reset_pin(pin);
@@ -228,8 +228,8 @@ void ROBOT::resetFlags() {
 }
 
 void ROBOT::setOutputs() {
-    motor_left.applyPWM(motors.getValue(MOTOR_LEFT_idx));
-    motor_right.applyPWM(motors.getValue(MOTOR_RIGHT_idx));
+    //motor_left.applyPWM(motors.getValue(MOTOR_LEFT_idx));
+    //motor_right.applyPWM(motors.getValue(MOTOR_RIGHT_idx));
 }
 
 void ROBOT::executeCommandFromQueue() {
@@ -418,8 +418,8 @@ bool ROBOT::init() {
     if (!configureCommunication())
         return false;
         
-    motor_left.init();
-    motor_right.init();
+    //motor_left.init();
+    //motor_right.init();
 
     if (!encoder_left.init()) {
         ROBOT::logger.insert_log(logType::ERRO, "Failed to initialize left encoder");

@@ -58,18 +58,32 @@ std::string SystemMonitor::getUptime() {
 }
 
 std::string SystemMonitor::getMemoryStats() {
-    char buffer[128];
+    char buffer[256];
     uint32_t free_heap = esp_get_free_heap_size();
     uint32_t internal_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     uint32_t psram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
 
-    // clean alignment without the min free variable
+    // helper lambda to format to kb or mb automatically
+    auto format_mem = [](uint32_t bytes) -> std::string {
+        float kb = bytes / 1024.0f;
+        if (kb >= 1024.0f) {
+            char b[32];
+            snprintf(b, sizeof(b), "%7.2f mb", kb / 1024.0f);
+            return std::string(b);
+        } else {
+            char b[32];
+            snprintf(b, sizeof(b), "%7.2f kb", kb);
+            return std::string(b);
+        }
+    };
+
     snprintf(buffer, sizeof(buffer), 
-             "free ram    : %7.2f kb\n"
-             "internal ram: %7.2f kb\n"
-             "psram       : %7.2f kb\n", 
-             free_heap / 1024.0f, 
-             internal_free / 1024.0f, psram_free / 1024.0f);
+             "free ram    : %s\n"
+             "internal ram: %s\n"
+             "psram       : %s\n", 
+             format_mem(free_heap).c_str(), 
+             format_mem(internal_free).c_str(), 
+             format_mem(psram_free).c_str());
     
     return std::string(buffer);
 }

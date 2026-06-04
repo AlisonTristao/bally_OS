@@ -11,8 +11,8 @@
 #define SAMPLE_MICROS   10000   // 10ms 100Hz - EKF sample rate
 #define SAMPLE_MILLIS   (SAMPLE_MICROS / 1000) // sample rate in ms
 #define FREQ_EKF        (1.0f / (SAMPLE_MICROS * 0.000001f))
-#define SYSMONITOR_FREQ_MS 5000    // 5000ms 0.2Hz - system monitor report frequency
-#define WDOG_TIMEOUT_MS 10      // 10ms - watchdog timeout for the main loop, this is important to reset the robot in case of a deadlock or infinite loop
+#define SYSMON_FREQ_MS  5000    // 5000ms 0.2Hz - system monitor report frequency
+#define WDOG_TIMEOUT_MS 1       // 1ms - watchdog timeout for the main loop, this is important to reset the robot in case of a deadlock or infinite loop
 #define DELAY_FLAGS     250     // 250ms - time to reset flags and check state changes
 #define CONTROL_TIME_MS 1
 
@@ -63,12 +63,12 @@
 #define UNK1            46*/
 
 // -------------------- H Bridge --------------------
-#define PWM_A           35
+/*#define PWM_A           35
 #define AIN2            36
 #define AIN1            37
 #define BIN1            38
 #define BIN2            39
-#define PWM_B           40
+#define PWM_B           40*/
 
 // -------------------- RGB LED (ESP32-S3 SPI) --------------------
 #define LED_RGB_PIN     48

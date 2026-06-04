@@ -72,8 +72,8 @@ private:
     // default constructor
     ROBOT() :   machine(NONE, NULL, NULL),
                 array_sensor(sensor_pins),
-                motor_left(AIN1, AIN2, CH0, PWM_A), 
-                motor_right(BIN1, BIN2, CH1, PWM_B),
+                //motor_left(AIN1, AIN2, CH0, PWM_A), 
+                //motor_right(BIN1, BIN2, CH1, PWM_B),
                 encoder_left(ENC_A0, ENC_A1), 
                 encoder_right(ENC_B0, ENC_B1),
                 EKF(),
@@ -88,8 +88,8 @@ private:
     }
 
     // private peripheral objects
-    HBridge motor_left;
-    HBridge motor_right;
+    //HBridge motor_left;
+    //HBridge motor_right;
     Encoder encoder_left;
     Encoder encoder_right;
     //ICM42688 imu;
