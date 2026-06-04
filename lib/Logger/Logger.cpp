@@ -8,8 +8,15 @@
 Logger::Logger()
     : send_callback_(defaultSendCallback) {
     mutex_ = nullptr;
-    // alocate the messagen inside the psram
-    messages = (message*) heap_caps_malloc(sizeof(message) * MAX_PACKETS_IN_PSRAM, MALLOC_CAP_SPIRAM);
+    // Alocação com segurança
+    size_t total_size = sizeof(message) * MAX_PACKETS_IN_PSRAM;
+    messages = (message*) heap_caps_malloc(total_size, MALLOC_CAP_SPIRAM);
+
+    // Checagem vital!
+    if (messages == nullptr) {
+        // Se falhou, logue um erro crítico antes que o sistema trave
+        printf("CRITICAL: Failed to allocate %d bytes in PSRAM!\n", total_size);
+    }
 }
 
 void Logger::begin() {
@@ -175,39 +182,39 @@ void Logger::reset_loop_counter() {
 }
 
 void Logger::flush_logs() {
-    // temporary buffer to hold the messages to be sent, this allows us to release the mutex before sending the messages,
-    // which is important to avoid blocking the logger when sending messages, 
-    // especially if the send callback is slow or if there are many messages to send
-    static message local_messages[MAX_PACKETS_IN_PSRAM];
+    // define chunk size to balance mutex locking and stack usage
+    // this is used to free the mutex to other tasks while empty the array
+    const uint32_t chunk_size = BLOCK_SIZE;  // size multiple os 2 for better performance
+    message temp_buffer[chunk_size]; // local buffer on stack to copy messages safely 
 
-    uint32_t local_count = 0;
+    // loop until all messages are sent
+    for (uint32_t chunk = 0; chunk < MAX_CHUNKS_PER_FLUSH; ++chunk) {
+        uint32_t to_copy = 0;
 
-    // wait for the mutex to safely access the messages buffer and copy the messages to the local buffer
-    if (!wait_for_mutex()) return;
+        // lock mutex only to copy the block of messages
+        if (!wait_for_mutex()) return;
 
-    if (pending_count == 0) {
+        // check if there are any messages to process
+        if (pending_count == 0) {
+            free_mutex();
+            break; // exit loop if buffer is empty
+        }
+
+        // determine how many messages to copy in this iteration
+        to_copy = (pending_count < chunk_size) ? pending_count : chunk_size;
+
+        // copy block from psram to local stack buffer
+        for (uint32_t i = 0; i < to_copy; ++i) {
+            temp_buffer[i] = messages[read_index];
+            read_index = (read_index + 1) % MAX_PACKETS_IN_PSRAM;
+        }
+        pending_count -= to_copy;
+
+        // release mutex immediately after copy to allow other tasks to insert logs
         free_mutex();
-        return;
-    }
 
-    uint32_t idx = read_index;
-
-    // copy the messages from the messages buffer to the local buffer
-    for (uint32_t i = 0; i < pending_count; ++i) {
-        local_messages[local_count++] = messages[idx];
-        idx = (idx + 1) % MAX_PACKETS_IN_PSRAM;
-    }
-
-    read_index = write_index;
-    pending_count = 0;
-
-    free_mutex();
-
-    // send the messages in the local buffer using the configured send callback
-    for (uint32_t i = 0; i < local_count; ++i) {
-        send_callback_(
-            reinterpret_cast<const uint8_t*>(&local_messages[i]),
-            sizeof(local_messages[i])
-        );
+        // send the block of messages
+        for (uint32_t i = 0; i < to_copy; ++i)
+            send_callback_(reinterpret_cast<const uint8_t*>(&temp_buffer[i]), sizeof(message));
     }
 }
