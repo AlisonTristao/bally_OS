@@ -1,0 +1,9 @@
+# =========================================================
+# Configuracoes Customizadas do Projeto
+# =========================================================
+
+# Habilita os recursos avançados de rastreamento do FreeRTOS
+CONFIG_FREERTOS_USE_TRACE_FACILITY=y
+
+# Habilita o timer de hardware para contar os ciclos de CPU
+CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
