@@ -60,6 +60,13 @@ public:
     */
     void flush_logs();
 
+    /**
+     * @brief Get the current write index of the logger's buffer. This is used for debugging purposes to track where the next log message will be written in the buffer.
+     * 
+     * @return The current write index of the logger's buffer.
+     */
+    uint32_t get_write_index() const { return write_index; }
+
 private:
     // private members for the logger
     message* messages; // stored in external psram
