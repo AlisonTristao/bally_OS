@@ -9,6 +9,7 @@
 #include <freertos/semphr.h>
 #include <SharedMessageTypes.h>
 #include <stdarg.h>
+#include "esp_attr.h"
 
 #ifndef SHARED_MESSAGE_TYPES_H
 #error "This library depends on SharedMessageTypes.h, to use the data structures and definitions for the log messages. "
@@ -61,7 +62,7 @@ public:
 
 private:
     // private members for the logger
-    message messages[MAX_PACKETS_IN_RAM] = {};
+    message* messages; // stored in external psram
     uint32_t write_index = 0;
     uint32_t read_index = 0;
     uint32_t pending_count = 0;

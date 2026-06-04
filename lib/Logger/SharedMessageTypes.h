@@ -13,7 +13,7 @@
 #define MAX_PACKET_SIZE         250 // if we change the transport protocol, we can increase this value
 #define PROTOCOL_OVERHEAD_SIZE  20
 #define MAX_CONTENT_SIZE        ((MAX_PACKET_SIZE - PROTOCOL_OVERHEAD_SIZE) -1) // -1 to ensure we have space for the null terminator
-#define MAX_PACKETS_IN_RAM      32   // limit for messages in memory - watch out for available ram limits
+#define MAX_PACKETS_IN_PSRAM    32   // limit for messages in memory - watch out for available ram limits
 #define LOGGER_MUTEX_TIMEOUT_MS 100  // time in ms to wait for the logger to be available - used to avoid deleting messages during printing
 
 // enum to define log types, categorizing sent messages

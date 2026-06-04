@@ -8,6 +8,8 @@
 Logger::Logger()
     : send_callback_(defaultSendCallback) {
     mutex_ = nullptr;
+    // alocate the messagen inside the psram
+    messages = (message*) heap_caps_malloc(sizeof(message) * MAX_PACKETS_IN_PSRAM, MALLOC_CAP_SPIRAM);
 }
 
 void Logger::begin() {
@@ -152,12 +154,12 @@ void Logger::insert_log_impl(const uint8_t* data, size_t len, logType type, uint
         // This is a simple checksum to verify the integrity of the message on the receiving end.
         m.checksum = calculate_checksum(m);
 
-        write_index = (write_index + 1) % MAX_PACKETS_IN_RAM;
+        write_index = (write_index + 1) % MAX_PACKETS_IN_PSRAM;
 
-        if (pending_count < MAX_PACKETS_IN_RAM) {
+        if (pending_count < MAX_PACKETS_IN_PSRAM) {
             pending_count++;
         } else {
-            read_index = (read_index + 1) % MAX_PACKETS_IN_RAM;
+            read_index = (read_index + 1) % MAX_PACKETS_IN_PSRAM;
         }
     }
 }
@@ -176,7 +178,7 @@ void Logger::flush_logs() {
     // temporary buffer to hold the messages to be sent, this allows us to release the mutex before sending the messages,
     // which is important to avoid blocking the logger when sending messages, 
     // especially if the send callback is slow or if there are many messages to send
-    static message local_messages[MAX_PACKETS_IN_RAM];
+    static message local_messages[MAX_PACKETS_IN_PSRAM];
 
     uint32_t local_count = 0;
 
@@ -193,7 +195,7 @@ void Logger::flush_logs() {
     // copy the messages from the messages buffer to the local buffer
     for (uint32_t i = 0; i < pending_count; ++i) {
         local_messages[local_count++] = messages[idx];
-        idx = (idx + 1) % MAX_PACKETS_IN_RAM;
+        idx = (idx + 1) % MAX_PACKETS_IN_PSRAM;
     }
 
     read_index = write_index;
