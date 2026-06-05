@@ -12,12 +12,14 @@
 
 // defines the callback type: receives a constant c++ string by reference
 using MonitorCallback = std::function<void(const std::string&)>;
+using GetLoggerIndexCallback = float (*)();
 
 class SystemMonitor {
 private:
     temperature_sensor_handle_t temp_sensor;
     bool is_initialized;
     MonitorCallback output_cb;
+    GetLoggerIndexCallback logger_index_cb;
 
     // variables for cpu delta calculation
     uint32_t last_total_runtime;
@@ -37,7 +39,8 @@ public:
     void begin();
     
     // registers the function that will consume and send the data
-    void setCallback(MonitorCallback cb);
+    void setOutputCallback(MonitorCallback cb);
+    void setLoggerCallback(GetLoggerIndexCallback cb);
 
     // system metrics
     float getCoreTemperature();

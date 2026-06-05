@@ -126,9 +126,12 @@ extern "C" void app_main(void) {
     // init the system monitor to report the system stats in the logs
     #ifdef ENABLE_SYSTEM_MONITOR
         monitor.begin();
-        monitor.setCallback([](const std::string& data) {
+        monitor.setOutputCallback([](const std::string& data) {
             if (!data.empty())
                 robot.logger.insert_log(logType::DEBG, data.c_str());
+        });
+        monitor.setLoggerCallback([]() {
+            return robot.logger.get_write_pct();
         });
 
         // init the task to report the system stats periodically, every 5 seconds

@@ -65,7 +65,7 @@ public:
      * 
      * @return The current write index of the logger's buffer.
      */
-    uint32_t get_write_index() const { return write_index; }
+    float get_write_pct() const { return (write_index * 100.0f) / MAX_PACKETS_IN_PSRAM; }
 
 private:
     // private members for the logger

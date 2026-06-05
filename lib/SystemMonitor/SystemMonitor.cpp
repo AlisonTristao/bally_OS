@@ -22,8 +22,12 @@ void SystemMonitor::begin() {
     is_initialized = true;
 }
 
-void SystemMonitor::setCallback(MonitorCallback cb) {
+void SystemMonitor::setOutputCallback(MonitorCallback cb) {
     output_cb = cb;
+}
+
+void SystemMonitor::setLoggerCallback(GetLoggerIndexCallback cb) {
+    logger_index_cb = cb;
 }
 
 void SystemMonitor::dispatch(const std::string& data) {
@@ -78,8 +82,8 @@ std::string SystemMonitor::getMemoryStats() {
     };
 
     snprintf(buffer, sizeof(buffer), 
-             "free ram    : %s\n"
-             "internal ram: %s\n"
+             "total ram   : %s\n"
+             "sram        : %s\n"
              "psram       : %s\n", 
              format_mem(free_heap).c_str(), 
              format_mem(internal_free).c_str(), 
@@ -164,20 +168,33 @@ std::string SystemMonitor::getFullReport() {
     std::string tasks_str = getTaskStats(); 
     
     std::string report = "";
-    char temp_buffer[192];
+    char core_buffer[192];
+    char logger_buffer[256];
+
+    // get the pct of logger using the cb
+    float write_pct = 0.0f;
+    if (logger_index_cb)
+        write_pct = static_cast<float>(logger_index_cb());
     
     // aligned to match perfectly with the 50 characters of the table
-    snprintf(temp_buffer, sizeof(temp_buffer), 
+    snprintf(core_buffer, sizeof(core_buffer), 
              "==================================================\n"
              "%s"
              "core temp   : %7.2f °C\n"
              "core 0 load : %7.2f %%\n"
              "core 1 load : %7.2f %%\n", 
              getUptime().c_str(), getCoreTemperature(), core0_load, core1_load);
+
+    snprintf(logger_buffer, sizeof(logger_buffer),
+             "--------------------------------------------------\n"
+             "Logger     : %7.2f%%\n"
+             "--------------------------------------------------\n",
+             write_pct);
     
-    report += temp_buffer;
+    report += core_buffer;
     report += getMemoryStats();
     report += tasks_str;
+    report += logger_buffer;
     report += "==================================================\n";
     
     return report;

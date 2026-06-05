@@ -48,6 +48,40 @@
 #define ACCEL_NOISE      0.5f    // IMU accel noise variance
 #define GYRO_NOISE       0.001f  // IMU gyro noise variance
 
+// -------------------- logger configuration --------------------
+// here we define the data structures and definitions for the log messages, 
+// that will be shared between the logger and the transport protocol (e.g., esp-now)
+
+// max espnow packet size -> 250bytes
+
+// protocol overhead: 
+//   4 bytes for timestamp 
+// + 1 byte for type 
+// + 2 byte for packet number 
+// + 2 byte for total packets 
+// + 1 byte for checksum 
+// + 4 byte para o length
+// = 14 bytes
+    
+// therefore, max message size is 250 - 14 = 236 bytes
+// but, to use a size that is a multiple of 4 for better memory alignment, we will use 230 bytes for the content
+// the N16R8 chip has 8mb of external psram, which is 8 * 1024 * 1024 = 8388608 bytes
+// if we use 250 bytes per message (including overhead), we can store up to 8388608 / 250 = 33554
+// but to be safe, we use 90% of the available memory for the logger, which gives us a limit of 30.200 
+// max packets in psram = 0.9 * 33554 = 30.200 -> round to 30000
+
+#define MAX_PACKET_SIZE         250   // if we change the transport protocol, we can increase this value
+#define PROTOCOL_OVERHEAD_SIZE  20    // overhead for the protocol, including timestamp, type, packet number, total packets and checksum
+#define MAX_CONTENT_SIZE        229   // -1 to ensure we have space for the null terminator
+#define MAX_PACKETS_IN_PSRAM    30000 // limit for messages in memory - watch out for available ram limits
+#define LOGGER_MUTEX_TIMEOUT_MS 100   // time in ms to wait for the logger to be available - used to avoid deleting messages during printing
+
+// to empty the array and free the mutex to other tasks, 
+// the code flush the array in chuncks, and to free the core to other tasks,
+// we limit a max chucks per flush
+#define MAX_CHUNKS_PER_FLUSH    10 // 10 chucks per flush 
+#define BLOCK_SIZE              16 // the chunck has 16 messages 
+
 // -------------------- Channels --------------------
 #define CH0             0
 #define CH1             1
