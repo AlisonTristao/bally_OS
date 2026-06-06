@@ -7,18 +7,21 @@
 // -> LOG_ERROR
 // -> LOG_DEBUG
 
-// timers
+// -------------------- Timers and delays --------------------
 #define SAMPLE_MICROS   10000   // 10ms 100Hz - EKF sample rate
 #define SAMPLE_MILLIS   (SAMPLE_MICROS / 1000) // sample rate in ms
 #define FREQ_EKF        (1.0f / (SAMPLE_MICROS * 0.000001f))
-#define SYSMON_FREQ_MS  5000    // 5000ms 0.2Hz - system monitor report frequency
-#define WDOG_TIMEOUT_MS 1       // 1ms - watchdog timeout for the main loop, this is important to reset the robot in case of a deadlock or infinite loop
+#define SYSMON_FREQ_MS  1000    // 1000ms 1Hz - system monitor report frequency
+#define WDOG_TIMEOUT_TK 1       // 1 tick - quantos loops do freRTOS demoramos para excecutar novamente a task
 #define DELAY_FLAGS     250     // 250ms - time to reset flags and check state changes
 #define CONTROL_TIME_MS 1
 
-// esp32 core
-#define PRIMARY_CORE    1       // void loop
-#define SECONDARY_CORE  0       // parallel processing
+// -------------------- Memory alias configuration --------------------
+#define M2KB             (2 * 1024) // 2KB for the stack of the tasks, to avoid stack overflow
+#define M4KB             (4 * 1024) // 4KB for the stack of the tasks, to avoid stack overflow
+#define M8KB             (8 * 1024) // 8KB for the stack of the tasks, to avoid stack overflow
+#define M16KB            (16 * 1024) // 16KB for the stack of the tasks, to avoid stack overflow
+#define M32KB            (32 * 1024) // 32KB for the stack of the tasks, to avoid stack overflow
 
 // -------------------- Array sensor configuration --------------------
 #define LEN_SENSOR      8       // number of sensors

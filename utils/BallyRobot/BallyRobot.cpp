@@ -84,39 +84,6 @@ uint8_t testPacket() {
 // HARDWARE CONFIGURATION
 // ==============================================================================
 
-void ROBOT::configure_interruptions(void *param){
-    (void)param; // Suppress unused parameter warning
-
-    // set the interrupt type for the buttons and side sensors, 
-    // and add the corresponding ISR handlers to set the flags when the interrupts are triggered
-    gpio_set_intr_type((gpio_num_t)BIT_0, GPIO_INTR_NEGEDGE); // FALLING
-    gpio_isr_handler_add((gpio_num_t)BIT_0, [](void* arg) {
-        instance_->buttons.setFlag(BIT_0);
-    }, nullptr);
-
-    gpio_set_intr_type((gpio_num_t)BIT_1, GPIO_INTR_NEGEDGE);
-    gpio_isr_handler_add((gpio_num_t)BIT_1, [](void* arg) {
-        instance_->buttons.setFlag(BIT_1);
-    }, nullptr);
-
-    gpio_set_intr_type((gpio_num_t)BIT_2, GPIO_INTR_NEGEDGE);
-    gpio_isr_handler_add((gpio_num_t)BIT_2, [](void* arg) {
-        instance_->buttons.setFlag(BIT_2);
-    }, nullptr);
-
-    gpio_set_intr_type((gpio_num_t)LEFT, GPIO_INTR_POSEDGE); // RISING
-    gpio_isr_handler_add((gpio_num_t)LEFT, [](void* arg) {
-        instance_->sideSensors.setFlag(BIT_0);
-    }, nullptr);
-
-    gpio_set_intr_type((gpio_num_t)RIGHT, GPIO_INTR_POSEDGE);
-    gpio_isr_handler_add((gpio_num_t)RIGHT, [](void* arg) {
-        instance_->sideSensors.setFlag(BIT_1);
-    }, nullptr);
-
-    vTaskDelete(NULL);
-}
-
 bool ROBOT::configurePins() {
     const gpio_num_t out_pins[] = {
         (gpio_num_t)LED_RGB_PIN, /*(gpio_num_t)AIN1, (gpio_num_t)AIN2,
@@ -230,22 +197,6 @@ void ROBOT::resetFlags() {
 void ROBOT::setOutputs() {
     //motor_left.applyPWM(motors.getValue(MOTOR_LEFT_idx));
     //motor_right.applyPWM(motors.getValue(MOTOR_RIGHT_idx));
-}
-
-void ROBOT::executeCommandFromQueue() {
-    if(uxQueueMessagesWaiting(instance_->receivedDataQueue) == 0) 
-        return;
-    
-    message receivedMessage;
-    if (xQueueReceive(receivedDataQueue, &receivedMessage, 0) == pdTRUE) {
-        // Substituída a classe String do Arduino pela std::string do C++
-        std::string command(receivedMessage.content.text);
-        executeCommand(command.c_str());
-    }
-}
-
-void ROBOT::executeCommand(const char* command) const {
-    instance_->shell.run_command_line(command);
 }
 
 void ROBOT::checkStateMachine() {
@@ -375,23 +326,94 @@ void ROBOT::startWrappers() {
 // MAIN TASKS & INITIALIZATION
 // ==============================================================================
 
+void ROBOT::configure_interruptions(void *param){
+    (void)param; // Suppress unused parameter warning
+
+    // set the interrupt type for the buttons and side sensors, 
+    // and add the corresponding ISR handlers to set the flags when the interrupts are triggered
+    gpio_set_intr_type((gpio_num_t)BIT_0, GPIO_INTR_NEGEDGE); // FALLING
+    gpio_isr_handler_add((gpio_num_t)BIT_0, [](void* arg) {
+        instance_->buttons.setFlag(BIT_0);
+    }, nullptr);
+
+    gpio_set_intr_type((gpio_num_t)BIT_1, GPIO_INTR_NEGEDGE);
+    gpio_isr_handler_add((gpio_num_t)BIT_1, [](void* arg) {
+        instance_->buttons.setFlag(BIT_1);
+    }, nullptr);
+
+    gpio_set_intr_type((gpio_num_t)BIT_2, GPIO_INTR_NEGEDGE);
+    gpio_isr_handler_add((gpio_num_t)BIT_2, [](void* arg) {
+        instance_->buttons.setFlag(BIT_2);
+    }, nullptr);
+
+    gpio_set_intr_type((gpio_num_t)LEFT, GPIO_INTR_POSEDGE); // RISING
+    gpio_isr_handler_add((gpio_num_t)LEFT, [](void* arg) {
+        instance_->sideSensors.setFlag(BIT_0);
+    }, nullptr);
+
+    gpio_set_intr_type((gpio_num_t)RIGHT, GPIO_INTR_POSEDGE);
+    gpio_isr_handler_add((gpio_num_t)RIGHT, [](void* arg) {
+        instance_->sideSensors.setFlag(BIT_1);
+    }, nullptr);
+
+    vTaskDelete(NULL);
+}
+
+void ROBOT::executeReceivedCommandFromQueue(void *param) {
+    (void)param; // Suppress unused parameter warning
+
+    while (instance_->receivedDataQueue == nullptr)
+        vTaskDelay(100 / portTICK_PERIOD_MS); // wait 
+
+    // log the task 
+    logger.insert_log(logType::INFO, "Shell task started and ready to receive commands");
+
+    // run the task 
+    while (true) {
+        // delay for wathdog timer and to allow other tasks to run
+        // in the begin of the loop to wait when no one command is received
+        vTaskDelay(WDOG_TIMEOUT_TK);
+
+        message receivedMessage;
+        if (xQueueReceive(instance_->receivedDataQueue, &receivedMessage, 0) != pdTRUE)
+            continue;
+        
+        // execute the command
+        instance_->shell.run_command_line(receivedMessage.content.text);
+    }
+}
+
+void ROBOT::runStateMachine(void *param) {
+    (void)param; // Suppress unused parameter warning
+
+    // log the task
+    logger.insert_log(logType::INFO, "State machine task started");
+
+    while (true) {
+        // run state machine
+        instance_->machine.run();
+		// need to add a small delay to avoid blocking the CPU and allow other tasks to run
+        vTaskDelay(WDOG_TIMEOUT_TK);
+    }
+}
+
 void ROBOT::routine(void *param){
     (void)param; 
 
     while (!instance_->initialized)
-        vTaskDelay(pdMS_TO_TICKS(100));
+        vTaskDelay((100));
 
     #if defined(LOG_ALL) || defined(LOG_INFO)
         ROBOT::logger.insert_log(logType::INFO, "Parallel processing initialized");
     #endif
 
+    // excute the loop to menage the robot
     while(true) {   
-        ROBOT::logger.flush_logs();
-        instance_->executeCommandFromQueue();
-        instance_->resetFlags();
-        instance_->setOutputs();
-        instance_->checkStateMachine();
-        vTaskDelay(pdMS_TO_TICKS(WDOG_TIMEOUT_MS));
+        ROBOT::logger.flush_logs();                 // send the logger messagens to output
+        instance_->resetFlags();                    // reset the flags - buttons, side sensors, pwm...
+        instance_->setOutputs();                    // set the output - leds, pwm...
+        instance_->checkStateMachine();             // cheg the next state of the state machine
+        vTaskDelay(WDOG_TIMEOUT_TK); // delay for wathdog timer and to allow other tasks to run
     }
 }
 

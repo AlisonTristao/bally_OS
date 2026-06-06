@@ -60,6 +60,12 @@ public:
     // configure the interruptions for the buttons and side sensors
     static void configure_interruptions(void *param);
 
+    // excute a command in the shell and return the result as string
+    static void executeReceivedCommandFromQueue(void *param);
+
+    // run the state machine main loop
+    static void runStateMachine(void *param);
+
     // run the EKF to estimate the state of the robot
     void runEKF();
 
@@ -118,12 +124,6 @@ private:
 
     // set the time limit for the flags, to reset them after a certain time
     void setTimeLimit();
-
-    // run received commands of the queue
-    void executeCommandFromQueue();
-
-    // exec a command in the shell and return the result as string
-    void executeCommand(const char* command) const;
 
     // set the outputs flags (leds and motors) to 0 after the time limit is reached
     void setOutputs();
