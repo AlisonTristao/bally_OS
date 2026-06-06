@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "esp_system.h"
 
 SystemMonitor::SystemMonitor() {
     temp_sensor = NULL;
@@ -15,7 +16,7 @@ SystemMonitor::SystemMonitor() {
 void SystemMonitor::begin() {
     if (is_initialized) return;
 
-    temperature_sensor_config_t temp_sensor_config = TEMPERATURE_SENSOR_CONFIG_DEFAULT(20, 100);
+    temperature_sensor_config_t temp_sensor_config = TEMPERATURE_SENSOR_CONFIG_DEFAULT(25, 55);
     temperature_sensor_install(&temp_sensor_config, &temp_sensor);
     temperature_sensor_enable(temp_sensor);
 
@@ -107,7 +108,7 @@ std::string SystemMonitor::getTaskStats() {
     last_total_runtime = total_runtime;
 
     // clean header with exactly 50 characters
-    std::string output = "-------------------------------------------------\n";
+    std::string output = "--------------------- tasks ---------------------\n";
     output +=            "task name        prio core      cpu   free stack\n";
     output +=            "-\n";
     
@@ -169,7 +170,7 @@ std::string SystemMonitor::getFullReport() {
     std::string tasks_str = getTaskStats(); 
     
     std::string report = "";
-    char core_buffer[256];
+    char core_buffer[512];
 
     // get the pct of logger using the cb
     float write_pct = 0.0f;
@@ -180,13 +181,17 @@ std::string SystemMonitor::getFullReport() {
     snprintf(core_buffer, sizeof(core_buffer), 
              "================= Monitor Stats =================\n"
              "%s"
+             "---------------------- CPU ----------------------\n"
              "tick hate   : %7d Hz\n"
+             "core hate   : %7d MHz\n"
              "core temp   : %7.2f °C\n"
              "core 0 load : %7.2f %%\n"
              "core 1 load : %7.2f %%\n"
+             "-------------------- Memory --------------------\n"
              "logger      : %7.2f %%\n", 
              getUptime().c_str(), 
              configTICK_RATE_HZ, 
+             CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ, 
              getCoreTemperature(), 
              core0_load, 
              core1_load,
