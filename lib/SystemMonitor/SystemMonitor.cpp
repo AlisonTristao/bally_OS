@@ -107,8 +107,9 @@ std::string SystemMonitor::getTaskStats() {
     last_total_runtime = total_runtime;
 
     // clean header with exactly 50 characters
-    std::string output = "task name        prio core      cpu   free stack\n";
-    output +=            "--------------------------------------------------\n";
+    std::string output = "-------------------------------------------------\n";
+    output +=            "task name        prio core      cpu   free stack\n";
+    output +=            "-\n";
     
     for (UBaseType_t i = 0; i < array_size; i++) {
         TaskHandle_t handle = status_array[i].xHandle;
@@ -141,9 +142,9 @@ std::string SystemMonitor::getTaskStats() {
         BaseType_t core_id = xTaskGetCoreID(handle);
         
         if (core_id == 0) {
-            snprintf(core_str, sizeof(core_str), "0");
+            snprintf(core_str, sizeof(core_str), "pro");
         } else if (core_id == 1) {
-            snprintf(core_str, sizeof(core_str), "1");
+            snprintf(core_str, sizeof(core_str), "app");
         } else {
             snprintf(core_str, sizeof(core_str), "Any"); // tasks with no fixed core
         }
@@ -168,8 +169,7 @@ std::string SystemMonitor::getFullReport() {
     std::string tasks_str = getTaskStats(); 
     
     std::string report = "";
-    char core_buffer[192];
-    char logger_buffer[256];
+    char core_buffer[256];
 
     // get the pct of logger using the cb
     float write_pct = 0.0f;
@@ -178,24 +178,24 @@ std::string SystemMonitor::getFullReport() {
     
     // aligned to match perfectly with the 50 characters of the table
     snprintf(core_buffer, sizeof(core_buffer), 
-             "==================================================\n"
+             "================= Monitor Stats =================\n"
              "%s"
+             "tick hate   : %7d Hz\n"
              "core temp   : %7.2f °C\n"
              "core 0 load : %7.2f %%\n"
-             "core 1 load : %7.2f %%\n", 
-             getUptime().c_str(), getCoreTemperature(), core0_load, core1_load);
-
-    snprintf(logger_buffer, sizeof(logger_buffer),
-             "--------------------------------------------------\n"
-             "Logger     : %7.2f%%\n"
-             "--------------------------------------------------\n",
+             "core 1 load : %7.2f %%\n"
+             "logger      : %7.2f %%\n", 
+             getUptime().c_str(), 
+             configTICK_RATE_HZ, 
+             getCoreTemperature(), 
+             core0_load, 
+             core1_load,
              write_pct);
     
     report += core_buffer;
     report += getMemoryStats();
     report += tasks_str;
-    report += logger_buffer;
-    report += "==================================================\n";
+    report += "=================================================\n";
     
     return report;
 }

@@ -11,7 +11,7 @@
 #define SAMPLE_MICROS   10000   // 10ms 100Hz - EKF sample rate
 #define SAMPLE_MILLIS   (SAMPLE_MICROS / 1000) // sample rate in ms
 #define FREQ_EKF        (1.0f / (SAMPLE_MICROS * 0.000001f))
-#define SYSMON_FREQ_MS  1000    // 1000ms 1Hz - system monitor report frequency
+#define SYSMON_FREQ_MS  10000   // 10000ms 0.1Hz - system monitor report frequency
 #define WDOG_TIMEOUT_TK 1       // 1 tick - quantos loops do freRTOS demoramos para excecutar novamente a task
 #define DELAY_FLAGS     250     // 250ms - time to reset flags and check state changes
 #define CONTROL_TIME_MS 1
