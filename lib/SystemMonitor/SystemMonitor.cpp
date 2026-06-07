@@ -109,7 +109,7 @@ std::string SystemMonitor::getTaskStats() {
 
     // clean header with exactly 50 characters
     std::string output = "--------------------- tasks ---------------------\n";
-    output +=            "task name        prio core      cpu   free heap\n";
+    output +=            "task name        prio core      cpu     free heap\n";
     output +=            "-\n";
     
     for (UBaseType_t i = 0; i < array_size; i++) {
