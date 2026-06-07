@@ -109,7 +109,7 @@ std::string SystemMonitor::getTaskStats() {
 
     // clean header with exactly 50 characters
     std::string output = "--------------------- tasks ---------------------\n";
-    output +=            "task name        prio core      cpu   free stack\n";
+    output +=            "task name        prio core      cpu   free heap\n";
     output +=            "-\n";
     
     for (UBaseType_t i = 0; i < array_size; i++) {
@@ -147,7 +147,7 @@ std::string SystemMonitor::getTaskStats() {
         } else if (core_id == 1) {
             snprintf(core_str, sizeof(core_str), "app");
         } else {
-            snprintf(core_str, sizeof(core_str), "Any"); // tasks with no fixed core
+            snprintf(core_str, sizeof(core_str), "any"); // tasks with no fixed core
         }
 
         char line[96];
@@ -185,9 +185,9 @@ std::string SystemMonitor::getFullReport() {
              "tick hate   : %7d Hz\n"
              "core hate   : %7d MHz\n"
              "core temp   : %7.2f °C\n"
-             "core 0 load : %7.2f %%\n"
-             "core 1 load : %7.2f %%\n"
-             "-------------------- Memory --------------------\n"
+             "core PRO    : %7.2f %%\n"
+             "core APP    : %7.2f %%\n"
+             "-------------------- memory --------------------\n"
              "logger      : %7.2f %%\n", 
              getUptime().c_str(), 
              configTICK_RATE_HZ, 
