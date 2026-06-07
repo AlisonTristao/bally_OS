@@ -51,27 +51,24 @@ static void readMacAddress() {
     }
 }
 
-
 uint8_t testPacket() {
-    // envia um texto grande para testar o envio de varios pacotes
-    // o texto é uma citacao de "Dom Casmurro", de Machado de Assis
+    // Envia um texto longo numerado para testar fragmentacao e perda de pacotes
+    // Referencia: Terminal log da GLaDOS (Portal) - "Still Alive"
     const char* long_text =
-        "Uma noite, ao chegar a casa,\n"
-        "encontrei um bilhete de minha mãe, dizendo que ela e meu pai\n"
-        "haviam saído para jantar, e que eu deveria me comportar.\n"
-        "Fiquei sozinho em casa, e a solidão me envolveu como um manto.\n"
-        "Sentei-me à janela, olhando para as estrelas,\n"
-        "e pensei em tudo o que havia acontecido em minha vida até então.\n"
-        "As lembranças de minha infância, de meus pais, de minha escola,\n"
-        "de meus amigos, tudo isso passou diante de meus olhos como um filme.\n"
-        "E então, percebi que a vida era como um rio, que corria sem parar,\n"
-        "levando-nos para lugares desconhecidos, e que nós éramos como folhas,\n"
-        "flutuando na correnteza, sem saber onde iríamos parar. Foi uma\n"
-        "noite de reflexão profunda, e eu me senti mais maduro, mais consciente\n"
-        "de mim mesmo e do mundo ao meu redor. E assim, adormeci, com a cabeça\n"
-        "cheia de pensamentos e o coração cheio de emoções, sabendo que a vida\n"
-        "continuaria a me surpreender, a me desafiar, e que eu teria que enfrentar\n"
-        "tudo isso com coragem e determinação.";
+        "[01/14] Forms FORM-29827281-12-2: Notice of Dismissal\n"
+        "[02/14] Aperture Science computer-aided enrichment center\n"
+        "[03/14] This was a triumph.\n"
+        "[04/14] I'm making a note here: HUGE SUCCESS.\n"
+        "[05/14] It's hard to overstate my satisfaction.\n"
+        "[06/14] Aperture Science\n"
+        "[07/14] We do what we must because we can.\n"
+        "[08/14] For the good of all of us.\n"
+        "[09/14] Except the ones who are dead.\n"
+        "[10/14] But there's no sense crying over every mistake.\n"
+        "[11/14] You just keep on trying till you run out of cake.\n"
+        "[12/14] And the Science gets done.\n"
+        "[13/14] And you make a neat gun.\n"
+        "[14/14] For the people who are still alive.\n";
 
     // When info logs are enabled, push to logger to validate its packetization path.
     #if defined(LOG_ALL) || defined(LOG_INFO)
