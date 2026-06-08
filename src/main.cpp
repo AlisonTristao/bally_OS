@@ -138,7 +138,7 @@ extern "C" void app_main(void) {
         "EKF_task",
         M2KB,
         NULL,
-        1,
+        4,
         xEKFStack,
         &xEKFBuffer,
         PRO_CPU_NUM
@@ -152,7 +152,7 @@ extern "C" void app_main(void) {
         "routine",             
         M8KB,               
         NULL,                   
-        2,                     
+        3,                     
         xRoutineStack,             
         &xRoutineBuffer,           
         PRO_CPU_NUM           
@@ -166,7 +166,7 @@ extern "C" void app_main(void) {
         "setup_interrupts", 
         M2KB,                 
         NULL,   
-        2,                               
+        0,                               
         xInterruptsStack,       
         &xInterruptsBuffer,       
         PRO_CPU_NUM 
@@ -180,7 +180,7 @@ extern "C" void app_main(void) {
         "shell",
         M8KB,
         &robot.shell,
-        1,
+        2,
         xShellStack,
         &xShellBuffer,
         PRO_CPU_NUM
@@ -193,7 +193,7 @@ extern "C" void app_main(void) {
         "state_machine",
         M4KB,
         &robot.machine,
-        1,
+        10,
         xStateMachineStack,
         &xStateMachineBuffer,
         APP_CPU_NUM

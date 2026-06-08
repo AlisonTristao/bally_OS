@@ -172,6 +172,17 @@ std::string SystemMonitor::getTaskStats() {
     output += "task name        prio core      cpu     free heap\n";
     output += "-\n";
     
+    // --- ADICIONE ESTE BLOCO AQUI ---
+    // Ordena as tasks por prioridade de forma descendente (maior prioridade no topo)
+    std::sort(task_records.begin(), task_records.end(), [](const TaskRecord& a, const TaskRecord& b) {
+        if (a.priority != b.priority) {
+            return a.priority > b.priority; 
+        }
+        // Critério de desempate opcional: se a prioridade for igual, ordena por maior uso de CPU
+        return a.current_cpu_load > b.current_cpu_load; 
+    });
+    // --------------------------------
+
     for (const auto& record : task_records) {
         char core_str[8];
         if (record.core_id == 0) {
