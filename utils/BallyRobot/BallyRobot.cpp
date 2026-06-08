@@ -343,7 +343,7 @@ void ROBOT::startWrappers() {
 // MAIN TASKS & INITIALIZATION
 // ==============================================================================
 
-void ROBOT::configure_interruptions(void *param){
+void ROBOT::initInterruptions(void *param){
     (void)param; // Suppress unused parameter warning
 
     // set the interrupt type for the buttons and side sensors, 
@@ -390,7 +390,7 @@ void ROBOT::configure_interruptions(void *param){
     vTaskDelete(NULL);
 }
 
-void ROBOT::executeReceivedCommandFromQueue(void *param) {
+void ROBOT::runShell(void *param) {
     (void)param; // Suppress unused parameter warning
 
     while (instance_->receivedDataQueue == nullptr)

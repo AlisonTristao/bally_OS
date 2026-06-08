@@ -60,10 +60,10 @@ public:
     static void routine(void *param);
 
     // configure the interruptions for the buttons and side sensors
-    static void configure_interruptions(void *param);
+    static void initInterruptions(void *param);
 
     // excute a command in the shell and return the result as string
-    static void executeReceivedCommandFromQueue(void *param);
+    static void runShell(void *param);
 
     // run the state machine main loop
     static void runStateMachine(void *param);
