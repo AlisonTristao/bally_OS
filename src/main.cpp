@@ -60,14 +60,17 @@ StateMachine state8(ERROR,      error_function,     next_state_error);
 static StackType_t xRoutineStack[M8KB];
 static StaticTask_t xRoutineBuffer;
 
-static StackType_t xInterruptsStack[M2KB];
-static StaticTask_t xInterruptsBuffer;
-
 static StackType_t xShellStack[M8KB];
 static StaticTask_t xShellBuffer;
 
 static StackType_t xStateMachineStack[M4KB];
 static StaticTask_t xStateMachineBuffer;
+
+static StackType_t xInterruptsStack[M2KB];
+static StaticTask_t xInterruptsBuffer;
+
+static StackType_t xEKFStack[M2KB];
+static StaticTask_t xEKFBuffer;
 
 // ==============================================================================
 
@@ -85,7 +88,7 @@ extern "C" void app_main(void) {
 
     // define the callbacks for the logger
     robot.logger.set_send_callback([](const uint8_t *data, size_t len) {
-        uint8_t peer_mac[6] = {MAC_ADDR};
+        static const uint8_t peer_mac[6] = {MAC_ADDR};
         return (esp_now_send(peer_mac, data, len)) == ESP_OK; // send the log message using esp-now
     });
 
@@ -128,6 +131,20 @@ extern "C" void app_main(void) {
     }
 
     ESP_LOGI("ROBOT_MAIN", "State machine callbacks verified successfully");
+
+    // init EKF task (send the handle to the robot instance to be able to wake it up from the sampleEKF function)
+    xTaskCreateStaticPinnedToCore(
+        robot.runEKF,
+        "EKF_task",
+        M2KB,
+        NULL,
+        1,
+        xEKFStack,
+        &xEKFBuffer,
+        PRO_CPU_NUM
+    );
+
+    ESP_LOGI("ROBOT_MAIN", "EKF task initialized successfully");
 
     // init parallel processing into secondary core
     xTaskCreateStaticPinnedToCore(
@@ -184,35 +201,35 @@ extern "C" void app_main(void) {
 
     // init the system monitor to report the system stats in the logs
     #ifdef ENABLE_SYSTEM_MONITOR
-        monitor.begin();
-        monitor.setOutputCallback([](const std::string& data) {
-            if (!data.empty())
-                robot.logger.insert_log(logType::DEBG, data.c_str());
-        });
-        monitor.setLoggerCallback([]() {
-            return robot.logger.get_write_pct();
-        });
+    monitor.begin();
+    monitor.setOutputCallback([](const std::string& data) {
+        if (!data.empty())
+            robot.logger.insert_log(logType::DEBG, data.c_str());
+    });
+    monitor.setLoggerCallback([]() {
+        return robot.logger.get_write_pct();
+    });
 
-        // init the task to report the system stats periodically, every 5 seconds
-        xTaskCreateStaticPinnedToCore(
-            [](void* param) {
-                SystemMonitor* monitor = static_cast<SystemMonitor*>(param);
-                while (true) {
-                    monitor->update();
-                    monitor->report();
-                    vTaskDelay(pdMS_TO_TICKS(SYSMON_FREQ_MS)); // report every SYSMON_FREQ_MS milliseconds
-                }
-            },
-            "system_monitor",
-            M4KB,
-            &monitor,
-            1,
-            xSystemMonitorStack,
-            &xSystemMonitorBuffer,
-            PRO_CPU_NUM
-        );
+    // init the task to report the system stats periodically, every 5 seconds
+    xTaskCreateStaticPinnedToCore(
+        [](void* param) {
+            SystemMonitor* monitor = static_cast<SystemMonitor*>(param);
+            while (true) {
+                monitor->update();
+                monitor->report();
+                vTaskDelay(pdMS_TO_TICKS(SYSMON_FREQ_MS)); // report every SYSMON_FREQ_MS milliseconds
+            }
+        },
+        "system_monitor",
+        M4KB,
+        &monitor,
+        1,
+        xSystemMonitorStack,
+        &xSystemMonitorBuffer,
+        PRO_CPU_NUM
+    );
 
-        ESP_LOGI("ROBOT_MAIN", "System monitor initialized successfully");
+    ESP_LOGI("ROBOT_MAIN", "System monitor initialized successfully");
     #endif
 
     // delete 

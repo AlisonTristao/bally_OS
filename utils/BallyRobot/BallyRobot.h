@@ -68,8 +68,11 @@ public:
     // run the state machine main loop
     static void runStateMachine(void *param);
 
-    // run the EKF to estimate the state of the robot
-    static IRAM_ATTR void sampleEKF(void* arg);
+    // sample the sensor and wake up de run ekf task
+    static IRAM_ATTR void sampleEKF(void *param);
+
+    // run the ekf in parallel processing
+    static void runEKF(void *param);
 
     // core utility objects
     static Logger logger;
@@ -102,6 +105,7 @@ private:
     Encoder encoder_right;
     //ICM42688 imu;
     TinyEKF EKF;
+    TaskHandle_t ekf_task_handle = nullptr; 
 
     // Signals and flags for buttons, sensors, LEDs, and motors
     Flags_in buttons;

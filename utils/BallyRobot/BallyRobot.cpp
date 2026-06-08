@@ -268,7 +268,7 @@ float ROBOT::getOmegaFromEncoders() {
     return (right_speed - left_speed) / EKF_WHEEL_BASE;
 }
 
-void ROBOT::sampleEKF(void* arg) {
+void ROBOT::sampleEKF(void *param) {
     // save the pwm values to the control input vector for the EKF
     instance_->control_input[0] = static_cast<float>(instance_->motors.getValue(MOTOR_RIGHT_idx));
     instance_->control_input[1] = static_cast<float>(instance_->motors.getValue(MOTOR_LEFT_idx));
@@ -281,6 +281,26 @@ void ROBOT::sampleEKF(void* arg) {
     //instance_->imu.gyrZ() * kDegToRad,
     //instance_->imu.accX() * 9.81f, 
     //instance_->imu.accY() * 9.81f};
+
+    // notify the EKF task that new measurements are available
+    if (instance_->ekf_task_handle != nullptr)
+        xTaskNotifyGive(instance_->ekf_task_handle);
+}
+
+void ROBOT::runEKF(void *param) {
+    (void)param; // Suppress unused parameter warning
+
+    // save the handle of this task to the robot instance to be able to wake it up from the sampleEKF function
+    instance_->ekf_task_handle = xTaskGetCurrentTaskHandle();
+
+    while (true) {
+        // wait to be notified by the sampleEKF function that new measurements are available
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+
+        // run the EKF prediction and update steps with the latest control input and measurement
+        instance_->EKF.predict(instance_->control_input);
+        instance_->EKF.update(instance_->control_input, instance_->measurement);
+    }
 }
 
 void ROBOT::startWrappers() {
