@@ -268,19 +268,19 @@ float ROBOT::getOmegaFromEncoders() {
     return (right_speed - left_speed) / EKF_WHEEL_BASE;
 }
 
-void ROBOT::runEKF() {
-    float u[2] = {static_cast<float>(instance_->motors.getValue(MOTOR_RIGHT_idx)),
-                  static_cast<float>(instance_->motors.getValue(MOTOR_LEFT_idx))};
-    float z[5] = {instance_->getSpeedFromEncoders(), 
-                  instance_->getOmegaFromEncoders(), 
-                  0,
-                  0,
-                  0};
-                  //instance_->imu.gyrZ() * kDegToRad,
-                  //instance_->imu.accX() * 9.81f, 
-                  //instance_->imu.accY() * 9.81f};
-    instance_->EKF.predict(u);
-    instance_->EKF.update(z, u);
+void ROBOT::sampleEKF(void* arg) {
+    // save the pwm values to the control input vector for the EKF
+    instance_->control_input[0] = static_cast<float>(instance_->motors.getValue(MOTOR_RIGHT_idx));
+    instance_->control_input[1] = static_cast<float>(instance_->motors.getValue(MOTOR_LEFT_idx));
+
+    instance_->measurement[0] = instance_->getSpeedFromEncoders();
+    instance_->measurement[1] = instance_->getOmegaFromEncoders();
+    instance_->measurement[2] = 0;
+    instance_->measurement[3] = 0;
+    instance_->measurement[4] = 0;
+    //instance_->imu.gyrZ() * kDegToRad,
+    //instance_->imu.accX() * 9.81f, 
+    //instance_->imu.accY() * 9.81f};
 }
 
 void ROBOT::startWrappers() {
@@ -329,29 +329,43 @@ void ROBOT::configure_interruptions(void *param){
     // set the interrupt type for the buttons and side sensors, 
     // and add the corresponding ISR handlers to set the flags when the interrupts are triggered
     gpio_set_intr_type((gpio_num_t)BIT_0, GPIO_INTR_NEGEDGE); // FALLING
-    gpio_isr_handler_add((gpio_num_t)BIT_0, [](void* arg) {
+    gpio_isr_handler_add((gpio_num_t)BIT_0, [](void* arg) IRAM_ATTR {
         instance_->buttons.setFlag(BIT_0);
     }, nullptr);
 
     gpio_set_intr_type((gpio_num_t)BIT_1, GPIO_INTR_NEGEDGE);
-    gpio_isr_handler_add((gpio_num_t)BIT_1, [](void* arg) {
+    gpio_isr_handler_add((gpio_num_t)BIT_1, [](void* arg) IRAM_ATTR {
         instance_->buttons.setFlag(BIT_1);
     }, nullptr);
 
     gpio_set_intr_type((gpio_num_t)BIT_2, GPIO_INTR_NEGEDGE);
-    gpio_isr_handler_add((gpio_num_t)BIT_2, [](void* arg) {
+    gpio_isr_handler_add((gpio_num_t)BIT_2, [](void* arg) IRAM_ATTR {
         instance_->buttons.setFlag(BIT_2);
     }, nullptr);
 
     gpio_set_intr_type((gpio_num_t)LEFT, GPIO_INTR_POSEDGE); // RISING
-    gpio_isr_handler_add((gpio_num_t)LEFT, [](void* arg) {
+    gpio_isr_handler_add((gpio_num_t)LEFT, [](void* arg) IRAM_ATTR {
         instance_->sideSensors.setFlag(BIT_0);
     }, nullptr);
 
     gpio_set_intr_type((gpio_num_t)RIGHT, GPIO_INTR_POSEDGE);
-    gpio_isr_handler_add((gpio_num_t)RIGHT, [](void* arg) {
+    gpio_isr_handler_add((gpio_num_t)RIGHT, [](void* arg) IRAM_ATTR {
         instance_->sideSensors.setFlag(BIT_1);
     }, nullptr);
+
+    // init a periodic timer to get the sensors 
+    const esp_timer_create_args_t timer_args = {
+        .callback = &ROBOT::sampleEKF,           
+        .arg = nullptr,                    
+        .dispatch_method = ESP_TIMER_TASK, 
+        .name = "kalman_trigger",
+        .skip_unhandled_events = false    
+    };
+
+    // set the timer to trigger the EKF at the defined sample rate
+    esp_timer_handle_t timer;
+    esp_timer_create(&timer_args, &timer);
+    esp_timer_start_periodic(timer, SAMPLE_MICROS); 
 
     vTaskDelete(NULL);
 }

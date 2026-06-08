@@ -8,11 +8,21 @@
 #include "driver/temperature_sensor.h"
 #include <string>
 #include <functional>
-#include <map>
+#include <vector>
 
-// defines the callback type: receives a constant c++ string by reference
 using MonitorCallback = std::function<void(const std::string&)>;
 using GetLoggerIndexCallback = float (*)();
+
+struct TaskRecord {
+    TaskHandle_t handle;
+    char name[16];
+    uint32_t last_runtime;
+    float current_cpu_load;
+    UBaseType_t priority;
+    BaseType_t core_id;
+    uint32_t high_water_mark;
+    bool active_this_cycle; // (Garbage Collection)
+};
 
 class SystemMonitor {
 private:
@@ -21,38 +31,30 @@ private:
     MonitorCallback output_cb;
     GetLoggerIndexCallback logger_index_cb;
 
-    // variables for cpu delta calculation
     uint32_t last_total_runtime;
-    std::map<TaskHandle_t, uint32_t> last_task_runtimes;
+    std::vector<TaskRecord> task_records; 
 
-    // stores the global load per core
     float core0_load;
     float core1_load;
 
-    // internal function to dispatch the string to the callback
     void dispatch(const std::string& data);
 
 public:
     SystemMonitor();
     
-    // initializes hardware (like the temperature sensor)
     void begin();
     
-    // registers the function that will consume and send the data
     void setOutputCallback(MonitorCallback cb);
     void setLoggerCallback(GetLoggerIndexCallback cb);
+    void update(); 
 
-    // system metrics
     float getCoreTemperature();
     std::string getUptime();
     std::string getMemoryStats();
     
-    // updates the core loads internally and returns the formatted table
     std::string getTaskStats();
     
-    // returns the entire consolidated report
     std::string getFullReport();
 
-    // dispatches the full report to the registered callback
     void report();
 };

@@ -7,6 +7,8 @@
 #include <esp_wifi.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include <stdio.h>
+#include "esp_attr.h"
 
 #include <Settings.h>
 
@@ -67,7 +69,7 @@ public:
     static void runStateMachine(void *param);
 
     // run the EKF to estimate the state of the robot
-    void runEKF();
+    static IRAM_ATTR void sampleEKF(void* arg);
 
     // core utility objects
     static Logger logger;
@@ -110,6 +112,10 @@ private:
     // save a instance of the ROBOT class to be used in the static functions
     static ROBOT* instance_;
     bool initialized = false;
+
+    // matriz of data to kalman filter
+    float control_input[EKF_CONTROL_DIM] = {0, 0}; // left and right motor pwm
+    float measurement[EKF_MEASURE_DIM] = {0, 0, 0, 0, 0};
 
     void initEKF();
 

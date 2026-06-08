@@ -5,6 +5,7 @@
 #include <string>
 #include <cstring>
 #include "esp_timer.h"
+#include "esp_memory_utils.h"
 
 // the BIT_s 
 #define BIT_0 0
@@ -91,7 +92,7 @@ public:
     Flags_out(const std::string& name = "") : FlagsBase(name) {}
     virtual ~Flags_out() {};
     // Sets a specific flag manually
-    void setFlag(uint8_t index, uint32_t time);
+    void IRAM_ATTR setFlag(uint8_t index, uint32_t time);
 };
 
 // PWM output flags storing values from 0 to 100
@@ -101,7 +102,7 @@ public:
     Flags_pwm(const std::string& name = "") : FlagsBase(name) {}
     virtual ~Flags_pwm() {};
     // Sets PWM value (0–100)
-    void setValue(uint8_t index, int8_t value, uint32_t time);
+    void IRAM_ATTR setValue(uint8_t index, int8_t value, uint32_t time);
 
     // Gets PWM value
     int16_t getValue(uint8_t index);

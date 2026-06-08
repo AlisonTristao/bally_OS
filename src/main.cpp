@@ -198,6 +198,7 @@ extern "C" void app_main(void) {
             [](void* param) {
                 SystemMonitor* monitor = static_cast<SystemMonitor*>(param);
                 while (true) {
+                    monitor->update();
                     monitor->report();
                     vTaskDelay(pdMS_TO_TICKS(SYSMON_FREQ_MS)); // report every SYSMON_FREQ_MS milliseconds
                 }

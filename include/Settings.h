@@ -8,7 +8,7 @@
 // -> LOG_DEBUG
 
 // -------------------- Timers and delays --------------------
-#define SAMPLE_MICROS   10000   // 10ms 100Hz - EKF sample rate
+#define SAMPLE_MICROS   1000   // 1ms 1000Hz - EKF sample rate
 #define SAMPLE_MILLIS   (SAMPLE_MICROS / 1000) // sample rate in ms
 #define FREQ_EKF        (1.0f / (SAMPLE_MICROS * 0.000001f))
 #define SYSMON_FREQ_MS  10000   // 10000ms 0.1Hz - system monitor report frequency
