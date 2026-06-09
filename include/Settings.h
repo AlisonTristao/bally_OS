@@ -14,7 +14,6 @@
 #define SYSMON_FREQ_MS  10000   // 10000ms 0.1Hz - system monitor report frequency
 #define WDOG_TIMEOUT_TK 1       // 1 tick - quantos loops do freRTOS demoramos para excecutar novamente a task
 #define DELAY_FLAGS     250     // 250ms - time to reset flags and check state changes
-#define CONTROL_TIME_MS 1
 
 // -------------------- Memory alias configuration --------------------
 #define M2KB             (2 * 1024) // 2KB for the stack of the tasks, to avoid stack overflow
