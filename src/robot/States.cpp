@@ -1,4 +1,5 @@
 #include "states.h"
+States* States::instance_ = nullptr;
 
 // conversion from stateName to string for logging purposes
 static const char* stateToString(stateName state) {

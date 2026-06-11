@@ -11,7 +11,7 @@ struct Transition {
 };
 
 // This table defines the transitions between states based on the current state and the buttons pressed
-const Transition transitionTable[] = {
+inline constexpr Transition transitionTable[] = {
 // CURRENT STATE | BUTTON (CONDITION) | NEXT STATE
 // ------------------ init ---------------------------
 { SETUP,            (1 << BIT_0),         WAIT },      
@@ -34,11 +34,16 @@ const Transition transitionTable[] = {
 { TELEMETRY,        (1 << BIT_0),         WAIT },
 // { CALIBRATE,     (1 << BIT_0),         WAIT }, 
 };
-const int NUM_TRANSITIONS = sizeof(transitionTable) / sizeof(Transition);
+inline constexpr int NUM_TRANSITIONS = sizeof(transitionTable) / sizeof(Transition);
 
 class States {
 public:
-    // constructor
+    static States& getInstance() {
+        static States instance; // Criado apenas uma vez com segurança
+        return instance;
+    }
+private:
+// constructor
     States() : 
         state1(SETUP,      [](){ return instance_->setup_function(); },     [](uint8_t buttons){ return instance_->process_transition(SETUP, buttons); }),
         state2(WAIT,       [](){ return instance_->wait_function(); },      [](uint8_t buttons){ return instance_->process_transition(WAIT, buttons); }),
@@ -49,12 +54,9 @@ public:
         state7(TELEMETRY,  [](){ return instance_->telemetry_function(); }, [](uint8_t buttons){ return instance_->process_transition(TELEMETRY, buttons); }),
         state8(ERROR,      [](){ return instance_->error_function(); },     [](uint8_t buttons){ return instance_->process_transition(ERROR, buttons); }) 
         {
-            if (instance_ != nullptr) 
-                return;
             instance_ = this;
         };
 
-private:
     // states
     stateName calibrate_function();
     stateName debug_function();

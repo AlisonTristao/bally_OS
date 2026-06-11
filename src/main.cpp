@@ -28,6 +28,7 @@
 #include <States.h>
 
 ROBOT& robot = ROBOT::getInstance();
+States& states = States::getInstance();
 
 #ifdef ENABLE_SYSTEM_MONITOR
 #include <SystemMonitor.h>
@@ -53,13 +54,11 @@ static void init_system_monitor();
 
 extern "C" void app_main(void) {  
     // initialize the robot, configure the pins, the wifi and the esp-now settings  
-    if(!robot.init()) {
-        while (true) {
-            ESP_LOGE("ROBOT_MAIN", "Failed to initialize the robot");
-            vTaskDelay(WDOG_TIMEOUT_TK);
-        }
-        // there nothing we can do...
+    while (!robot.init()) {
+        ESP_LOGE("ROBOT_MAIN", "Failed to initialize the robot");
+        vTaskDelay(WDOG_TIMEOUT_TK);
     }
+        
     ESP_LOGI("ROBOT_MAIN", "Robot initialized successfully");
 
     // configure the system callbacks for the logger, state machine, shell, etc.
@@ -89,7 +88,8 @@ static void setup_system_callbacks() {
     // if an error occurs in the state machine, it will call the error callback function, 
     // which will log the error message using the logger
     robot.machine.setErrorCallback([](const char* message) {
-        if (message != nullptr) robot.logger.insert_log(logType::ERRO, message);
+        // need to use the esp log, because the logger dont work if the state machine is not properly configured
+        if (message != nullptr) ESP_LOGE("STATE_MACHINE", "%s", message); 
     });
 
     // configure the shell to log output using the logger's insert_log method
@@ -106,14 +106,11 @@ static void setup_system_callbacks() {
     // verify that all the callbacks for the state machine are properly configured before starting the tasks
     // it is important to ensure that the state machine is properly configured to avoid errors during runtime,
     // if the callbacks are not properly configured, the system will log an error message and halt in an infinite loop
-    if (!robot.machine.verifyCallbacks()) {
-        while (true) {
-            robot.logger.insert_log(logType::ERRO, "State machine callbacks are not properly configured");
-            ESP_LOGE("ROBOT_MAIN", "State machine callbacks are not properly configured");
-            robot.logger.flush_logs(); // needs flush the logs because the task routine is not running yet to send the log messages
-            vTaskDelay(WDOG_TIMEOUT_TK);
-        }
+    while (!robot.machine.verifyCallbacks()) {
+        ESP_LOGE("ROBOT_MAIN", "State machine callbacks are not properly configured");
+        vTaskDelay(WDOG_TIMEOUT_TK);
     }
+
     ESP_LOGI("ROBOT_MAIN", "System callbacks and state machine configured successfully");
 }
 
