@@ -1,4 +1,4 @@
-#include "States.h"
+#include "StatesManager.h"
 
 stateName States::calibrate_function() {
     const bool calib = robot_.array_sensor.calibrate(SAMPLES, DELAY_SAMPLE);

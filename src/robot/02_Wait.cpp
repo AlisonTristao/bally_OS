@@ -1,5 +1,5 @@
 // static libraries
-#include "States.h"
+#include "StatesManager.h"
 
 stateName States::wait_function() {
     return WAIT;

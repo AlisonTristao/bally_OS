@@ -1,4 +1,4 @@
-#include "States.h"
+#include "StatesManager.h"
     
 stateName States::debug_function() {
     // log message
@@ -7,7 +7,7 @@ stateName States::debug_function() {
     #endif
 
     // safety delay default outside RUN
-    vTaskDelay(DELAY_SAMPLE/portTICK_PERIOD_MS);
+    vTaskDelay(WDOG_TIMEOUT_TK);
     
     return DEBUG;
 }

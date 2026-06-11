@@ -25,7 +25,7 @@
 #include <BallyRobot.h>
 
 // robot state machine 
-#include <States.h>
+#include <StatesManager.h>
 
 ROBOT& robot = ROBOT::getInstance();
 States& states = States::getInstance();
