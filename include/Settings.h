@@ -87,62 +87,94 @@
 // -------------------- Channels --------------------
 #define CH0             0
 #define CH1             1
-//#define CH2             2
-//#define CH3             3
+#define CH2             2
+#define CH3             3
 
-// -------------------- Array of LEDs --------------------
-/*#define YELLOW          38
-#define RED             37
-#define BLUE            36
-#define GREEN           35
-#define UNK0            45
-#define UNK1            46*/
+// ============================================================
+// Pinout da ESP32-S3
+// ============================================================
 
-// -------------------- H Bridge --------------------
-/*#define PWM_A           35
-#define AIN2            36
-#define AIN1            37
-#define BIN1            38
-#define BIN2            39
-#define PWM_B           40*/
+// -------------------- LEDs dos strapping pins --------------------
+// Os LEDs disponíveis estão nos GPIO45 e GPIO46.
+#define LED1            GPIO_NUM_45
+#define LED2            GPIO_NUM_46
+// warning: the GPIOs 43 and 44 are used for the serial communication
+#define LED3            GPIO_NUM_43 // TX
+#define LED4            GPIO_NUM_44 // RX
 
-// -------------------- RGB LED (ESP32-S3 SPI) --------------------
-#define LED_RGB_PIN     48
+// -------------------- H Bridge / DRV825 --------------------
+// Motor A = esquerdo
+#define AIN1            GPIO_NUM_21  // IN1_E
+#define AIN2            GPIO_NUM_47  // IN2_E
+
+// Motor B = direito
+#define BIN1            GPIO_NUM_3   // IN1_D
+#define BIN2            GPIO_NUM_9   // IN2_D
+
+// Leitura de corrente dos DRV825
+#define CURRENT_A       GPIO_NUM_14  // i_E
+#define CURRENT_B       GPIO_NUM_8   // i_D
 
 // -------------------- Encoders --------------------
-#define ENC_A0          21
-#define ENC_A1          47
-#define ENC_B0          45
-#define ENC_B1          46
+// Encoder A = motor esquerdo
+#define ENC_A0          GPIO_NUM_41  // ENC1_E
+#define ENC_A1          GPIO_NUM_42  // ENC2_E
+
+// Encoder B = motor direito
+#define ENC_B0          GPIO_NUM_39  // ENC1_D
+#define ENC_B1          GPIO_NUM_40  // ENC2_D
 
 // -------------------- Buttons --------------------
-#define BTN1            1
-#define BTN2            2
-#define BTN3            0
+#define BTN1            GPIO_NUM_4
+#define BTN2            GPIO_NUM_5
+#define BTN3            GPIO_NUM_0   // BOOT
 
 // -------------------- Side sensors --------------------
-#define LEFT            39
-#define RIGHT           40
+#define LEFT            GPIO_NUM_1   // SE_digital
+#define RIGHT           GPIO_NUM_48  // SD_digital
 
 // -------------------- Buzzer --------------------
-#define BZR             6
+#define BZR             GPIO_NUM_38
 
-// -------------------- Sensor --------------------
-#define D0              18
-#define D1              17
-#define D2              16
-#define D3              15
-#define D4              7
-#define D5              6
-#define D6              5
-#define D7              4
+// -------------------- Analog multiplexer --------------------
+#define S0              GPIO_NUM_12
+#define S1              GPIO_NUM_11
+#define S2              GPIO_NUM_10
+#define SIG             GPIO_NUM_13
+
+/*
+ * D0 até D7 são canais do multiplexador.
+ * Eles não são GPIOs da ESP32.
+ */
+#define D0              0U
+#define D1              1U
+#define D2              2U
+#define D3              3U
+#define D4              4U
+#define D5              5U
+#define D6              6U
+#define D7              7U
 
 // -------------------- I2C devices --------------------
-#define SDA_pin         4
-#define SCL_pin         5
+#define SDA_pin         GPIO_NUM_18
+#define SCL_pin         GPIO_NUM_17
+
+// -------------------- SD Card / SPI --------------------
+#define MISO            GPIO_NUM_6
+#define SCK             GPIO_NUM_7
+#define MOSI            GPIO_NUM_15
+#define CS              GPIO_NUM_16
 
 // -------------------- Voltage dividers --------------------
-#define BAT             7
+// #define BAT             GPIO_NUM_2
+
+// -------------------- USB nativo --------------------
+#define USB_D_MINUS     GPIO_NUM_19
+#define USB_D_PLUS      GPIO_NUM_20
+
+// -------------------- GPIOs livres no esquema --------------------
+// #define GPIO_SPARE_1    GPIO_NUM_1
+// #define GPIO_SPARE_2    GPIO_NUM_38
 
 // -------------------- Flags indices --------------------
 #define BTN1_idx            0

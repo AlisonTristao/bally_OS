@@ -81,34 +81,135 @@ uint8_t testPacket() {
 // HARDWARE CONFIGURATION
 // ==============================================================================
 
-bool ROBOT::configurePins() {
+bool ROBOT::configurePins()
+{
+    const auto configureOutput =
+        [](gpio_num_t pin, uint32_t initialLevel) -> bool
+    {
+        if (!GPIO_IS_VALID_OUTPUT_GPIO(pin)) {
+            return false;
+        }
+
+        if (gpio_reset_pin(pin) != ESP_OK) {
+            return false;
+        }
+
+        if (gpio_set_direction(pin, GPIO_MODE_OUTPUT) != ESP_OK) {
+            return false;
+        }
+
+        if (gpio_set_pull_mode(pin, GPIO_FLOATING) != ESP_OK) {
+            return false;
+        }
+
+        if (gpio_set_level(pin, initialLevel) != ESP_OK) {
+            return false;
+        }
+
+        return true;
+    };
+
+    const auto configureInput =
+        [](gpio_num_t pin, gpio_pull_mode_t pullMode) -> bool
+    {
+        if (!GPIO_IS_VALID_GPIO(pin)) {
+            return false;
+        }
+
+        if (gpio_reset_pin(pin) != ESP_OK) {
+            return false;
+        }
+
+        if (gpio_set_direction(pin, GPIO_MODE_INPUT) != ESP_OK) {
+            return false;
+        }
+
+        if (gpio_set_pull_mode(pin, pullMode) != ESP_OK) {
+            return false;
+        }
+
+        return true;
+    };
+
+    // --------------------------------------------------------
+    // Saídas que devem iniciar desligadas/em nível baixo
+    // --------------------------------------------------------
     const gpio_num_t out_pins[] = {
-        (gpio_num_t)LED_RGB_PIN, /*(gpio_num_t)AIN1, (gpio_num_t)AIN2,
-        (gpio_num_t)BIN1, (gpio_num_t)BIN2, (gpio_num_t)PWM_A, 
-        (gpio_num_t)PWM_B//, (gpio_num_t)BZR*/
+        LED1,
+        LED2,
+        LED3, 
+        LED4,
+
+        AIN1,
+        AIN2,
+        BIN1,
+        BIN2,
+
+        BZR,
+
+        S0,
+        S1,
+        S2
     };
-    for(auto pin : out_pins) {
-        gpio_reset_pin(pin);
-        gpio_set_direction(pin, GPIO_MODE_OUTPUT);
+
+    for (gpio_num_t pin : out_pins) {
+        if (!configureOutput(pin, 0)) {
+            return false;
+        }
     }
 
+    // O cartão SD deve iniciar desselecionado.
+    if (!configureOutput(CS, 1)) {
+        return false;
+    }
+
+    // --------------------------------------------------------
+    // Entradas digitais
+    // --------------------------------------------------------
     const gpio_num_t in_pins[] = {
-        (gpio_num_t)LEFT, (gpio_num_t)RIGHT, 
-        (gpio_num_t)ENC_A0, (gpio_num_t)ENC_A1, 
-        (gpio_num_t)ENC_B0, (gpio_num_t)ENC_B1
+        LEFT,
+        RIGHT,
+
+        ENC_A0,
+        ENC_A1,
+        ENC_B0,
+        ENC_B1
     };
-    for(auto pin : in_pins) {
-        gpio_reset_pin(pin);
-        gpio_set_direction(pin, GPIO_MODE_INPUT);
+
+    for (gpio_num_t pin : in_pins) {
+        if (!configureInput(pin, GPIO_FLOATING)) {
+            return false;
+        }
     }
 
+    // --------------------------------------------------------
+    // Botões
+    // --------------------------------------------------------
     const gpio_num_t btn_pins[] = {
-        (gpio_num_t)BIT_0, (gpio_num_t)BIT_1, (gpio_num_t)BIT_2
+        BTN1,
+        BTN2,
+        BTN3
     };
-    for(auto pin : btn_pins) {
-        gpio_reset_pin(pin);
-        gpio_set_direction(pin, GPIO_MODE_INPUT);
-        gpio_set_pull_mode(pin, GPIO_PULLUP_ONLY);
+
+    for (gpio_num_t pin : btn_pins) {
+        if (!configureInput(pin, GPIO_PULLUP_ONLY)) {
+            return false;
+        }
+    }
+
+    // --------------------------------------------------------
+    // Entradas analógicas
+    // --------------------------------------------------------
+    const gpio_num_t analog_pins[] = {
+        SIG,
+        CURRENT_A,
+        CURRENT_B
+    };
+
+    for (gpio_num_t pin : analog_pins) {
+        if (!configureInput(pin, GPIO_FLOATING)) {
+            return false;
+        }
     }
 
     return true;
