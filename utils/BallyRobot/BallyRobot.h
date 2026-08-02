@@ -26,9 +26,6 @@
 #include <Logger.h>
 #include <StateMachine.h>
 
-// array of the sensor pins, used to initialize the array sensor
-const uint8_t sensor_pins[LEN_SENSOR] = {D0, D1, D2, D3, D4, D5, D6, D7};
-
 class ROBOT {
 public:
     // singleton pattern
@@ -82,7 +79,7 @@ public:
 private:
     // default constructor
     ROBOT() :   machine(NONE, NULL, NULL),
-                array_sensor(sensor_pins),
+                array_sensor(S0, S1, S2, SIG),
                 //motor_left(AIN1, AIN2, CH0, PWM_A), 
                 //motor_right(BIN1, BIN2, CH1, PWM_B),
                 encoder_left(ENC_A0, ENC_A1), 
