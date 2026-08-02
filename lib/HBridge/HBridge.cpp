@@ -75,7 +75,6 @@ esp_err_t HBridge::initChannel(
         static_cast<ledc_channel_t>(channel);
 
     ledc_channel.timer_sel = PWM_TIMER;
-    ledc_channel.intr_type = LEDC_INTR_DISABLE;
     ledc_channel.gpio_num  = pin;
     ledc_channel.duty      = 0;
     ledc_channel.hpoint    = 0;

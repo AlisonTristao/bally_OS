@@ -95,12 +95,12 @@
 // ============================================================
 
 // -------------------- LEDs dos strapping pins --------------------
-// Os LEDs disponíveis estão nos GPIO45 e GPIO46.
-#define LED1            GPIO_NUM_45
-#define LED2            GPIO_NUM_46
 // warning: the GPIOs 43 and 44 are used for the serial communication
-#define LED3            GPIO_NUM_43 // TX
-#define LED4            GPIO_NUM_44 // RX
+// and GPIO 45 and 46 are used for the flash memory
+#define LED0            GPIO_NUM_45
+#define LED1            GPIO_NUM_46
+#define LED2            GPIO_NUM_43 // TX
+#define LED3            GPIO_NUM_44 // RX
 
 // -------------------- H Bridge / DRV825 --------------------
 // Motor A = esquerdo
@@ -182,9 +182,17 @@
 #define BTN3_idx            2
 #define SENSOR_LEFT_idx     0
 #define SENSOR_RIGHT_idx    1
-#define LED1_idx            0
-#define LED2_idx            1
+#define LED0_idx            0
+#define LED1_idx            1
+#define LED2_idx            2
+#define LED3_idx            3
 #define MOTOR_LEFT_idx      0
 #define MOTOR_RIGHT_idx     1
+
+// remap the using the color 
+#define LED_BLUE            LED0_idx
+#define LED_GREEN           LED1_idx
+#define LED_YELLOW          LED2_idx
+#define LED_RED             LED3_idx
 
 #endif // SETTINGS_H

@@ -135,10 +135,10 @@ bool ROBOT::configurePins()
     // Saídas que devem iniciar desligadas/em nível baixo
     // --------------------------------------------------------
     const gpio_num_t out_pins[] = {
+        LED0,
         LED1,
         LED2,
         LED3, 
-        LED4,
 
         AIN1,
         AIN2,
@@ -295,6 +295,12 @@ void ROBOT::resetFlags() {
 void ROBOT::setOutputs() {
     //motor_left.applyPWM(motors.getValue(MOTOR_LEFT_idx));
     //motor_right.applyPWM(motors.getValue(MOTOR_RIGHT_idx));
+    // turn on the leds according to the BITS of the arr_stats variable
+    uint8_t arr_stats = leds.getFlags();
+    gpio_set_level(LED0, (arr_stats & (1 << LED0_idx)));
+    gpio_set_level(LED1, (arr_stats & (1 << LED1_idx)));
+    gpio_set_level(LED2, (arr_stats & (1 << LED2_idx)));
+    gpio_set_level(LED3, (arr_stats & (1 << LED3_idx)));
 }
 
 void ROBOT::checkStateMachine() {
@@ -438,6 +444,11 @@ void ROBOT::startWrappers() {
         instance_->motors.setValue(MOTOR_RIGHT_idx, right_pwm, time);
         return RESULT_OK;
     }, "set_pwm_pair", "Set PWM values for both motors at once", "robot");
+
+    shell.add([](uint8_t pin, uint32_t time) -> uint8_t {
+        instance_->leds.setFlag(pin, time);
+        return RESULT_OK;
+    }, "set_led", "turn on a LED", "robot");
 }
 
 // ==============================================================================

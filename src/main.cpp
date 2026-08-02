@@ -35,6 +35,7 @@ States& states = States::getInstance();
 SystemMonitor monitor;
 static StackType_t xSystemMonitorStack[M4KB];
 static StaticTask_t xSystemMonitorBuffer;
+static void init_system_monitor();
 #endif
 
 static StackType_t xRoutineStack[M8KB];
@@ -50,7 +51,6 @@ static StaticTask_t xInterruptsBuffer;
 
 static void setup_system_callbacks();
 static void start_freertos_tasks();
-static void init_system_monitor();
 
 extern "C" void app_main(void) {  
     // initialize the robot, configure the pins, the wifi and the esp-now settings  
