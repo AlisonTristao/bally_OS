@@ -46,6 +46,13 @@ public:
     void insert_log(logType type, const char* msg);
     void insert_logf(logType type, const char* format, ...);
 
+    /**
+     * @brief Send text directly without retaining it in the PSRAM ring.
+     *
+     * Used for shell responses while the SD card belongs to the USB host.
+     */
+    bool send_log_direct(logType type, const char* msg);
+
     /*
     * @brief Send the log messages that are currently in the logger's buffer using the configured send callback.
     * This method should be called periodically (e.g., in a task) to ensure that the log messages are sent out. 

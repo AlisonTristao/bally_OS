@@ -103,6 +103,36 @@ void Logger::insert_log(logType type, const char* msg) {
     free_mutex();
 }
 
+bool Logger::send_log_direct(logType type, const char* msg) {
+    if (msg == nullptr || msg[0] == '\0') return false;
+
+    const size_t length = strlen(msg);
+    const uint16_t total_packets = static_cast<uint16_t>(
+        (length + MAX_CONTENT_SIZE - 1) / MAX_CONTENT_SIZE);
+    const uint32_t timestamp = static_cast<uint32_t>(
+        esp_timer_get_time() / 1000ULL);
+
+    for (uint16_t packet = 0; packet < total_packets; ++packet) {
+        message direct_message{};
+        const size_t offset = packet * MAX_CONTENT_SIZE;
+        const size_t remaining = length - offset;
+        const size_t fragment_length =
+            remaining < MAX_CONTENT_SIZE ? remaining : MAX_CONTENT_SIZE;
+
+        direct_message.timer = timestamp;
+        direct_message.type = type;
+        direct_message.packet_number = packet + 1;
+        direct_message.total_packets = total_packets;
+        direct_message.content.size = fragment_length;
+        memcpy(direct_message.content.byte, msg + offset, fragment_length);
+        direct_message.checksum = calculate_checksum(direct_message);
+
+        if (!send_message(direct_message)) return false;
+    }
+
+    return true;
+}
+
 uint8_t Logger::calculate_checksum(const message& msg) {
     uint32_t sum = 0;
     const size_t len = msg.content.size;

@@ -9,6 +9,50 @@
 #include <dirent.h>
 #include <sys/stat.h>
 
+namespace {
+
+constexpr size_t MBR_DISK_SIGNATURE_OFFSET = 440;
+constexpr size_t MBR_PARTITION_TABLE_OFFSET = 446;
+constexpr size_t MBR_PARTITION_ENTRY_SIZE = 16;
+constexpr size_t MBR_SIGNATURE_OFFSET = 510;
+constexpr size_t SD_SECTOR_SIZE = 512;
+
+uint32_t read_u32_le(const uint8_t* bytes) {
+    return static_cast<uint32_t>(bytes[0]) |
+           (static_cast<uint32_t>(bytes[1]) << 8) |
+           (static_cast<uint32_t>(bytes[2]) << 16) |
+           (static_cast<uint32_t>(bytes[3]) << 24);
+}
+
+void write_u32_le(uint8_t* bytes, uint32_t value) {
+    bytes[0] = static_cast<uint8_t>(value);
+    bytes[1] = static_cast<uint8_t>(value >> 8);
+    bytes[2] = static_cast<uint8_t>(value >> 16);
+    bytes[3] = static_cast<uint8_t>(value >> 24);
+}
+
+uint32_t make_disk_signature(const sdmmc_card_t& card) {
+    // Use card identity rather than robot identity so the same SD keeps the
+    // same Windows volume when it is moved to another BallyRobot.
+    uint32_t signature = static_cast<uint32_t>(card.cid.serial);
+    signature ^= static_cast<uint32_t>(card.cid.mfg_id) << 24;
+    signature ^= static_cast<uint32_t>(card.cid.oem_id) << 8;
+    signature ^= static_cast<uint32_t>(card.cid.date) * 0x45D9F3BU;
+    signature ^= static_cast<uint32_t>(card.csd.capacity);
+    signature ^= 0x42414C4CU; // "BALL"
+
+    // Mix the fields and reserve zero to mean "identity not initialized".
+    signature ^= signature >> 16;
+    signature *= 0x7FEB352DU;
+    signature ^= signature >> 15;
+    if (signature == 0 || signature == 0xFFFFFFFFU) {
+        signature = 0x42414C4CU;
+    }
+    return signature;
+}
+
+} // namespace
+
 // ============================================================================
 // Lifecycle
 // ============================================================================
@@ -26,8 +70,8 @@ SDCard::~SDCard() {
 }
 
 bool SDCard::begin() {
-    // Avoid mounting the same card more than once.
-    if (mounted_) return true;
+    // Avoid initializing the same physical card more than once.
+    if (card_ != nullptr) return true;
     if (mount_point_ == nullptr || mount_point_[0] != '/') return false;
 
     // SDSPI_HOST_DEFAULT selects the default general-purpose SPI peripheral.
@@ -64,41 +108,73 @@ bool SDCard::begin() {
     device_config.gpio_cs = cs_;
     device_config.host_id = host_slot;
 
-    // Never format automatically: a mount error must not erase stored logs.
-    esp_vfs_fat_mount_config_t mount_config{};
-    mount_config.format_if_mount_failed = false;
-    mount_config.max_files = 5;
-    mount_config.allocation_unit_size = 16 * 1024;
-
-    const esp_err_t mount_result = esp_vfs_fat_sdspi_mount(
-        mount_point_, &host, &device_config, &mount_config, &card_);
-
-    if (mount_result != ESP_OK) {
-        card_ = nullptr;
-
-        // Release only a bus initialized by this object.
+    // Use only public SDSPI APIs here. FAT is mounted later by USBMassStorage,
+    // which must own the mount to safely transfer it between robot and PC.
+    if (host.init() != ESP_OK) {
         if (bus_owned_) {
             spi_bus_free(host_slot);
             bus_owned_ = false;
         }
-
         host_slot_ = -1;
         return false;
     }
 
-    mounted_ = true;
+    sdspi_dev_handle_t device_handle = -1;
+    if (sdspi_host_init_device(&device_config, &device_handle) != ESP_OK) {
+        if (bus_owned_) {
+            spi_bus_free(host_slot);
+            bus_owned_ = false;
+        }
+        host_slot_ = -1;
+        return false;
+    }
+
+    // The host slot used by SD commands is the SDSPI device handle, which may
+    // differ from the underlying SPI peripheral number.
+    host.slot = device_handle;
+    if (sdmmc_card_init(&host, &card_storage_) != ESP_OK) {
+        sdspi_host_remove_device(device_handle);
+        if (bus_owned_) {
+            spi_bus_free(host_slot);
+            bus_owned_ = false;
+        }
+        host_slot_ = -1;
+        return false;
+    }
+
+    // FatFs-created MBRs can have a zero disk signature. Repair only those
+    // four identity bytes before FAT is mounted; files and partitions remain
+    // unchanged.
+    if (!ensure_mbr_signature()) {
+        sdspi_host_remove_device(device_handle);
+        if (bus_owned_) {
+            spi_bus_free(host_slot);
+            bus_owned_ = false;
+        }
+        host_slot_ = -1;
+        return false;
+    }
+
+    card_ = &card_storage_;
+    device_attached_ = true;
     return true;
 }
 
 void SDCard::end() {
     close_stream();
 
-    // Unregister the FAT filesystem before releasing the physical SPI bus.
-    if (mounted_) {
-        esp_vfs_fat_sdcard_unmount(mount_point_, card_);
-        mounted_ = false;
-        card_ = nullptr;
+    // USBMassStorage must be destroyed before this object. At this point FAT
+    // is already unmounted, so only the SDSPI device and bus remain.
+    mounted_ = false;
+    if (device_attached_ && card_ != nullptr) {
+        if ((card_->host.flags & SDMMC_HOST_FLAG_DEINIT_ARG) != 0) {
+            card_->host.deinit_p(card_->host.slot);
+        } else if (card_->host.deinit != nullptr) {
+            card_->host.deinit();
+        }
+        device_attached_ = false;
     }
+    card_ = nullptr;
 
     if (bus_owned_ && host_slot_ >= 0) {
         spi_bus_free(static_cast<spi_host_device_t>(host_slot_));
@@ -106,6 +182,58 @@ void SDCard::end() {
     }
 
     host_slot_ = -1;
+}
+
+bool SDCard::ensure_mbr_signature() {
+    alignas(4) uint8_t sector[SD_SECTOR_SIZE];
+    if (sdmmc_read_sectors(&card_storage_, sector, 0, 1) != ESP_OK) {
+        return false;
+    }
+
+    // A card without an MBR may use a FAT super-floppy layout. It has no MBR
+    // disk-signature field, so leave it untouched.
+    if (sector[MBR_SIGNATURE_OFFSET] != 0x55 ||
+        sector[MBR_SIGNATURE_OFFSET + 1] != 0xAA) {
+        return true;
+    }
+
+    bool has_partition = false;
+    for (size_t index = 0; index < 4; ++index) {
+        const size_t entry = MBR_PARTITION_TABLE_OFFSET +
+                             index * MBR_PARTITION_ENTRY_SIZE;
+        const uint8_t boot_indicator = sector[entry];
+        const uint8_t type = sector[entry + 4];
+        const uint32_t first_sector = read_u32_le(&sector[entry + 8]);
+        const uint32_t sector_count = read_u32_le(&sector[entry + 12]);
+        const uint64_t end_sector =
+            static_cast<uint64_t>(first_sector) + sector_count;
+
+        // GPT already has its own persistent disk GUID. Do not modify its
+        // protective MBR even when its legacy signature happens to be zero.
+        if (type == 0xEE) return true;
+
+        if ((boot_indicator == 0x00 || boot_indicator == 0x80) &&
+            type != 0 && first_sector != 0 && sector_count != 0 &&
+            end_sector <= static_cast<uint64_t>(card_storage_.csd.capacity)) {
+            has_partition = true;
+            break;
+        }
+    }
+
+    if (!has_partition ||
+        read_u32_le(&sector[MBR_DISK_SIGNATURE_OFFSET]) != 0) {
+        return true;
+    }
+
+    const uint32_t signature = make_disk_signature(card_storage_);
+    write_u32_le(&sector[MBR_DISK_SIGNATURE_OFFSET], signature);
+
+    if (sdmmc_write_sectors(&card_storage_, sector, 0, 1) != ESP_OK ||
+        sdmmc_read_sectors(&card_storage_, sector, 0, 1) != ESP_OK) {
+        return false;
+    }
+
+    return read_u32_le(&sector[MBR_DISK_SIGNATURE_OFFSET]) == signature;
 }
 
 // ============================================================================

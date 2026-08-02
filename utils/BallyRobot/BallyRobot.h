@@ -1,6 +1,7 @@
 #ifndef ROBOT_STATIC_OBJECTS_H
 #define ROBOT_STATIC_OBJECTS_H
 
+#include <atomic>
 #include <cstdint>
 #include <esp_timer.h>
 #include <esp_now.h>
@@ -26,6 +27,7 @@
 #include <Logger.h>
 #include <SDCard.h>
 #include <StateMachine.h>
+#include <USBMassStorage.h>
 
 class ROBOT {
 public:
@@ -78,6 +80,15 @@ public:
     TinyShell shell;
     ArraySensor<LEN_SENSOR> array_sensor;
     SDCard sd_card;
+    USBMassStorage usb_storage;
+
+    // Execute scheduled DEBUG tests without blocking the state-machine task.
+    void processDebug();
+    void cancelDebugTests();
+
+    // Keep selected shell responses out of the retained PSRAM log.
+    void sendNextShellOutputDirect();
+    bool consumeDirectShellOutputRequest();
 private:
     // default constructor
     ROBOT() :   machine(NONE, NULL, NULL),
@@ -119,6 +130,12 @@ private:
     bool clock_synchronized = false;
     char last_log_file[SDFileInfo::MAX_NAME_LENGTH] = {};
 
+    // Non-blocking array sensor test controlled by the DEBUG shell module.
+    std::atomic<uint32_t> array_sensor_test_remaining{0};
+    std::atomic<uint32_t> array_sensor_test_interval_ms{0};
+    std::atomic<uint32_t> array_sensor_test_next_ms{0};
+    std::atomic<bool> direct_next_shell_output{false};
+
     // matriz of data to kalman filter
     float control_input[EKF_CONTROL_DIM] = {0, 0}; // left and right motor pwm
     float measurement[EKF_MEASURE_DIM] = {0, 0, 0, 0, 0};
@@ -131,6 +148,7 @@ private:
     bool makeLogFilename(char* filename, size_t capacity);
     bool findLatestLogFile(char* filename, size_t capacity);
     bool flushLoggerToSD(bool append);
+    bool startArraySensorTest(uint32_t samples, uint32_t interval_ms);
 
     // configure the pins, the i2c communication and other settings for the robot
     bool configurePins();

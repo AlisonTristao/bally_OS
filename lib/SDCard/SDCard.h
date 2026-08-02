@@ -46,12 +46,12 @@ public:
     SDCard& operator=(const SDCard&) = delete;
 
     /**
-     * @brief Initialize the SPI bus and mount the SD card FAT filesystem.
+     * @brief Initialize the SPI bus and the physical SD card.
      *
-     * This method does not format the card when mounting fails.
-     * Calling it again after a successful mount has no effect.
+     * USBMassStorage mounts the initialized card for application access and
+     * later transfers exclusive ownership between the robot and the USB host.
      *
-     * @return true when the card is mounted and ready for file operations.
+     * @return true when the physical card is initialized.
      */
     bool begin();
 
@@ -64,6 +64,11 @@ public:
      * @brief Check whether the card is mounted.
      */
     bool is_mounted() const { return mounted_; }
+
+    /**
+     * @brief Check whether a sequential file is currently open.
+     */
+    bool has_open_stream() const { return stream_ != nullptr; }
 
     /**
      * @brief Get the filesystem mount point.
@@ -162,6 +167,8 @@ public:
     bool stream_has_error() const;
 
 private:
+    friend class USBMassStorage;
+
     // Maximum complete path accepted by the file helpers.
     static constexpr size_t MAX_PATH_LENGTH = 256;
 
@@ -175,9 +182,11 @@ private:
     const char* mount_point_;
 
     // Handles and lifecycle state owned by the ESP-IDF SD/FAT drivers.
+    sdmmc_card_t card_storage_{};
     sdmmc_card_t* card_ = nullptr;
     int host_slot_ = -1;
     bool bus_owned_ = false;
+    bool device_attached_ = false;
     bool mounted_ = false;
     FILE* stream_ = nullptr;
     bool stream_writable_ = false;
@@ -188,6 +197,20 @@ private:
      * @return false when the card is not mounted or the path is invalid/too long.
      */
     bool make_path(const char* path, char* full_path, size_t capacity) const;
+
+    /**
+     * @brief Give an MBR-formatted card a stable identity for USB hosts.
+     *
+     * FatFs can create a valid partition table with a zero disk signature.
+     * Windows can read that volume, but its Mount Manager cannot persist a
+     * Volume GUID or drive letter reliably. Existing non-zero signatures and
+     * super-floppy formatted cards are left untouched.
+     */
+    bool ensure_mbr_signature();
+
+    // USBMassStorage updates this flag whenever filesystem ownership changes.
+    void set_app_mounted(bool mounted) { mounted_ = mounted; }
+    sdmmc_card_t* card_handle() const { return card_; }
 };
 
 #endif // SD_CARD_H

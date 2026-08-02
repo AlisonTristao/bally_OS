@@ -24,6 +24,16 @@ stateName States::process_transition(stateName currentState, uint8_t buttons) {
             if (buttons & transitionTable[i].buttonMask)
                 nextState = transitionTable[i].nextState;
 
+    // The SD card must stay exclusively owned by the PC until safe eject has
+    // returned it to the robot. Do not leave the safe DEBUG state before that.
+    if (currentState == DEBUG && robot_.usb_storage.is_active()) {
+        return DEBUG;
+    }
+
+    if (currentState == DEBUG && nextState != DEBUG) {
+        robot_.cancelDebugTests();
+    }
+
     #if defined(LOG_ALL) || defined(LOG_INFO)
     if (nextState != currentState)
         // log message

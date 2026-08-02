@@ -92,12 +92,18 @@ static void setup_system_callbacks() {
         if (message != nullptr) ESP_LOGE("STATE_MACHINE", "%s", message); 
     });
 
-    // configure the shell to log output using the logger's insert_log method
-    // when the shell produces output (e.g., command results, errors, etc.), it will call the output callback function,
-    // which will log the output using the logger
-    // and the logger will send the log messages via ESP-NOW using the previously configured send callback
+    // Retain normal shell output in PSRAM. While USB owns the SD card, or just
+    // after a successful SD flush, send the response directly through ESP-NOW
+    // so the response itself does not make the retained buffer non-empty again.
     robot.shell.set_output_callback([](const std::string& text) {
-        if (!text.empty()) robot.logger.insert_log(logType::DEBG, text.c_str());
+        if (text.empty()) return;
+
+        if (robot.usb_storage.is_exposed() ||
+            robot.consumeDirectShellOutputRequest()) {
+            robot.logger.send_log_direct(logType::DEBG, text.c_str());
+        } else {
+            robot.logger.insert_log(logType::DEBG, text.c_str());
+        }
     });
 
     // start the state machine in the SETUP state

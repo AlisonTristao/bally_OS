@@ -324,6 +324,64 @@ void ROBOT::setOutputs() {
     gpio_set_level(LED3, (arr_stats & (1 << LED3_idx)));
 }
 
+bool ROBOT::startArraySensorTest(uint32_t samples, uint32_t interval_ms) {
+    if (samples == 0 ||
+        StateMachine::current_state.load(std::memory_order_acquire) != DEBUG ||
+        usb_storage.is_active()) {
+        return false;
+    }
+
+    array_sensor_test_interval_ms.store(interval_ms,
+                                        std::memory_order_relaxed);
+    array_sensor_test_next_ms.store(
+        static_cast<uint32_t>(esp_timer_get_time() / 1000ULL),
+        std::memory_order_relaxed);
+    array_sensor_test_remaining.store(samples, std::memory_order_release);
+    return true;
+}
+
+void ROBOT::processDebug() {
+    // DEBUG is a safe test state: keep both motor commands at zero on every
+    // pass, while the normal outer task delay continues yielding the CPU.
+    motors.setValue(MOTOR_LEFT_idx, 0, DELAY_FLAGS);
+    motors.setValue(MOTOR_RIGHT_idx, 0, DELAY_FLAGS);
+
+    usb_storage.process();
+    if (usb_storage.is_active()) return;
+
+    const uint32_t remaining =
+        array_sensor_test_remaining.load(std::memory_order_acquire);
+    if (remaining == 0) return;
+
+    const uint32_t now_ms = static_cast<uint32_t>(
+        esp_timer_get_time() / 1000ULL);
+    const uint32_t next_ms =
+        array_sensor_test_next_ms.load(std::memory_order_relaxed);
+
+    // Signed subtraction keeps the comparison valid across millis overflow.
+    if (static_cast<int32_t>(now_ms - next_ms) < 0) return;
+
+    logger.insert_log(logType::INFO, array_sensor.debug().c_str());
+    array_sensor_test_remaining.store(remaining - 1,
+                                      std::memory_order_release);
+    array_sensor_test_next_ms.store(
+        now_ms + array_sensor_test_interval_ms.load(std::memory_order_relaxed),
+        std::memory_order_relaxed);
+}
+
+void ROBOT::cancelDebugTests() {
+    array_sensor_test_remaining.store(0, std::memory_order_release);
+}
+
+void ROBOT::sendNextShellOutputDirect() {
+    direct_next_shell_output.store(true, std::memory_order_release);
+}
+
+bool ROBOT::consumeDirectShellOutputRequest() {
+    return direct_next_shell_output.exchange(false,
+                                             std::memory_order_acq_rel);
+}
+
 void ROBOT::checkStateMachine() {
     if ((uint32_t)(esp_timer_get_time() / 1000ULL) - instance_->stateMachineTimer > DELAY_FLAGS) {
         ROBOT::machine.next(ROBOT::buttons.getFlags());
@@ -614,6 +672,107 @@ void ROBOT::startWrappers() {
         return RESULT_OK;
     }, "set_led", "turn on a LED", "robot");
 
+    // DEBUG commands schedule tests; no command blocks in a delay loop.
+    shell.create_module("debug", "Safe non-blocking robot tests");
+
+    shell.add([](uint32_t samples, uint32_t interval_ms) -> uint8_t {
+        if (!instance_->startArraySensorTest(samples, interval_ms)) {
+            ROBOT::logger.insert_log(
+                logType::ERRO,
+                "Array test requires DEBUG state, USB inactive and samples > 0");
+            return RESULT_ERROR;
+        }
+
+        ROBOT::logger.insert_logf(
+            logType::INFO,
+            "Array sensor test scheduled: %u samples every %u ms",
+            samples, interval_ms);
+        return RESULT_OK;
+    }, "test_arr_sensor", "Print sensor array: samples,interval_ms", "debug");
+
+    shell.add([]() -> uint8_t {
+        if (StateMachine::current_state.load(std::memory_order_acquire) !=
+            DEBUG) {
+            ROBOT::logger.insert_log(
+                logType::ERRO,
+                "USB storage requires DEBUG state; enter DEBUG first");
+            return RESULT_ERROR;
+        }
+
+        if (instance_->usb_storage.is_exposed()) {
+            ROBOT::logger.send_log_direct(logType::INFO,
+                                          "USB storage is already enabled");
+            return RESULT_OK;
+        }
+
+        if (!instance_->usb_storage.is_ready() ||
+            !instance_->usb_storage.app_has_access() ||
+            !instance_->sd_card.is_mounted()) {
+            ROBOT::logger.insert_log(
+                logType::ERRO,
+                "USB storage unavailable: SD card is not mounted for robot");
+            return RESULT_ERROR;
+        }
+
+        if (instance_->sd_card.has_open_stream()) {
+            ROBOT::logger.insert_log(
+                logType::ERRO,
+                "USB storage blocked: close the active SD file first");
+            return RESULT_ERROR;
+        }
+
+        if (instance_->array_sensor_test_remaining.load(
+                std::memory_order_acquire) != 0) {
+            ROBOT::logger.insert_log(
+                logType::ERRO,
+                "USB storage blocked: wait for the DEBUG test to finish");
+            return RESULT_ERROR;
+        }
+
+        if (!instance_->usb_storage.expose()) {
+            ROBOT::logger.insert_log(
+                logType::ERRO,
+                "Failed to transfer SD card ownership to native USB");
+            return RESULT_ERROR;
+        }
+
+        ROBOT::logger.send_log_direct(
+            logType::INFO,
+            "USB storage enabled; safely eject the drive on the PC before leaving DEBUG");
+        instance_->sendNextShellOutputDirect();
+        return RESULT_OK;
+    }, "turnonstorage", "Expose the SD card through native USB MSC", "debug");
+
+    shell.add([]() -> uint8_t {
+        if (!instance_->usb_storage.is_ready()) {
+            ROBOT::logger.insert_log(logType::ERRO,
+                                     "USB storage is not initialized");
+            return RESULT_ERROR;
+        }
+
+        const char* owner = nullptr;
+        if (instance_->usb_storage.is_exposed()) {
+            owner = "PC owns SD";
+        } else if (instance_->usb_storage.is_active()) {
+            owner = instance_->usb_storage.host_is_attached()
+                ? "PC connected, waiting for media"
+                : "waiting for PC connection";
+        } else {
+            owner = "robot owns SD";
+        }
+
+        char capacity_text[24];
+        formatBytes(instance_->usb_storage.capacity_bytes(), capacity_text,
+                    sizeof(capacity_text));
+        char status[96];
+        snprintf(status, sizeof(status), "USB storage: %s; media=%s",
+                 owner, capacity_text);
+
+        ROBOT::logger.send_log_direct(logType::INFO, status);
+        instance_->sendNextShellOutputDirect();
+        return RESULT_OK;
+    }, "storage_status", "Show current SD card owner", "debug");
+
     // SD card, retained PSRAM logs and robot clock commands.
     shell.create_module("storage", "SD card and retained log management");
 
@@ -690,8 +849,11 @@ void ROBOT::startWrappers() {
             return RESULT_ERROR;
         }
 
-        ROBOT::logger.insert_logf(logType::INFO, "PSRAM saved to %s",
-                                  instance_->last_log_file);
+        char response[SDFileInfo::MAX_NAME_LENGTH + 32];
+        snprintf(response, sizeof(response), "PSRAM saved to %s",
+                 instance_->last_log_file);
+        ROBOT::logger.send_log_direct(logType::INFO, response);
+        instance_->sendNextShellOutputDirect();
         return RESULT_OK;
     }, "flush_new", "Save retained PSRAM logs into a new dated file", "storage");
 
@@ -703,8 +865,11 @@ void ROBOT::startWrappers() {
             return RESULT_ERROR;
         }
 
-        ROBOT::logger.insert_logf(logType::INFO, "PSRAM appended to %s",
-                                  instance_->last_log_file);
+        char response[SDFileInfo::MAX_NAME_LENGTH + 36];
+        snprintf(response, sizeof(response), "PSRAM appended to %s",
+                 instance_->last_log_file);
+        ROBOT::logger.send_log_direct(logType::INFO, response);
+        instance_->sendNextShellOutputDirect();
         return RESULT_OK;
     }, "flush_append", "Append retained PSRAM logs to the latest log file",
        "storage");
@@ -900,9 +1065,13 @@ bool ROBOT::init() {
     logger.begin();
     shell.begin();
 
-    // Mount the card when available, but do not block the remaining robot startup.
+    // Initialize the card and give FAT ownership to the USB storage manager.
+    // It starts mounted for the robot and only exposes it on a DEBUG command.
     if (!sd_card.begin()) {
-        logger.insert_log(logType::ERRO, "Failed to mount SD card");
+        logger.insert_log(logType::ERRO, "Failed to initialize SD card");
+    } else if (!usb_storage.begin(sd_card)) {
+        logger.insert_log(logType::ERRO,
+                          "Failed to mount SD card through USB storage manager");
     }
 
     receivedDataQueue = xQueueCreate(10, sizeof(message));
