@@ -8,8 +8,6 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <SharedMessageTypes.h>
-#include <stdarg.h>
-#include "esp_attr.h"
 
 #ifndef SHARED_MESSAGE_TYPES_H
 #error "This library depends on SharedMessageTypes.h, to use the data structures and definitions for the log messages. "
@@ -22,13 +20,7 @@ public:
 
     // initialize metods
     Logger();
-    ~Logger() {
-        // delete the mutex
-        if (mutex_ == nullptr)
-            return; 
-        vSemaphoreDelete(mutex_);
-        mutex_ = nullptr;
-    };
+    ~Logger();
     Logger(const Logger&) = delete;
     Logger& operator=(const Logger&) = delete;
     void begin();
@@ -65,14 +57,33 @@ public:
      * 
      * @return The current write index of the logger's buffer.
      */
-    float get_write_pct() const { return (write_index * 100.0f) / MAX_PACKETS_IN_PSRAM; }
+    float get_write_pct() const {
+        return (used_bytes_ * 100.0f) /
+               static_cast<float>(storage_capacity_);
+    }
 
 private:
     // private members for the logger
-    message* messages; // stored in external psram
-    uint32_t write_index = 0;
-    uint32_t read_index = 0;
-    uint32_t pending_count = 0;
+    struct StoredLogHeader {
+        uint32_t timer;
+        uint16_t length;
+        logType type;
+        uint8_t reserved;
+    };
+
+    static_assert(sizeof(StoredLogHeader) == 8, "Unexpected stored log header size");
+    static_assert(sizeof(message) <= MAX_PACKET_SIZE, "ESP-NOW message exceeds packet limit");
+
+    uint8_t* storage_ = nullptr; // variable-length byte ring in external PSRAM
+    const uint32_t storage_capacity_ = LOGGER_PSRAM_CAPACITY_BYTES;
+    uint32_t write_offset_ = 0;
+    uint32_t read_offset_ = 0;
+    uint32_t used_bytes_ = 0;
+
+    // Protect the oldest record while it is fragmented and sent.
+    bool flush_record_active_ = false;
+    StoredLogHeader flush_header_{};
+    uint16_t flush_packet_index_ = 0;
 
     SemaphoreHandle_t mutex_ = NULL;
     SendCallback send_callback_;
@@ -106,6 +117,13 @@ private:
     * @param null_terminate Whether to add a null terminator for text payloads
     */
     void insert_log_impl(const uint8_t* data, size_t len, logType type, uint32_t ts);
+
+    // byte-ring helpers; caller must hold mutex_
+    void write_to_ring(const void* source, size_t len);
+    void read_from_ring(uint32_t offset, void* destination, size_t len) const;
+    bool peek_oldest_header(StoredLogHeader& header) const;
+    bool discard_oldest_record();
+    void clear_ring();
 
     // funtion to menager the mutex
     bool wait_for_mutex();  // wait indefinitely for the mutex to be available

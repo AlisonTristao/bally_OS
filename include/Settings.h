@@ -67,15 +67,14 @@
     
 // therefore, max message size is 250 - 14 = 236 bytes
 // but, to use a size that is a multiple of 4 for better memory alignment, we will use 230 bytes for the content
-// the N16R8 chip has 8mb of external psram, which is 8 * 1024 * 1024 = 8388608 bytes
-// if we use 250 bytes per message (including overhead), we can store up to 8388608 / 250 = 33554
-// but to be safe, we use 90% of the available memory for the logger, which gives us a limit of 30.200 
-// max packets in psram = 0.9 * 33554 = 30.200 -> round to 30000
+// The logger uses a byte ring buffer in PSRAM. Records occupy only their header
+// plus the actual payload length; the fixed ESP-NOW frame is created at flush time.
+// Keep roughly the same memory budget as the previous 30,000 x 248-byte array.
 
 #define MAX_PACKET_SIZE         250   // if we change the transport protocol, we can increase this value
 #define PROTOCOL_OVERHEAD_SIZE  20    // overhead for the protocol, including timestamp, type, packet number, total packets and checksum
 #define MAX_CONTENT_SIZE        229   // -1 to ensure we have space for the null terminator
-#define MAX_PACKETS_IN_PSRAM    30000 // limit for messages in memory - watch out for available ram limits
+#define LOGGER_PSRAM_CAPACITY_BYTES 7440000U // PSRAM reserved for variable-length log records
 #define LOGGER_MUTEX_TIMEOUT_MS 100   // time in ms to wait for the logger to be available - used to avoid deleting messages during printing
 
 // to empty the array and free the mutex to other tasks, 

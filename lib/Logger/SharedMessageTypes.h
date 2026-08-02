@@ -2,7 +2,6 @@
 #define SHARED_MESSAGE_TYPES_H
 
 #include <stdint.h>
-#include "esp_timer.h"
 #include <cstring>
 #include <settings.h>
 
