@@ -24,6 +24,7 @@
 
 #include <Flags.h>
 #include <Logger.h>
+#include <SDCard.h>
 #include <StateMachine.h>
 
 class ROBOT {
@@ -76,10 +77,12 @@ public:
     StateMachine machine;
     TinyShell shell;
     ArraySensor<LEN_SENSOR> array_sensor;
+    SDCard sd_card;
 private:
     // default constructor
     ROBOT() :   machine(NONE, NULL, NULL),
                 array_sensor(S0, S1, S2, SIG),
+                sd_card(MISO, SCK, MOSI, CS),
                 //motor_left(AIN1, AIN2, CH0, PWM_A), 
                 //motor_right(BIN1, BIN2, CH1, PWM_B),
                 encoder_left(ENC_A0, ENC_A1), 

@@ -574,6 +574,11 @@ bool ROBOT::init() {
     logger.begin();
     shell.begin();
 
+    // Mount the card when available, but do not block the remaining robot startup.
+    if (!sd_card.begin()) {
+        logger.insert_log(logType::ERRO, "Failed to mount SD card");
+    }
+
     receivedDataQueue = xQueueCreate(10, sizeof(message));
     if (receivedDataQueue == nullptr) {
         ROBOT::logger.insert_log(logType::ERRO, "Failed to create receive queue");
