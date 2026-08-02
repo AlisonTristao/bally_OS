@@ -125,9 +125,9 @@
 #define ENC_B1          GPIO_NUM_40  // ENC2_D
 
 // -------------------- Buttons --------------------
+#define BTN0            GPIO_NUM_0   // BOOT
 #define BTN1            GPIO_NUM_4
 #define BTN2            GPIO_NUM_5
-#define BTN3            GPIO_NUM_0   // BOOT
 
 // -------------------- Side sensors --------------------
 #define LEFT            GPIO_NUM_1   // SE_digital

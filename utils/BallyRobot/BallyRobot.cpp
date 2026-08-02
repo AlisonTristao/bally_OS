@@ -188,7 +188,7 @@ bool ROBOT::configurePins()
     const gpio_num_t btn_pins[] = {
         BTN1,
         BTN2,
-        BTN3
+        BTN0
     };
 
     for (gpio_num_t pin : btn_pins) {
@@ -460,18 +460,18 @@ void ROBOT::initInterruptions(void *param){
 
     // set the interrupt type for the buttons and side sensors, 
     // and add the corresponding ISR handlers to set the flags when the interrupts are triggered
-    gpio_set_intr_type((gpio_num_t)BIT_0, GPIO_INTR_NEGEDGE); // FALLING
-    gpio_isr_handler_add((gpio_num_t)BIT_0, [](void* arg) IRAM_ATTR {
+    gpio_set_intr_type((gpio_num_t)BTN0, GPIO_INTR_NEGEDGE); // FALLING
+    gpio_isr_handler_add((gpio_num_t)BTN0, [](void* arg) IRAM_ATTR {
         instance_->buttons.setFlag(BIT_0);
     }, nullptr);
 
-    gpio_set_intr_type((gpio_num_t)BIT_1, GPIO_INTR_NEGEDGE);
-    gpio_isr_handler_add((gpio_num_t)BIT_1, [](void* arg) IRAM_ATTR {
+    gpio_set_intr_type((gpio_num_t)BTN1, GPIO_INTR_NEGEDGE);
+    gpio_isr_handler_add((gpio_num_t)BTN1, [](void* arg) IRAM_ATTR {
         instance_->buttons.setFlag(BIT_1);
     }, nullptr);
 
-    gpio_set_intr_type((gpio_num_t)BIT_2, GPIO_INTR_NEGEDGE);
-    gpio_isr_handler_add((gpio_num_t)BIT_2, [](void* arg) IRAM_ATTR {
+    gpio_set_intr_type((gpio_num_t)BTN2, GPIO_INTR_NEGEDGE);
+    gpio_isr_handler_add((gpio_num_t)BTN2, [](void* arg) IRAM_ATTR {
         instance_->buttons.setFlag(BIT_2);
     }, nullptr);
 
