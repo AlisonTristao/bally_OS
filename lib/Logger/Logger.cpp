@@ -130,11 +130,9 @@ void Logger::insert_log_impl(const uint8_t* data, size_t len, logType type, uint
 
     if (required > storage_capacity_) return;
 
-    // Drop complete old records until the new one fits. A record being flushed
-    // stays protected because its payload is read fragment by fragment.
-    while ((storage_capacity_ - used_bytes_) < required) {
-        if (flush_record_active_ || !discard_oldest_record()) return;
-    }
+    // Only an SD flush is allowed to release retained PSRAM. When the ring is
+    // full, reject the new log instead of deleting an older unsaved record.
+    if ((storage_capacity_ - used_bytes_) < required) return;
 
     const StoredLogHeader header{
         .timer = ts,
@@ -146,6 +144,7 @@ void Logger::insert_log_impl(const uint8_t* data, size_t len, logType type, uint
     write_to_ring(&header, sizeof(header));
     write_to_ring(data, stored_length);
     used_bytes_ += required;
+    pending_send_bytes_ += required;
 }
 
 void Logger::write_to_ring(const void* source, size_t len) {
@@ -172,36 +171,49 @@ void Logger::read_from_ring(uint32_t offset, void* destination, size_t len) cons
     if (len > first) memcpy(bytes + first, storage_, len - first);
 }
 
-bool Logger::peek_oldest_header(StoredLogHeader& header) const {
-    const uint32_t used = used_bytes_;
-    if (used < sizeof(StoredLogHeader)) return false;
+bool Logger::read_header_at(uint32_t offset, uint32_t available,
+                            StoredLogHeader& header) const {
+    if (available < sizeof(StoredLogHeader)) return false;
 
-    read_from_ring(read_offset_, &header, sizeof(header));
+    read_from_ring(offset, &header, sizeof(header));
     const uint32_t record_size = sizeof(StoredLogHeader) + header.length;
 
-    return header.length > 0 && record_size <= used && record_size <= storage_capacity_;
-}
-
-bool Logger::discard_oldest_record() {
-    StoredLogHeader header{};
-    if (!peek_oldest_header(header)) {
-        clear_ring();
-        return false;
-    }
-
-    const uint32_t record_size = sizeof(StoredLogHeader) + header.length;
-    read_offset_ = (read_offset_ + record_size) % storage_capacity_;
-    used_bytes_ -= record_size;
-    return true;
+    return header.length > 0 && record_size <= available &&
+           record_size <= storage_capacity_;
 }
 
 void Logger::clear_ring() {
     write_offset_ = 0;
     read_offset_ = 0;
     used_bytes_ = 0;
-    flush_record_active_ = false;
-    flush_header_ = {};
-    flush_packet_index_ = 0;
+    send_offset_ = 0;
+    pending_send_bytes_ = 0;
+    send_record_active_ = false;
+    send_header_ = {};
+    send_packet_index_ = 0;
+    consumer_busy_ = false;
+}
+
+bool Logger::begin_consumer() {
+    if (!wait_for_mutex()) return false;
+
+    if (consumer_busy_) {
+        free_mutex();
+        return false;
+    }
+
+    consumer_busy_ = true;
+    free_mutex();
+    return true;
+}
+
+void Logger::end_consumer() {
+    if (mutex_ == nullptr) return;
+
+    if (xSemaphoreTake(mutex_, portMAX_DELAY) == pdTRUE) {
+        consumer_busy_ = false;
+        free_mutex();
+    }
 }
 
 void Logger::reset_loop_counter() {
@@ -212,6 +224,8 @@ void Logger::reset_loop_counter() {
 }
 
 void Logger::flush_logs() {
+    if (!begin_consumer()) return;
+
     const uint32_t max_packets = MAX_CHUNKS_PER_FLUSH * BLOCK_SIZE;
 
     for (uint32_t sent_packets = 0; sent_packets < max_packets; ++sent_packets) {
@@ -219,37 +233,36 @@ void Logger::flush_logs() {
         SendCallback callback = defaultSendCallback;
         uint16_t total_packets = 0;
 
-        // Protect the record and copy just the next fixed-size transport frame.
-        if (!wait_for_mutex()) return;
+        // Copy just the next fixed-size transport frame.
+        if (!wait_for_mutex()) break;
 
-        if (storage_ == nullptr || used_bytes_ == 0) {
+        if (storage_ == nullptr || pending_send_bytes_ == 0) {
             free_mutex();
-            return;
+            break;
         }
 
-        if (!flush_record_active_) {
-            if (!peek_oldest_header(flush_header_)) {
-                clear_ring();
+        if (!send_record_active_) {
+            if (!read_header_at(send_offset_, pending_send_bytes_, send_header_)) {
                 free_mutex();
-                return;
+                break;
             }
 
-            flush_record_active_ = true;
-            flush_packet_index_ = 0;
+            send_record_active_ = true;
+            send_packet_index_ = 0;
         }
 
         total_packets = static_cast<uint16_t>(
-            (flush_header_.length + MAX_CONTENT_SIZE - 1) / MAX_CONTENT_SIZE);
-        const uint32_t payload_offset = flush_packet_index_ * MAX_CONTENT_SIZE;
-        const uint32_t remaining = flush_header_.length - payload_offset;
+            (send_header_.length + MAX_CONTENT_SIZE - 1) / MAX_CONTENT_SIZE);
+        const uint32_t payload_offset = send_packet_index_ * MAX_CONTENT_SIZE;
+        const uint32_t remaining = send_header_.length - payload_offset;
         const uint16_t fragment_length = static_cast<uint16_t>(
             remaining < MAX_CONTENT_SIZE ? remaining : MAX_CONTENT_SIZE);
         const uint32_t ring_payload_offset =
-            (read_offset_ + sizeof(StoredLogHeader) + payload_offset) % storage_capacity_;
+            (send_offset_ + sizeof(StoredLogHeader) + payload_offset) % storage_capacity_;
 
-        tx.timer = flush_header_.timer;
-        tx.type = flush_header_.type;
-        tx.packet_number = flush_packet_index_ + 1;
+        tx.timer = send_header_.timer;
+        tx.type = send_header_.type;
+        tx.packet_number = send_packet_index_ + 1;
         tx.total_packets = total_packets;
         tx.content.size = fragment_length;
         memset(tx.content.byte, 0, sizeof(tx.content.byte));
@@ -259,30 +272,133 @@ void Logger::flush_logs() {
 
         free_mutex();
 
-        // A rejected transport frame remains at the head for the next retry.
-        if (!callback(reinterpret_cast<const uint8_t*>(&tx), sizeof(tx))) return;
+        // A rejected frame keeps the packet cursor unchanged for the next call.
+        if (!callback(reinterpret_cast<const uint8_t*>(&tx), sizeof(tx))) break;
 
-        // Commit the accepted fragment. Waiting here avoids resending a fragment
-        // merely because a producer held the mutex for a couple of milliseconds.
-        if (xSemaphoreTake(mutex_, portMAX_DELAY) != pdTRUE) return;
+        if (xSemaphoreTake(mutex_, portMAX_DELAY) != pdTRUE) break;
 
-        // A future public reset could clear the protected record while the send
-        // callback is running.
-        if (!flush_record_active_) {
+        if (!send_record_active_) {
             free_mutex();
-            return;
+            break;
         }
 
-        ++flush_packet_index_;
-        if (flush_packet_index_ >= total_packets) {
-            const uint32_t record_size = sizeof(StoredLogHeader) + flush_header_.length;
-            read_offset_ = (read_offset_ + record_size) % storage_capacity_;
-            used_bytes_ -= record_size;
-            flush_record_active_ = false;
-            flush_header_ = {};
-            flush_packet_index_ = 0;
+        ++send_packet_index_;
+        if (send_packet_index_ >= total_packets) {
+            const uint32_t record_size = sizeof(StoredLogHeader) + send_header_.length;
+            send_offset_ = (send_offset_ + record_size) % storage_capacity_;
+            pending_send_bytes_ -= record_size;
+            send_record_active_ = false;
+            send_header_ = {};
+            send_packet_index_ = 0;
         }
 
         free_mutex();
     }
+
+    end_consumer();
+}
+
+bool Logger::flush_logs_to(StorageCallback callback, void* context) {
+    if (callback == nullptr || !begin_consumer()) return false;
+
+    bool success = true;
+    uint32_t bytes_remaining = 0;
+
+    if (xSemaphoreTake(mutex_, portMAX_DELAY) != pdTRUE) {
+        end_consumer();
+        return false;
+    }
+
+    bytes_remaining = used_bytes_;
+    free_mutex();
+
+    // Save only the snapshot that existed when the flush started. Logs inserted
+    // during this operation remain retained for the next SD flush.
+    while (bytes_remaining > 0) {
+        StoredLogHeader header{};
+
+        if (xSemaphoreTake(mutex_, portMAX_DELAY) != pdTRUE) {
+            success = false;
+            break;
+        }
+
+        if (!read_header_at(read_offset_, bytes_remaining, header)) {
+            free_mutex();
+            success = false;
+            break;
+        }
+
+        const uint32_t record_offset = read_offset_;
+        free_mutex();
+
+        const uint16_t total_packets = static_cast<uint16_t>(
+            (header.length + MAX_CONTENT_SIZE - 1) / MAX_CONTENT_SIZE);
+
+        for (uint16_t packet = 0; packet < total_packets; ++packet) {
+            message stored_message{};
+            const uint32_t payload_offset = packet * MAX_CONTENT_SIZE;
+            const uint32_t remaining = header.length - payload_offset;
+            const uint16_t fragment_length = static_cast<uint16_t>(
+                remaining < MAX_CONTENT_SIZE ? remaining : MAX_CONTENT_SIZE);
+            const uint32_t ring_payload_offset =
+                (record_offset + sizeof(StoredLogHeader) + payload_offset) %
+                storage_capacity_;
+
+            stored_message.timer = header.timer;
+            stored_message.type = header.type;
+            stored_message.packet_number = packet + 1;
+            stored_message.total_packets = total_packets;
+            stored_message.content.size = fragment_length;
+            memset(stored_message.content.byte, 0,
+                   sizeof(stored_message.content.byte));
+
+            if (xSemaphoreTake(mutex_, portMAX_DELAY) != pdTRUE) {
+                success = false;
+                break;
+            }
+            read_from_ring(ring_payload_offset, stored_message.content.byte,
+                           fragment_length);
+            free_mutex();
+
+            stored_message.checksum = calculate_checksum(stored_message);
+            if (!callback(reinterpret_cast<const uint8_t*>(&stored_message),
+                          sizeof(stored_message), context)) {
+                success = false;
+                break;
+            }
+        }
+
+        if (!success) break;
+
+        if (xSemaphoreTake(mutex_, portMAX_DELAY) != pdTRUE) {
+            success = false;
+            break;
+        }
+
+        const uint32_t record_size = sizeof(StoredLogHeader) + header.length;
+
+        // If the oldest retained record has not gone through ESP-NOW yet, the SD
+        // flush removes it from both cursor ranges.
+        if (pending_send_bytes_ == used_bytes_) {
+            send_offset_ = (send_offset_ + record_size) % storage_capacity_;
+            pending_send_bytes_ -= record_size;
+        }
+
+        read_offset_ = (read_offset_ + record_size) % storage_capacity_;
+        used_bytes_ -= record_size;
+        bytes_remaining -= record_size;
+        free_mutex();
+    }
+
+    end_consumer();
+    return success;
+}
+
+bool Logger::send_message(const message& msg) {
+    if (msg.content.size > MAX_CONTENT_SIZE || !wait_for_mutex()) return false;
+
+    const SendCallback callback = send_callback_;
+    free_mutex();
+
+    return callback(reinterpret_cast<const uint8_t*>(&msg), sizeof(msg));
 }

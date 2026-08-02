@@ -3,6 +3,8 @@
 
 // ESP-IDF Includes
 #include <cstring>
+#include <cstdlib>
+#include <ctime>
 #include <string>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -17,6 +19,7 @@
 #include "esp_mac.h"
 #include "nvs_flash.h"
 #include <cmath>
+#include <sys/time.h>
 #ifndef PI
 #define PI 3.14159265358979323846
 #endif
@@ -35,6 +38,24 @@ Logger ROBOT::logger;
 // ==============================================================================
 // HELPER FUNCTIONS
 // ==============================================================================
+
+static void formatBytes(uint64_t bytes, char* output, size_t capacity) {
+    const char* unit = "B";
+    double value = static_cast<double>(bytes);
+
+    if (bytes >= (1024ULL * 1024ULL * 1024ULL)) {
+        value /= 1024.0 * 1024.0 * 1024.0;
+        unit = "GB";
+    } else if (bytes >= (1024ULL * 1024ULL)) {
+        value /= 1024.0 * 1024.0;
+        unit = "MB";
+    } else if (bytes >= 1024ULL) {
+        value /= 1024.0;
+        unit = "kB";
+    }
+
+    snprintf(output, capacity, "%.2f %s", value, unit);
+}
 
 static void readMacAddress() {
     uint8_t baseMac[6];
@@ -410,6 +431,149 @@ void ROBOT::runEKF(void *param) {
     }
 }
 
+bool ROBOT::updateDateTime(uint16_t year, uint8_t month, uint8_t day,
+                           uint8_t hour, uint8_t minute, uint8_t second) {
+    if (year < 2020 || month < 1 || month > 12 || day < 1 || day > 31 ||
+        hour > 23 || minute > 59 || second > 59) {
+        return false;
+    }
+
+    // Interpret the command values as local Brazilian time (UTC-3).
+    setenv("TZ", ROBOT_TIMEZONE, 1);
+    tzset();
+
+    struct tm requested_time{};
+    requested_time.tm_year = year - 1900;
+    requested_time.tm_mon = month - 1;
+    requested_time.tm_mday = day;
+    requested_time.tm_hour = hour;
+    requested_time.tm_min = minute;
+    requested_time.tm_sec = second;
+    requested_time.tm_isdst = -1;
+
+    const time_t timestamp = mktime(&requested_time);
+    if (timestamp == static_cast<time_t>(-1)) return false;
+
+    // mktime normalizes invalid dates, such as 31 February. Compare the result
+    // to reject those values instead of silently changing the requested date.
+    struct tm verified_time{};
+    localtime_r(&timestamp, &verified_time);
+    if (verified_time.tm_year != year - 1900 ||
+        verified_time.tm_mon != month - 1 ||
+        verified_time.tm_mday != day ||
+        verified_time.tm_hour != hour ||
+        verified_time.tm_min != minute ||
+        verified_time.tm_sec != second) {
+        return false;
+    }
+
+    const struct timeval system_time{
+        .tv_sec = timestamp,
+        .tv_usec = 0,
+    };
+
+    if (settimeofday(&system_time, nullptr) != 0) return false;
+
+    clock_synchronized = true;
+    return true;
+}
+
+bool ROBOT::makeLogFilename(char* filename, size_t capacity) {
+    if (!clock_synchronized || filename == nullptr || capacity == 0) return false;
+
+    const time_t timestamp = time(nullptr);
+    struct tm local_time{};
+    if (localtime_r(&timestamp, &local_time) == nullptr) return false;
+
+    int written = snprintf(
+        filename, capacity, "log_%04d-%02d-%02d_%02d-%02d-%02d.blog",
+        local_time.tm_year + 1900, local_time.tm_mon + 1, local_time.tm_mday,
+        local_time.tm_hour, local_time.tm_min, local_time.tm_sec);
+
+    if (written <= 0 || static_cast<size_t>(written) >= capacity) return false;
+    if (!sd_card.file_exists(filename)) return true;
+
+    // Do not overwrite a log when two new flushes happen in the same second.
+    for (uint8_t suffix = 1; suffix < 100; ++suffix) {
+        written = snprintf(
+            filename, capacity,
+            "log_%04d-%02d-%02d_%02d-%02d-%02d_%02u.blog",
+            local_time.tm_year + 1900, local_time.tm_mon + 1,
+            local_time.tm_mday, local_time.tm_hour, local_time.tm_min,
+            local_time.tm_sec, suffix);
+
+        if (written > 0 && static_cast<size_t>(written) < capacity &&
+            !sd_card.file_exists(filename)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool ROBOT::findLatestLogFile(char* filename, size_t capacity) {
+    if (filename == nullptr || capacity == 0) return false;
+    filename[0] = '\0';
+
+    const uint16_t file_count = sd_card.get_file_count();
+    for (uint16_t index = 0; index < file_count; ++index) {
+        SDFileInfo info{};
+        if (!sd_card.get_file_info(index, info)) continue;
+
+        const size_t name_length = strlen(info.name);
+        if (name_length < 10 || strncmp(info.name, "log_", 4) != 0 ||
+            strcmp(info.name + name_length - 5, ".blog") != 0) {
+            continue;
+        }
+
+        // ISO date/time in the filename makes lexical order chronological.
+        if (filename[0] == '\0' || strcmp(info.name, filename) > 0) {
+            const int written = snprintf(filename, capacity, "%s", info.name);
+            if (written <= 0 || static_cast<size_t>(written) >= capacity) {
+                filename[0] = '\0';
+                return false;
+            }
+        }
+    }
+
+    return filename[0] != '\0';
+}
+
+bool ROBOT::flushLoggerToSD(bool append) {
+    if (!sd_card.is_mounted()) return false;
+
+    char filename[SDFileInfo::MAX_NAME_LENGTH];
+
+    if (append) {
+        if (last_log_file[0] != '\0' && sd_card.file_exists(last_log_file)) {
+            snprintf(filename, sizeof(filename), "%s", last_log_file);
+        } else if (!findLatestLogFile(filename, sizeof(filename))) {
+            return false;
+        }
+    } else if (!makeLogFilename(filename, sizeof(filename))) {
+        return false;
+    }
+
+    if (!sd_card.open_write_stream(filename, append)) return false;
+
+    const bool stored = logger.flush_logs_to(
+        [](const uint8_t* data, size_t length, void* context) -> bool {
+            auto* card = static_cast<SDCard*>(context);
+            return card->write_stream(data, length);
+        },
+        &sd_card);
+
+    const bool closed = sd_card.close_stream();
+
+    if (!append) {
+        snprintf(last_log_file, sizeof(last_log_file), "%s", filename);
+    } else if (last_log_file[0] == '\0') {
+        snprintf(last_log_file, sizeof(last_log_file), "%s", filename);
+    }
+
+    return stored && closed;
+}
+
 void ROBOT::startWrappers() {
     // commands for testing and debugging
     shell.create_module("robot", "Module for robot control commands");
@@ -449,6 +613,168 @@ void ROBOT::startWrappers() {
         instance_->leds.setFlag(pin, time);
         return RESULT_OK;
     }, "set_led", "turn on a LED", "robot");
+
+    // SD card, retained PSRAM logs and robot clock commands.
+    shell.create_module("storage", "SD card and retained log management");
+
+    shell.add([]() -> uint8_t {
+        uint64_t total_bytes = 0;
+        uint64_t used_bytes = 0;
+        uint64_t free_bytes = 0;
+
+        if (!instance_->sd_card.get_storage_info(
+                total_bytes, used_bytes, free_bytes)) {
+            ROBOT::logger.insert_log(logType::ERRO,
+                                     "Failed to read SD card usage");
+            return RESULT_ERROR;
+        }
+
+        const float used_percent = total_bytes == 0
+            ? 0.0f
+            : (used_bytes * 100.0f) / static_cast<float>(total_bytes);
+
+        char total_text[24];
+        char used_text[24];
+        char free_text[24];
+        formatBytes(total_bytes, total_text, sizeof(total_text));
+        formatBytes(used_bytes, used_text, sizeof(used_text));
+        formatBytes(free_bytes, free_text, sizeof(free_text));
+
+        ROBOT::logger.insert_logf(
+            logType::INFO,
+            "SD total=%s used=%s free=%s (%.2f%%)",
+            total_text, used_text, free_text,
+            used_percent);
+        return RESULT_OK;
+    }, "usage", "Show SD card total, used and free bytes", "storage");
+
+    shell.add([]() -> uint8_t {
+        char used_text[24];
+        char capacity_text[24];
+        formatBytes(ROBOT::logger.get_used_bytes(), used_text,
+                    sizeof(used_text));
+        formatBytes(ROBOT::logger.get_capacity_bytes(), capacity_text,
+                    sizeof(capacity_text));
+
+        ROBOT::logger.insert_logf(
+            logType::INFO,
+            "PSRAM logger used=%s capacity=%s (%.2f%%)",
+            used_text,
+            capacity_text,
+            ROBOT::logger.get_write_pct());
+        return RESULT_OK;
+    }, "psram_usage", "Show retained Logger PSRAM usage", "storage");
+
+    shell.add([](uint16_t year, uint8_t month, uint8_t day,
+                 uint8_t hour, uint8_t minute, uint8_t second) -> uint8_t {
+        if (!instance_->updateDateTime(
+                year, month, day, hour, minute, second)) {
+            ROBOT::logger.insert_log(logType::ERRO,
+                                     "Invalid date/time or clock update failed");
+            return RESULT_ERROR;
+        }
+
+        ROBOT::logger.insert_logf(
+            logType::INFO,
+            "Robot time updated: %04u-%02u-%02u %02u:%02u:%02u",
+            year, month, day, hour, minute, second);
+        return RESULT_OK;
+    }, "set_datetime", "Set local time: year,month,day,hour,minute,second",
+       "storage");
+
+    shell.add([]() -> uint8_t {
+        if (!instance_->flushLoggerToSD(false)) {
+            ROBOT::logger.insert_log(
+                logType::ERRO,
+                "Failed to create a new SD log; synchronize date/time first");
+            return RESULT_ERROR;
+        }
+
+        ROBOT::logger.insert_logf(logType::INFO, "PSRAM saved to %s",
+                                  instance_->last_log_file);
+        return RESULT_OK;
+    }, "flush_new", "Save retained PSRAM logs into a new dated file", "storage");
+
+    shell.add([]() -> uint8_t {
+        if (!instance_->flushLoggerToSD(true)) {
+            ROBOT::logger.insert_log(
+                logType::ERRO,
+                "Failed to append PSRAM logs to the latest SD log");
+            return RESULT_ERROR;
+        }
+
+        ROBOT::logger.insert_logf(logType::INFO, "PSRAM appended to %s",
+                                  instance_->last_log_file);
+        return RESULT_OK;
+    }, "flush_append", "Append retained PSRAM logs to the latest log file",
+       "storage");
+
+    shell.add([]() -> uint8_t {
+        if (!instance_->sd_card.is_mounted()) return RESULT_ERROR;
+
+        const uint16_t count = instance_->sd_card.get_file_count();
+        ROBOT::logger.insert_logf(logType::INFO, "SD files: %u", count);
+
+        for (uint16_t index = 0; index < count; ++index) {
+            SDFileInfo info{};
+            if (!instance_->sd_card.get_file_info(index, info)) continue;
+
+            char size_text[24];
+            formatBytes(info.size, size_text, sizeof(size_text));
+
+            ROBOT::logger.insert_logf(
+                logType::INFO, "[%u] %s (%s)", index, info.name, size_text);
+        }
+
+        return RESULT_OK;
+    }, "list_logs", "List files stored at the SD card root", "storage");
+
+    shell.add([](uint16_t file_index, uint32_t delay_msg_ms) -> uint8_t {
+        SDFileInfo info{};
+        if (!instance_->sd_card.get_file_info(file_index, info) ||
+            info.size % sizeof(message) != 0 ||
+            !instance_->sd_card.open_read_stream(info.name)) {
+            ROBOT::logger.insert_log(logType::ERRO,
+                                     "Invalid log index or file format");
+            return RESULT_ERROR;
+        }
+
+        bool success = true;
+        uint32_t sent_messages = 0;
+
+        while (true) {
+            message stored_message{};
+            const size_t read = instance_->sd_card.read_stream(
+                &stored_message, sizeof(stored_message));
+
+            if (read == 0) break;
+            if (read != sizeof(stored_message) ||
+                stored_message.content.size > MAX_CONTENT_SIZE ||
+                stored_message.packet_number == 0 ||
+                stored_message.total_packets == 0 ||
+                !ROBOT::logger.send_message(stored_message)) {
+                success = false;
+                break;
+            }
+
+            ++sent_messages;
+            if (delay_msg_ms > 0) {
+                TickType_t delay_ticks = pdMS_TO_TICKS(delay_msg_ms);
+                if (delay_ticks == 0) delay_ticks = 1;
+                vTaskDelay(delay_ticks);
+            }
+        }
+
+        if (instance_->sd_card.stream_has_error()) success = false;
+        if (!instance_->sd_card.close_stream()) success = false;
+
+        ROBOT::logger.insert_logf(
+            success ? logType::INFO : logType::ERRO,
+            "Log playback %s: %u messages from %s",
+            success ? "finished" : "failed", sent_messages, info.name);
+
+        return success ? RESULT_OK : RESULT_ERROR;
+    }, "print_log", "Replay file by index: file_index,delay_msg_ms", "storage");
 }
 
 // ==============================================================================

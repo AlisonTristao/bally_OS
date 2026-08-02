@@ -5,8 +5,17 @@
 // email: AlisonTristao@hotmail.com
 
 #include <cstddef>
+#include <cstdint>
+#include <cstdio>
 #include "driver/gpio.h"
 #include "sdmmc_cmd.h"
+
+struct SDFileInfo {
+    static constexpr size_t MAX_NAME_LENGTH = 128;
+
+    char name[MAX_NAME_LENGTH];
+    uint64_t size;
+};
 
 /**
  * @brief Manage an SD card connected through the SPI bus.
@@ -124,6 +133,34 @@ public:
      */
     bool file_exists(const char* path) const;
 
+    /**
+     * @brief Read filesystem capacity information.
+     */
+    bool get_storage_info(uint64_t& total_bytes, uint64_t& used_bytes,
+                          uint64_t& free_bytes) const;
+
+    /**
+     * @brief Count regular files stored at the root of the card.
+     */
+    uint16_t get_file_count() const;
+
+    /**
+     * @brief Get the name and size of a root file using its list index.
+     */
+    bool get_file_info(uint16_t index, SDFileInfo& info) const;
+
+    /**
+     * @brief Open one file for sequential access.
+     *
+     * @param append true to preserve content; false to create/overwrite.
+     */
+    bool open_write_stream(const char* path, bool append);
+    bool open_read_stream(const char* path);
+    bool write_stream(const void* data, size_t length);
+    size_t read_stream(void* buffer, size_t capacity);
+    bool close_stream();
+    bool stream_has_error() const;
+
 private:
     // Maximum complete path accepted by the file helpers.
     static constexpr size_t MAX_PATH_LENGTH = 256;
@@ -142,6 +179,8 @@ private:
     int host_slot_ = -1;
     bool bus_owned_ = false;
     bool mounted_ = false;
+    FILE* stream_ = nullptr;
+    bool stream_writable_ = false;
 
     /**
      * @brief Convert a relative path into a complete VFS path.

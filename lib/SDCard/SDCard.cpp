@@ -6,6 +6,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <dirent.h>
 #include <sys/stat.h>
 
 // ============================================================================
@@ -90,6 +91,8 @@ bool SDCard::begin() {
 }
 
 void SDCard::end() {
+    close_stream();
+
     // Unregister the FAT filesystem before releasing the physical SPI bus.
     if (mounted_) {
         esp_vfs_fat_sdcard_unmount(mount_point_, card_);
@@ -225,4 +228,145 @@ bool SDCard::file_exists(const char* path) const {
 
     struct stat info{};
     return stat(full_path, &info) == 0 && S_ISREG(info.st_mode);
+}
+
+// ============================================================================
+// Storage information and file enumeration
+// ============================================================================
+
+bool SDCard::get_storage_info(uint64_t& total_bytes, uint64_t& used_bytes,
+                              uint64_t& free_bytes) const {
+    total_bytes = 0;
+    used_bytes = 0;
+    free_bytes = 0;
+
+    if (!mounted_ ||
+        esp_vfs_fat_info(mount_point_, &total_bytes, &free_bytes) != ESP_OK) {
+        return false;
+    }
+
+    used_bytes = total_bytes - free_bytes;
+    return true;
+}
+
+uint16_t SDCard::get_file_count() const {
+    if (!mounted_) return 0;
+
+    DIR* directory = opendir(mount_point_);
+    if (directory == nullptr) return 0;
+
+    uint16_t count = 0;
+    struct dirent* entry = nullptr;
+
+    while ((entry = readdir(directory)) != nullptr) {
+        char full_path[MAX_PATH_LENGTH];
+        struct stat info{};
+
+        if (!make_path(entry->d_name, full_path, sizeof(full_path)) ||
+            stat(full_path, &info) != 0 || !S_ISREG(info.st_mode)) {
+            continue;
+        }
+
+        if (count < 0xFFFFU) ++count;
+    }
+
+    closedir(directory);
+    return count;
+}
+
+bool SDCard::get_file_info(uint16_t index, SDFileInfo& file_info) const {
+    file_info.name[0] = '\0';
+    file_info.size = 0;
+
+    if (!mounted_) return false;
+
+    DIR* directory = opendir(mount_point_);
+    if (directory == nullptr) return false;
+
+    uint16_t current_index = 0;
+    bool found = false;
+    struct dirent* entry = nullptr;
+
+    while ((entry = readdir(directory)) != nullptr) {
+        char full_path[MAX_PATH_LENGTH];
+        struct stat info{};
+
+        if (!make_path(entry->d_name, full_path, sizeof(full_path)) ||
+            stat(full_path, &info) != 0 || !S_ISREG(info.st_mode)) {
+            continue;
+        }
+
+        if (current_index++ != index) continue;
+
+        const int written = snprintf(file_info.name, sizeof(file_info.name),
+                                     "%s", entry->d_name);
+        if (written > 0 && static_cast<size_t>(written) < sizeof(file_info.name)) {
+            file_info.size = static_cast<uint64_t>(info.st_size);
+            found = true;
+        }
+        break;
+    }
+
+    closedir(directory);
+    return found;
+}
+
+// ============================================================================
+// Sequential file access used by Logger flush and playback
+// ============================================================================
+
+bool SDCard::open_write_stream(const char* path, bool append) {
+    if (stream_ != nullptr) return false;
+
+    char full_path[MAX_PATH_LENGTH];
+    if (!make_path(path, full_path, sizeof(full_path))) return false;
+
+    stream_ = fopen(full_path, append ? "ab" : "wb");
+    stream_writable_ = stream_ != nullptr;
+    return stream_ != nullptr;
+}
+
+bool SDCard::open_read_stream(const char* path) {
+    if (stream_ != nullptr) return false;
+
+    char full_path[MAX_PATH_LENGTH];
+    if (!make_path(path, full_path, sizeof(full_path))) return false;
+
+    stream_ = fopen(full_path, "rb");
+    stream_writable_ = false;
+    return stream_ != nullptr;
+}
+
+bool SDCard::write_stream(const void* data, size_t length) {
+    if (stream_ == nullptr || !stream_writable_ ||
+        (data == nullptr && length > 0)) {
+        return false;
+    }
+
+    return length == 0 || fwrite(data, 1, length, stream_) == length;
+}
+
+size_t SDCard::read_stream(void* buffer, size_t capacity) {
+    if (stream_ == nullptr || stream_writable_ ||
+        buffer == nullptr || capacity == 0) {
+        return 0;
+    }
+
+    return fread(buffer, 1, capacity, stream_);
+}
+
+bool SDCard::close_stream() {
+    if (stream_ == nullptr) return true;
+
+    bool success = true;
+    if (stream_writable_ && fflush(stream_) != 0) success = false;
+    if (fclose(stream_) != 0) success = false;
+
+    stream_ = nullptr;
+    stream_writable_ = false;
+    return success;
+}
+
+bool SDCard::stream_has_error() const {
+    return stream_ != nullptr && ferror(stream_) != 0;
 }

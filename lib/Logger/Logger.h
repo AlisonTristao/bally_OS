@@ -17,6 +17,7 @@ class Logger {
 public:
     // Define a type for the send callback function
     using SendCallback = bool (*)(const uint8_t *data, size_t len);
+    using StorageCallback = bool (*)(const uint8_t *data, size_t len, void *context);
 
     // initialize metods
     Logger();
@@ -53,6 +54,18 @@ public:
     void flush_logs();
 
     /**
+     * @brief Save all retained messages using a storage callback and release
+     * their PSRAM only after each complete message is stored.
+     */
+    bool flush_logs_to(StorageCallback callback, void* context);
+
+    /**
+     * @brief Send an already formatted message without storing it in PSRAM.
+     * Used to replay log files without creating duplicated retained logs.
+     */
+    bool send_message(const message& msg);
+
+    /**
      * @brief Get the current write index of the logger's buffer. This is used for debugging purposes to track where the next log message will be written in the buffer.
      * 
      * @return The current write index of the logger's buffer.
@@ -61,6 +74,9 @@ public:
         return (used_bytes_ * 100.0f) /
                static_cast<float>(storage_capacity_);
     }
+    uint32_t get_used_bytes() const { return used_bytes_; }
+    uint32_t get_capacity_bytes() const { return storage_capacity_; }
+    uint32_t get_pending_send_bytes() const { return pending_send_bytes_; }
 
 private:
     // private members for the logger
@@ -80,10 +96,15 @@ private:
     uint32_t read_offset_ = 0;
     uint32_t used_bytes_ = 0;
 
-    // Protect the oldest record while it is fragmented and sent.
-    bool flush_record_active_ = false;
-    StoredLogHeader flush_header_{};
-    uint16_t flush_packet_index_ = 0;
+    // ESP-NOW has its own cursor. Sending does not release retained PSRAM.
+    uint32_t send_offset_ = 0;
+    uint32_t pending_send_bytes_ = 0;
+    bool send_record_active_ = false;
+    StoredLogHeader send_header_{};
+    uint16_t send_packet_index_ = 0;
+
+    // Only one consumer (ESP-NOW or SD) may walk the ring at a time.
+    bool consumer_busy_ = false;
 
     SemaphoreHandle_t mutex_ = NULL;
     SendCallback send_callback_;
@@ -121,9 +142,11 @@ private:
     // byte-ring helpers; caller must hold mutex_
     void write_to_ring(const void* source, size_t len);
     void read_from_ring(uint32_t offset, void* destination, size_t len) const;
-    bool peek_oldest_header(StoredLogHeader& header) const;
-    bool discard_oldest_record();
+    bool read_header_at(uint32_t offset, uint32_t available,
+                        StoredLogHeader& header) const;
     void clear_ring();
+    bool begin_consumer();
+    void end_consumer();
 
     // funtion to menager the mutex
     bool wait_for_mutex();  // wait indefinitely for the mutex to be available

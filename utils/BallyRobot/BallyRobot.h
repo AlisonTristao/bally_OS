@@ -116,12 +116,21 @@ private:
     // save a instance of the ROBOT class to be used in the static functions
     static ROBOT* instance_;
     bool initialized = false;
+    bool clock_synchronized = false;
+    char last_log_file[SDFileInfo::MAX_NAME_LENGTH] = {};
 
     // matriz of data to kalman filter
     float control_input[EKF_CONTROL_DIM] = {0, 0}; // left and right motor pwm
     float measurement[EKF_MEASURE_DIM] = {0, 0, 0, 0, 0};
 
     void initEKF();
+
+    // Date/time and SD log management used by the storage shell wrappers.
+    bool updateDateTime(uint16_t year, uint8_t month, uint8_t day,
+                        uint8_t hour, uint8_t minute, uint8_t second);
+    bool makeLogFilename(char* filename, size_t capacity);
+    bool findLatestLogFile(char* filename, size_t capacity);
+    bool flushLoggerToSD(bool append);
 
     // configure the pins, the i2c communication and other settings for the robot
     bool configurePins();
