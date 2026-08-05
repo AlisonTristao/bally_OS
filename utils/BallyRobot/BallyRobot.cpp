@@ -437,20 +437,23 @@ void ROBOT::initEKF() {
         {0.0f, cfg.initial_p, 0.0f},
         {0.0f, 0.0f, cfg.initial_p}
     };
-    float Q[3][3] = {
+    // Q and R are handed to TinyEKF's constructor and become const for the
+    // filter's lifetime (see TinyEKF.h) — changing ekf_noise.* settings only
+    // takes effect after the next reboot re-runs this function.
+    const TinyEKF::StateMat Q{{
         {cfg.v_noise, 0.0f,  0.0f},
         {0.0f,  cfg.w_noise, 0.0f},
         {0.0f,  0.0f,  cfg.b_noise}
-    };
-    float R[5][5] = {
+    }};
+    const TinyEKF::MeasureMat R{{
         {cfg.enc_noise, 0.0f, 0.0f, 0.0f, 0.0f},
         {0.0f, cfg.enc_noise, 0.0f, 0.0f, 0.0f},
         {0.0f, 0.0f, cfg.gyro_noise, 0.0f, 0.0f},
         {0.0f, 0.0f, 0.0f, cfg.accel_noise, 0.0f},
         {0.0f, 0.0f, 0.0f, 0.0f, cfg.accel_noise}
-    };
+    }};
 
-    EKF.init(x0, P0, Q, R);
+    EKF.emplace(x0, P0, Q, R);
 }
 
 float ROBOT::getSpeedFromEncoders() {
@@ -497,8 +500,8 @@ void ROBOT::runEKF(void *param) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
         // run the EKF prediction and update steps with the latest control input and measurement
-        instance_->EKF.predict(instance_->control_input);
-        instance_->EKF.update(instance_->control_input, instance_->measurement);
+        instance_->EKF->predict(instance_->control_input);
+        instance_->EKF->update(instance_->control_input, instance_->measurement);
     }
 }
 

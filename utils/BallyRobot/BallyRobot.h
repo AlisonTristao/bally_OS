@@ -163,7 +163,6 @@ private:
     // default constructor
     ROBOT() :   machine(NONE, NULL, NULL),
                 sd_card(MISO, SCK, MOSI, CS),
-                EKF(),
                 buttons("Buttons"),
                 sideSensors("Side Sensors"),
                 leds("LEDs"),
@@ -182,7 +181,10 @@ private:
     std::optional<Encoder> encoder_left;
     std::optional<Encoder> encoder_right;
     //ICM42688 imu;
-    TinyEKF EKF;
+    // Constructed in initEKF() (called from init(), after settings.load())
+    // since Q/R are const and set from settings — same reason as
+    // array_sensor/encoder_*/motor_* above.
+    std::optional<TinyEKF> EKF;
     TaskHandle_t ekf_task_handle = nullptr; 
 
     // Signals and flags for buttons, sensors, LEDs, and motors
