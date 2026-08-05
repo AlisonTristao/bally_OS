@@ -149,7 +149,7 @@ static void init_system_monitor() {
             while (true) {
                 mon->update();
                 mon->report();
-                vTaskDelay(pdMS_TO_TICKS(SYSMON_FREQ_MS));
+                vTaskDelay(pdMS_TO_TICKS(robot.settings.data().sysmon_freq_ms));
             }
         }, "system_monitor", M4KB, &monitor, 1, xSystemMonitorStack, &xSystemMonitorBuffer, PRO_CPU_NUM
     );

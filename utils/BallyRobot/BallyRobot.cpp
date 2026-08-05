@@ -102,103 +102,110 @@ uint8_t testPacket() {
 // HARDWARE CONFIGURATION
 // ==============================================================================
 
-bool ROBOT::configurePins()
+namespace {
+
+bool configureOutputPin(gpio_num_t pin, uint32_t initialLevel)
 {
-    const auto configureOutput =
-        [](gpio_num_t pin, uint32_t initialLevel) -> bool
-    {
-        if (!GPIO_IS_VALID_OUTPUT_GPIO(pin)) {
-            return false;
-        }
+    if (!GPIO_IS_VALID_OUTPUT_GPIO(pin)) {
+        return false;
+    }
 
-        if (gpio_reset_pin(pin) != ESP_OK) {
-            return false;
-        }
+    if (gpio_reset_pin(pin) != ESP_OK) {
+        return false;
+    }
 
-        if (gpio_set_direction(pin, GPIO_MODE_OUTPUT) != ESP_OK) {
-            return false;
-        }
+    if (gpio_set_direction(pin, GPIO_MODE_OUTPUT) != ESP_OK) {
+        return false;
+    }
 
-        if (gpio_set_pull_mode(pin, GPIO_FLOATING) != ESP_OK) {
-            return false;
-        }
+    if (gpio_set_pull_mode(pin, GPIO_FLOATING) != ESP_OK) {
+        return false;
+    }
 
-        if (gpio_set_level(pin, initialLevel) != ESP_OK) {
-            return false;
-        }
+    if (gpio_set_level(pin, initialLevel) != ESP_OK) {
+        return false;
+    }
 
-        return true;
-    };
+    return true;
+}
 
-    const auto configureInput =
-        [](gpio_num_t pin, gpio_pull_mode_t pullMode) -> bool
-    {
-        if (!GPIO_IS_VALID_GPIO(pin)) {
-            return false;
-        }
+bool configureInputPin(gpio_num_t pin, gpio_pull_mode_t pullMode)
+{
+    if (!GPIO_IS_VALID_GPIO(pin)) {
+        return false;
+    }
 
-        if (gpio_reset_pin(pin) != ESP_OK) {
-            return false;
-        }
+    if (gpio_reset_pin(pin) != ESP_OK) {
+        return false;
+    }
 
-        if (gpio_set_direction(pin, GPIO_MODE_INPUT) != ESP_OK) {
-            return false;
-        }
+    if (gpio_set_direction(pin, GPIO_MODE_INPUT) != ESP_OK) {
+        return false;
+    }
 
-        if (gpio_set_pull_mode(pin, pullMode) != ESP_OK) {
-            return false;
-        }
+    if (gpio_set_pull_mode(pin, pullMode) != ESP_OK) {
+        return false;
+    }
 
-        return true;
-    };
+    return true;
+}
+
+} // namespace
+
+bool ROBOT::configurePinsEarly()
+{
+    // O cartão SD deve iniciar desselecionado. CS é o único pino que
+    // precisa existir antes de sd_card.begin() montar o cartão e permitir
+    // a leitura de settings.conf, então continua fixo (include/Settings.h).
+    return configureOutputPin(CS, 1);
+}
+
+bool ROBOT::configurePinsFromSettings()
+{
+    const SettingsData& cfg = settings.data();
 
     // --------------------------------------------------------
     // Saídas que devem iniciar desligadas/em nível baixo
     // --------------------------------------------------------
     const gpio_num_t out_pins[] = {
-        LED0,
-        LED1,
-        LED2,
-        LED3, 
+        static_cast<gpio_num_t>(cfg.led0),
+        static_cast<gpio_num_t>(cfg.led1),
+        static_cast<gpio_num_t>(cfg.led2),
+        static_cast<gpio_num_t>(cfg.led3),
 
-        AIN1,
-        AIN2,
-        BIN1,
-        BIN2,
+        static_cast<gpio_num_t>(cfg.ain1),
+        static_cast<gpio_num_t>(cfg.ain2),
+        static_cast<gpio_num_t>(cfg.bin1),
+        static_cast<gpio_num_t>(cfg.bin2),
 
-        BZR,
+        static_cast<gpio_num_t>(cfg.bzr),
 
-        S0,
-        S1,
-        S2
+        // S0/S1/S2 (mux select) are intentionally not configured here —
+        // ArraySensor's constructor owns them, together with the ADC
+        // channel setup for cfg.sig, and runs right after this function.
     };
 
     for (gpio_num_t pin : out_pins) {
-        if (!configureOutput(pin, 0)) {
+        if (!configureOutputPin(pin, 0)) {
             return false;
         }
-    }
-
-    // O cartão SD deve iniciar desselecionado.
-    if (!configureOutput(CS, 1)) {
-        return false;
     }
 
     // --------------------------------------------------------
     // Entradas digitais
     // --------------------------------------------------------
     const gpio_num_t in_pins[] = {
-        LEFT,
-        RIGHT,
+        static_cast<gpio_num_t>(cfg.left),
+        static_cast<gpio_num_t>(cfg.right),
 
-        ENC_A0,
-        ENC_A1,
-        ENC_B0,
-        ENC_B1
+        static_cast<gpio_num_t>(cfg.enc_a0),
+        static_cast<gpio_num_t>(cfg.enc_a1),
+        static_cast<gpio_num_t>(cfg.enc_b0),
+        static_cast<gpio_num_t>(cfg.enc_b1)
     };
 
     for (gpio_num_t pin : in_pins) {
-        if (!configureInput(pin, GPIO_FLOATING)) {
+        if (!configureInputPin(pin, GPIO_FLOATING)) {
             return false;
         }
     }
@@ -207,13 +214,13 @@ bool ROBOT::configurePins()
     // Botões
     // --------------------------------------------------------
     const gpio_num_t btn_pins[] = {
-        BTN1,
-        BTN2,
-        BTN0
+        static_cast<gpio_num_t>(cfg.btn1),
+        static_cast<gpio_num_t>(cfg.btn2),
+        static_cast<gpio_num_t>(cfg.btn0)
     };
 
     for (gpio_num_t pin : btn_pins) {
-        if (!configureInput(pin, GPIO_PULLUP_ONLY)) {
+        if (!configureInputPin(pin, GPIO_PULLUP_ONLY)) {
             return false;
         }
     }
@@ -222,13 +229,13 @@ bool ROBOT::configurePins()
     // Entradas analógicas
     // --------------------------------------------------------
     const gpio_num_t analog_pins[] = {
-        SIG,
-        CURRENT_A,
-        CURRENT_B
+        static_cast<gpio_num_t>(cfg.sig),
+        static_cast<gpio_num_t>(cfg.current_a),
+        static_cast<gpio_num_t>(cfg.current_b)
     };
 
     for (gpio_num_t pin : analog_pins) {
-        if (!configureInput(pin, GPIO_FLOATING)) {
+        if (!configureInputPin(pin, GPIO_FLOATING)) {
             return false;
         }
     }
@@ -306,8 +313,8 @@ bool ROBOT::configureCommunication() {
 // ==============================================================================
 
 void ROBOT::setTimeLimit() {
-    buttons.setTimeLimit(DELAY_FLAGS);
-    sideSensors.setTimeLimit(DELAY_FLAGS);
+    buttons.setTimeLimit(settings.data().delay_flags);
+    sideSensors.setTimeLimit(settings.data().delay_flags);
 }
 
 void ROBOT::resetFlags() {
@@ -322,10 +329,11 @@ void ROBOT::setOutputs() {
     //motor_right.applyPWM(motors.getValue(MOTOR_RIGHT_idx));
     // turn on the leds according to the BITS of the arr_stats variable
     uint8_t arr_stats = leds.getFlags();
-    gpio_set_level(LED0, (arr_stats & (1 << LED0_idx)));
-    gpio_set_level(LED1, (arr_stats & (1 << LED1_idx)));
-    gpio_set_level(LED2, (arr_stats & (1 << LED2_idx)));
-    gpio_set_level(LED3, (arr_stats & (1 << LED3_idx)));
+    const SettingsData& cfg = settings.data();
+    gpio_set_level(static_cast<gpio_num_t>(cfg.led0), (arr_stats & (1 << LED0_idx)));
+    gpio_set_level(static_cast<gpio_num_t>(cfg.led1), (arr_stats & (1 << LED1_idx)));
+    gpio_set_level(static_cast<gpio_num_t>(cfg.led2), (arr_stats & (1 << LED2_idx)));
+    gpio_set_level(static_cast<gpio_num_t>(cfg.led3), (arr_stats & (1 << LED3_idx)));
 }
 
 bool ROBOT::startArraySensorTest(uint32_t samples, uint32_t interval_ms) {
@@ -347,8 +355,8 @@ bool ROBOT::startArraySensorTest(uint32_t samples, uint32_t interval_ms) {
 void ROBOT::processDebug() {
     // DEBUG is a safe test state: keep both motor commands at zero on every
     // pass, while the normal outer task delay continues yielding the CPU.
-    motors.setValue(MOTOR_LEFT_idx, 0, DELAY_FLAGS);
-    motors.setValue(MOTOR_RIGHT_idx, 0, DELAY_FLAGS);
+    motors.setValue(MOTOR_LEFT_idx, 0, settings.data().delay_flags);
+    motors.setValue(MOTOR_RIGHT_idx, 0, settings.data().delay_flags);
 
     usb_storage.process();
     if (usb_storage.is_active()) return;
@@ -368,7 +376,7 @@ void ROBOT::processDebug() {
     // Signed subtraction keeps the comparison valid across millis overflow.
     if (static_cast<int32_t>(now_ms - next_ms) < 0) return;
 
-    logger.insert_log(logType::INFO, array_sensor.debug().c_str());
+    logger.insert_log(logType::INFO, array_sensor->debug().c_str());
     array_sensor_test_remaining.store(remaining - 1,
                                       std::memory_order_release);
     array_sensor_test_next_ms.store(
@@ -391,7 +399,7 @@ bool ROBOT::consumeDirectShellOutputRequest() {
 }
 
 void ROBOT::checkStateMachine() {
-    if ((uint32_t)(esp_timer_get_time() / 1000ULL) - instance_->stateMachineTimer > DELAY_FLAGS) {
+    if ((uint32_t)(esp_timer_get_time() / 1000ULL) - instance_->stateMachineTimer > instance_->settings.data().delay_flags) {
         ROBOT::machine.next(ROBOT::buttons.getFlags());
         instance_->stateMachineTimer = (uint32_t)(esp_timer_get_time() / 1000ULL);  
     }   
@@ -428,37 +436,41 @@ void ROBOT::handleSendStatic(const wifi_tx_info_t *tx_info, esp_now_send_status_
 // ==============================================================================
 
 void ROBOT::initEKF() {
+    const SettingsData& cfg = settings.data();
+
     float x0[3] = {0.0f, 0.0f, 0.0f};
     float P0[3][3] = {
-        {INITIAL_P, 0.0f, 0.0f},
-        {0.0f, INITIAL_P, 0.0f},
-        {0.0f, 0.0f, INITIAL_P}
+        {cfg.initial_p, 0.0f, 0.0f},
+        {0.0f, cfg.initial_p, 0.0f},
+        {0.0f, 0.0f, cfg.initial_p}
     };
     float Q[3][3] = {
-        {V_NOISE, 0.0f,  0.0f},  
-        {0.0f,  W_NOISE, 0.0f},   
-        {0.0f,  0.0f,  B_NOISE} 
+        {cfg.v_noise, 0.0f,  0.0f},
+        {0.0f,  cfg.w_noise, 0.0f},
+        {0.0f,  0.0f,  cfg.b_noise}
     };
     float R[5][5] = {
-        {ENC_NOISE, 0.0f, 0.0f, 0.0f, 0.0f},
-        {0.0f, ENC_NOISE, 0.0f, 0.0f, 0.0f}, 
-        {0.0f, 0.0f, GYRO_NOISE, 0.0f, 0.0f}, 
-        {0.0f, 0.0f, 0.0f, ACCEL_NOISE, 0.0f},
-        {0.0f, 0.0f, 0.0f, 0.0f, ACCEL_NOISE}
+        {cfg.enc_noise, 0.0f, 0.0f, 0.0f, 0.0f},
+        {0.0f, cfg.enc_noise, 0.0f, 0.0f, 0.0f},
+        {0.0f, 0.0f, cfg.gyro_noise, 0.0f, 0.0f},
+        {0.0f, 0.0f, 0.0f, cfg.accel_noise, 0.0f},
+        {0.0f, 0.0f, 0.0f, 0.0f, cfg.accel_noise}
     };
 
     EKF.init(x0, P0, Q, R);
 }
 
 float ROBOT::getSpeedFromEncoders() {
-    float left_speed = encoder_left.getCountDiff()/ENCODER_PPR * WHEEL_RADIUS * 2.0f * PI * FREQ_EKF;
-    float right_speed = encoder_right.getCountDiff()/ENCODER_PPR * WHEEL_RADIUS * 2.0f * PI * FREQ_EKF;
+    const SettingsData& cfg = settings.data();
+    float left_speed = encoder_left->getCountDiff()/cfg.encoder_ppr * cfg.wheel_radius * 2.0f * PI * settings.freq_ekf();
+    float right_speed = encoder_right->getCountDiff()/cfg.encoder_ppr * cfg.wheel_radius * 2.0f * PI * settings.freq_ekf();
     return (left_speed + right_speed) / 2.0f;
 }
 
 float ROBOT::getOmegaFromEncoders() {
-    float left_speed = encoder_left.getCountDiff()/ENCODER_PPR * WHEEL_RADIUS * 2.0f * PI * FREQ_EKF;
-    float right_speed = encoder_right.getCountDiff()/ENCODER_PPR * WHEEL_RADIUS * 2.0f * PI * FREQ_EKF;
+    const SettingsData& cfg = settings.data();
+    float left_speed = encoder_left->getCountDiff()/cfg.encoder_ppr * cfg.wheel_radius * 2.0f * PI * settings.freq_ekf();
+    float right_speed = encoder_right->getCountDiff()/cfg.encoder_ppr * cfg.wheel_radius * 2.0f * PI * settings.freq_ekf();
     return (right_speed - left_speed) / EKF_WHEEL_BASE;
 }
 
@@ -504,8 +516,8 @@ bool ROBOT::updateDateTime(uint16_t year, uint8_t month, uint8_t day,
         return false;
     }
 
-    // Interpret the command values as local Brazilian time (UTC-3).
-    setenv("TZ", ROBOT_TIMEZONE, 1);
+    // Interpret the command values as local Brazilian time (UTC-3 by default).
+    setenv("TZ", settings.data().timezone, 1);
     tzset();
 
     struct tm requested_time{};
@@ -1041,6 +1053,112 @@ void ROBOT::startWrappers() {
 
         return success ? RESULT_OK : RESULT_ERROR;
     }, "print_log", "Replay file by index: file_index,delay_msg_ms", "storage");
+
+    // Runtime settings backed by settings.conf on the SD card (see
+    // lib/RobotSettings). "set"/"reset"/"reset_all" only change the
+    // in-memory copy; "save" persists it, and every change needs a reboot
+    // to actually take effect (pins, timers and EKF init are all applied
+    // once, at boot).
+    shell.create_module("settings", "Runtime robot settings backed by settings.conf");
+
+    shell.add([](std::string module, std::string key) -> uint8_t {
+        std::string value;
+        if (!instance_->settings.get(module.c_str(), key.c_str(), value)) {
+            ROBOT::logger.insert_logf(logType::ERRO, "Unknown setting: %s.%s",
+                                      module.c_str(), key.c_str());
+            return RESULT_ERROR;
+        }
+
+        ROBOT::logger.insert_logf(logType::INFO, "%s.%s=%s", module.c_str(),
+                                  key.c_str(), value.c_str());
+        return RESULT_OK;
+    }, "get", "Read one setting: module,key", "settings");
+
+    shell.add([](std::string module, std::string key, std::string value) -> uint8_t {
+        if (!instance_->settings.set(module.c_str(), key.c_str(), value.c_str())) {
+            ROBOT::logger.insert_logf(
+                logType::ERRO,
+                "Failed to set %s.%s: unknown setting or invalid value",
+                module.c_str(), key.c_str());
+            return RESULT_ERROR;
+        }
+
+        ROBOT::logger.insert_logf(
+            logType::INFO,
+            "%s.%s set in memory; run 'settings save' to persist, reboot to apply",
+            module.c_str(), key.c_str());
+        return RESULT_OK;
+    }, "set", "Change one setting in memory: module,key,value", "settings");
+
+    shell.add([](std::string module) -> uint8_t {
+        std::string out;
+        instance_->settings.list(module.c_str(), out);
+
+        if (out.empty()) {
+            ROBOT::logger.insert_logf(logType::ERRO, "Unknown settings module: %s",
+                                      module.c_str());
+            return RESULT_ERROR;
+        }
+
+        ROBOT::logger.insert_log(logType::INFO, out.c_str());
+        return RESULT_OK;
+    }, "list", "List every setting in one module", "settings");
+
+    shell.add([]() -> uint8_t {
+        std::string out;
+        instance_->settings.list_all(out);
+        ROBOT::logger.insert_log(logType::INFO, out.c_str());
+        return RESULT_OK;
+    }, "list_all", "List every setting in every module", "settings");
+
+    shell.add([]() -> uint8_t {
+        if (!instance_->settings.save(instance_->sd_card)) {
+            ROBOT::logger.insert_log(
+                logType::ERRO, "Failed to save settings.conf: SD card not mounted");
+            return RESULT_ERROR;
+        }
+
+        ROBOT::logger.send_log_direct(logType::INFO, "Settings saved to settings.conf");
+        instance_->sendNextShellOutputDirect();
+        return RESULT_OK;
+    }, "save", "Persist current settings to settings.conf", "settings");
+
+    shell.add([]() -> uint8_t {
+        uint16_t skipped = 0;
+        if (!instance_->settings.load(instance_->sd_card, &skipped)) {
+            ROBOT::logger.insert_log(
+                logType::ERRO, "Failed to load settings.conf: SD card not mounted");
+            return RESULT_ERROR;
+        }
+
+        ROBOT::logger.insert_logf(
+            logType::INFO,
+            "Settings reloaded from settings.conf (%u line(s) ignored); reboot to apply",
+            skipped);
+        return RESULT_OK;
+    }, "load", "Reload settings.conf from SD, discarding unsaved edits", "settings");
+
+    shell.add([](std::string module) -> uint8_t {
+        if (!instance_->settings.reset_module(module.c_str())) {
+            ROBOT::logger.insert_logf(logType::ERRO, "Unknown settings module: %s",
+                                      module.c_str());
+            return RESULT_ERROR;
+        }
+
+        ROBOT::logger.insert_logf(
+            logType::INFO,
+            "%s reset to defaults in memory; run 'settings save' to persist",
+            module.c_str());
+        return RESULT_OK;
+    }, "reset", "Reset one module to compiled-in defaults, in memory", "settings");
+
+    shell.add([]() -> uint8_t {
+        instance_->settings.reset_all();
+        ROBOT::logger.insert_log(
+            logType::INFO,
+            "All settings reset to defaults in memory; run 'settings save' to persist");
+        return RESULT_OK;
+    }, "reset_all", "Reset every setting to compiled-in defaults, in memory", "settings");
 }
 
 // ==============================================================================
@@ -1050,46 +1168,55 @@ void ROBOT::startWrappers() {
 void ROBOT::initInterruptions(void *param){
     (void)param; // Suppress unused parameter warning
 
-    // set the interrupt type for the buttons and side sensors, 
+    // Settings are already loaded by the time this task runs (it's started
+    // in main.cpp after robot.init() returns).
+    const SettingsData& cfg = instance_->settings.data();
+    const gpio_num_t btn0 = static_cast<gpio_num_t>(cfg.btn0);
+    const gpio_num_t btn1 = static_cast<gpio_num_t>(cfg.btn1);
+    const gpio_num_t btn2 = static_cast<gpio_num_t>(cfg.btn2);
+    const gpio_num_t left = static_cast<gpio_num_t>(cfg.left);
+    const gpio_num_t right = static_cast<gpio_num_t>(cfg.right);
+
+    // set the interrupt type for the buttons and side sensors,
     // and add the corresponding ISR handlers to set the flags when the interrupts are triggered
-    gpio_set_intr_type((gpio_num_t)BTN0, GPIO_INTR_NEGEDGE); // FALLING
-    gpio_isr_handler_add((gpio_num_t)BTN0, [](void* arg) IRAM_ATTR {
+    gpio_set_intr_type(btn0, GPIO_INTR_NEGEDGE); // FALLING
+    gpio_isr_handler_add(btn0, [](void* arg) IRAM_ATTR {
         instance_->buttons.setFlag(BIT_0);
     }, nullptr);
 
-    gpio_set_intr_type((gpio_num_t)BTN1, GPIO_INTR_NEGEDGE);
-    gpio_isr_handler_add((gpio_num_t)BTN1, [](void* arg) IRAM_ATTR {
+    gpio_set_intr_type(btn1, GPIO_INTR_NEGEDGE);
+    gpio_isr_handler_add(btn1, [](void* arg) IRAM_ATTR {
         instance_->buttons.setFlag(BIT_1);
     }, nullptr);
 
-    gpio_set_intr_type((gpio_num_t)BTN2, GPIO_INTR_NEGEDGE);
-    gpio_isr_handler_add((gpio_num_t)BTN2, [](void* arg) IRAM_ATTR {
+    gpio_set_intr_type(btn2, GPIO_INTR_NEGEDGE);
+    gpio_isr_handler_add(btn2, [](void* arg) IRAM_ATTR {
         instance_->buttons.setFlag(BIT_2);
     }, nullptr);
 
-    gpio_set_intr_type((gpio_num_t)LEFT, GPIO_INTR_POSEDGE); // RISING
-    gpio_isr_handler_add((gpio_num_t)LEFT, [](void* arg) IRAM_ATTR {
+    gpio_set_intr_type(left, GPIO_INTR_POSEDGE); // RISING
+    gpio_isr_handler_add(left, [](void* arg) IRAM_ATTR {
         instance_->sideSensors.setFlag(BIT_0);
     }, nullptr);
 
-    gpio_set_intr_type((gpio_num_t)RIGHT, GPIO_INTR_POSEDGE);
-    gpio_isr_handler_add((gpio_num_t)RIGHT, [](void* arg) IRAM_ATTR {
+    gpio_set_intr_type(right, GPIO_INTR_POSEDGE);
+    gpio_isr_handler_add(right, [](void* arg) IRAM_ATTR {
         instance_->sideSensors.setFlag(BIT_1);
     }, nullptr);
 
-    // init a periodic timer to get the sensors 
+    // init a periodic timer to get the sensors
     const esp_timer_create_args_t timer_args = {
-        .callback = &ROBOT::sampleEKF,           
-        .arg = nullptr,                    
-        .dispatch_method = ESP_TIMER_TASK, 
+        .callback = &ROBOT::sampleEKF,
+        .arg = nullptr,
+        .dispatch_method = ESP_TIMER_TASK,
         .name = "kalman_trigger",
-        .skip_unhandled_events = false    
+        .skip_unhandled_events = false
     };
 
     // set the timer to trigger the EKF at the defined sample rate
     esp_timer_handle_t timer;
     esp_timer_create(&timer_args, &timer);
-    esp_timer_start_periodic(timer, SAMPLE_MICROS); 
+    esp_timer_start_periodic(timer, cfg.sample_micros);
 
     vTaskDelete(NULL);
 }
@@ -1153,14 +1280,15 @@ void ROBOT::routine(void *param){
 }
 
 bool ROBOT::init() {
-    if (initialized)    
+    if (initialized)
         return true;
-    
+
     // general setup for gpio, i2c, and other peripherals
     gpio_install_isr_service(0);
 
-    // configure the pins and i2c
-    if (!configurePins())
+    // Only CS needs to exist before the SD card can mount and
+    // settings.conf can be read; the rest of the pin config comes after.
+    if (!configurePinsEarly())
         return false;
 
     logger.begin();
@@ -1175,6 +1303,32 @@ bool ROBOT::init() {
                           "Failed to mount SD card through USB storage manager");
     }
 
+    // Load settings.conf (or, if missing/unmounted, keep the compiled-in
+    // defaults already in settings.data() and — when the card is mounted —
+    // persist them as a fresh, complete file).
+    uint16_t settings_skipped = 0;
+    if (!settings.load(sd_card, &settings_skipped)) {
+        logger.insert_log(logType::WARN,
+                          "settings.conf unavailable; using compiled-in defaults");
+    } else if (settings_skipped > 0) {
+        logger.insert_logf(logType::WARN,
+                           "settings.conf: %u unknown/invalid line(s) ignored",
+                           settings_skipped);
+    }
+    logger.set_flush_limits(settings.data().max_chunks_per_flush,
+                            settings.data().block_size);
+
+    // Configure the remaining pins now that settings are known, then build
+    // the peripherals whose constructors need those pins (ArraySensor
+    // touches GPIO/ADC immediately, so it cannot be built earlier).
+    if (!configurePinsFromSettings())
+        return false;
+
+    const SettingsData& cfg = settings.data();
+    array_sensor.emplace(cfg.s0, cfg.s1, cfg.s2, cfg.sig, cfg.len_sensor);
+    encoder_left.emplace(cfg.enc_a0, cfg.enc_a1);
+    encoder_right.emplace(cfg.enc_b0, cfg.enc_b1);
+
     if (!ota.begin(sd_card, leds)) {
         logger.insert_log(logType::ERRO, "Failed to initialize OTA updater");
     }
@@ -1187,15 +1341,15 @@ bool ROBOT::init() {
 
     if (!configureCommunication())
         return false;
-        
+
     //motor_left.init();
     //motor_right.init();
 
-    if (!encoder_left.init()) {
+    if (!encoder_left->init()) {
         ROBOT::logger.insert_log(logType::ERRO, "Failed to initialize left encoder");
         return false;
     }
-    if (!encoder_right.init()) {
+    if (!encoder_right->init()) {
         ROBOT::logger.insert_log(logType::ERRO, "Failed to initialize right encoder");
         return false;
     }

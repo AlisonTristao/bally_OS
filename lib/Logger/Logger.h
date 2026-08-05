@@ -34,8 +34,16 @@ public:
     *
     * @param callback A function pointer to the callback function that will be called to send the log messages.
     */
-    void set_send_callback(SendCallback callback);   
-    
+    void set_send_callback(SendCallback callback);
+
+    /**
+     * @brief Configure how many packets flush_logs() sends per call
+     * (max_chunks_per_flush * block_size). Defaults match the historic
+     * MAX_CHUNKS_PER_FLUSH/BLOCK_SIZE compile-time values; call this once
+     * after loading RobotSettings to apply the runtime-configured ones.
+     */
+    void set_flush_limits(uint32_t max_chunks_per_flush, uint32_t block_size);
+
     /*
     * @brief Insert a log message into the logger's buffer. 
     * This method is thread-safe and can be called from multiple tasks concurrently.
@@ -99,6 +107,8 @@ private:
 
     uint8_t* storage_ = nullptr; // variable-length byte ring in external PSRAM
     const uint32_t storage_capacity_ = LOGGER_PSRAM_CAPACITY_BYTES;
+    uint32_t max_chunks_per_flush_ = 10; // RobotSettings default; see set_flush_limits
+    uint32_t block_size_ = 16;           // RobotSettings default; see set_flush_limits
     uint32_t write_offset_ = 0;
     uint32_t read_offset_ = 0;
     uint32_t used_bytes_ = 0;

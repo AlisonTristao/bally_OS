@@ -63,6 +63,15 @@ void Logger::set_send_callback(SendCallback callback) {
     free_mutex();
 }
 
+void Logger::set_flush_limits(uint32_t max_chunks_per_flush, uint32_t block_size) {
+    if (!wait_for_mutex()) return;
+
+    max_chunks_per_flush_ = max_chunks_per_flush;
+    block_size_ = block_size;
+
+    free_mutex();
+}
+
 bool Logger::defaultSendCallback(const uint8_t *data, size_t len) {
     (void)data;
     (void)len;
@@ -256,7 +265,7 @@ void Logger::reset_loop_counter() {
 void Logger::flush_logs() {
     if (!begin_consumer()) return;
 
-    const uint32_t max_packets = MAX_CHUNKS_PER_FLUSH * BLOCK_SIZE;
+    const uint32_t max_packets = max_chunks_per_flush_ * block_size_;
 
     for (uint32_t sent_packets = 0; sent_packets < max_packets; ++sent_packets) {
         message tx{};

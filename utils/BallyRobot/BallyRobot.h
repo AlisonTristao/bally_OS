@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <optional>
 #include <esp_timer.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
@@ -21,11 +22,12 @@
 #include <TinyEKF.h>
 //#include "driver/i2c.h"
 //#include <ICM42688.h>
-//#include <Wire.h> // pendencia - parar de usar isso aqui - Arduino 
+//#include <Wire.h> // pendencia - parar de usar isso aqui - Arduino
 
 #include <Flags.h>
 #include <Logger.h>
 #include <OTAUpdater.h>
+#include <RobotSettings.h>
 #include <SDCard.h>
 #include <StateMachine.h>
 #include <USBMassStorage.h>
@@ -79,7 +81,11 @@ public:
     static Logger logger;
     StateMachine machine;
     TinyShell shell;
-    ArraySensor<LEN_SENSOR> array_sensor;
+    RobotSettings settings;
+    // Constructed in init(), once pins are known from settings.load() —
+    // ArraySensor's constructor configures GPIO/ADC immediately, so it
+    // cannot run at static-init time like the other members below.
+    std::optional<ArraySensor> array_sensor;
     SDCard sd_card;
     USBMassStorage usb_storage;
     OTAUpdater ota;
@@ -94,12 +100,9 @@ public:
 private:
     // default constructor
     ROBOT() :   machine(NONE, NULL, NULL),
-                array_sensor(S0, S1, S2, SIG),
                 sd_card(MISO, SCK, MOSI, CS),
-                //motor_left(AIN1, AIN2, CH0, PWM_A), 
+                //motor_left(AIN1, AIN2, CH0, PWM_A),
                 //motor_right(BIN1, BIN2, CH1, PWM_B),
-                encoder_left(ENC_A0, ENC_A1), 
-                encoder_right(ENC_B0, ENC_B1),
                 EKF(),
                 buttons("Buttons"),
                 sideSensors("Side Sensors"),
@@ -114,8 +117,9 @@ private:
     // private peripheral objects
     //HBridge motor_left;
     //HBridge motor_right;
-    Encoder encoder_left;
-    Encoder encoder_right;
+    // Constructed in init(), see array_sensor above.
+    std::optional<Encoder> encoder_left;
+    std::optional<Encoder> encoder_right;
     //ICM42688 imu;
     TinyEKF EKF;
     TaskHandle_t ekf_task_handle = nullptr; 
@@ -152,8 +156,13 @@ private:
     bool flushLoggerToSD(bool append);
     bool startArraySensorTest(uint32_t samples, uint32_t interval_ms);
 
-    // configure the pins, the i2c communication and other settings for the robot
-    bool configurePins();
+    // configure the one pin needed before the SD card can be mounted (CS,
+    // fixed at compile time — see include/Settings.h)
+    bool configurePinsEarly();
+
+    // configure the remaining pins, sourced from settings.data(), once
+    // settings.load() has run
+    bool configurePinsFromSettings();
 
     // configure the wifi and the esp-now settings for the robot
     bool configureCommunication();
