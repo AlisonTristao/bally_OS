@@ -254,6 +254,10 @@ bool ROBOT::configureCommunication() {
         return false;
     }
 
+    // Explicit channel so ESP-NOW has a known home to return to after the
+    // OTA sub-mode (in DEBUG) associates with an access point and leaves.
+    esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
+
     vTaskDelay(50 / portTICK_PERIOD_MS);
 
     // initialize ESP-NOW
@@ -349,6 +353,9 @@ void ROBOT::processDebug() {
     usb_storage.process();
     if (usb_storage.is_active()) return;
 
+    ota.process(buttons.getFlags());
+    if (ota.is_active()) return;
+
     const uint32_t remaining =
         array_sensor_test_remaining.load(std::memory_order_acquire);
     if (remaining == 0) return;
@@ -371,6 +378,7 @@ void ROBOT::processDebug() {
 
 void ROBOT::cancelDebugTests() {
     array_sensor_test_remaining.store(0, std::memory_order_release);
+    ota.cancel();
 }
 
 void ROBOT::sendNextShellOutputDirect() {
@@ -773,6 +781,63 @@ void ROBOT::startWrappers() {
         return RESULT_OK;
     }, "storage_status", "Show current SD card owner", "debug");
 
+    shell.add([]() -> uint8_t {
+        if (StateMachine::current_state.load(std::memory_order_acquire) !=
+            DEBUG) {
+            ROBOT::logger.insert_log(
+                logType::ERRO, "OTA update requires DEBUG state; enter DEBUG first");
+            return RESULT_ERROR;
+        }
+
+        if (instance_->usb_storage.is_active() || !instance_->sd_card.is_mounted()) {
+            ROBOT::logger.insert_log(
+                logType::ERRO, "OTA update unavailable: SD card is not mounted for robot");
+            return RESULT_ERROR;
+        }
+
+        if (instance_->array_sensor_test_remaining.load(
+                std::memory_order_acquire) != 0) {
+            ROBOT::logger.insert_log(
+                logType::ERRO, "OTA update blocked: wait for the DEBUG test to finish");
+            return RESULT_ERROR;
+        }
+
+        if (!instance_->ota.start()) {
+            ROBOT::logger.insert_log(
+                logType::ERRO,
+                "Failed to start OTA update: no networks stored in " OTA_WIFI_LIST_FILE);
+            return RESULT_ERROR;
+        }
+
+        ROBOT::logger.insert_log(
+            logType::INFO,
+            "OTA update started: scanning for a known network; press any button to cancel");
+        return RESULT_OK;
+    }, "ota_start", "Join a known Wi-Fi network and accept a firmware upload", "debug");
+
+    shell.add([]() -> uint8_t {
+        const char* status = "idle";
+        switch (instance_->ota.phase()) {
+            case OTAUpdater::Phase::SCANNING:   status = "scanning for a known network"; break;
+            case OTAUpdater::Phase::CONNECTING: status = "connecting"; break;
+            case OTAUpdater::Phase::SERVING:    status = "serving OTA updates"; break;
+            case OTAUpdater::Phase::IDLE:        status = "idle"; break;
+        }
+
+        char text[128];
+        if (instance_->ota.phase() == OTAUpdater::Phase::SERVING) {
+            snprintf(text, sizeof(text), "OTA: %s, ssid=%s ip=%s",
+                     status, instance_->ota.connected_ssid(),
+                     instance_->ota.connected_ip());
+        } else {
+            snprintf(text, sizeof(text), "OTA: %s", status);
+        }
+
+        ROBOT::logger.send_log_direct(logType::INFO, text);
+        instance_->sendNextShellOutputDirect();
+        return RESULT_OK;
+    }, "ota_status", "Show the current OTA update sub-mode status", "debug");
+
     // SD card, retained PSRAM logs and robot clock commands.
     shell.create_module("storage", "SD card and retained log management");
 
@@ -893,6 +958,42 @@ void ROBOT::startWrappers() {
 
         return RESULT_OK;
     }, "list_logs", "List files stored at the SD card root", "storage");
+
+    shell.add([](std::string ssid, std::string password) -> uint8_t {
+        if (!instance_->ota.add_network(ssid.c_str(), password.c_str())) {
+            ROBOT::logger.insert_log(
+                logType::ERRO,
+                "Failed to add network: invalid ssid/password, list full or SD unavailable");
+            return RESULT_ERROR;
+        }
+
+        ROBOT::logger.insert_logf(logType::INFO, "Network added: %s",
+                                  ssid.c_str());
+        return RESULT_OK;
+    }, "wifi_add", "Add a Wi-Fi network for OTA: ssid,password", "storage");
+
+    shell.add([](uint16_t index) -> uint8_t {
+        if (!instance_->ota.remove_network(index)) {
+            ROBOT::logger.insert_log(logType::ERRO, "Invalid network index");
+            return RESULT_ERROR;
+        }
+
+        ROBOT::logger.insert_logf(logType::INFO, "Network %u removed", index);
+        return RESULT_OK;
+    }, "wifi_remove", "Remove a stored Wi-Fi network by index", "storage");
+
+    shell.add([]() -> uint8_t {
+        const uint16_t count = instance_->ota.network_count();
+        ROBOT::logger.insert_logf(logType::INFO, "OTA networks: %u", count);
+
+        for (uint16_t index = 0; index < count; ++index) {
+            char ssid[OTA_SSID_MAX_LEN];
+            if (!instance_->ota.get_network(index, ssid, sizeof(ssid))) continue;
+            ROBOT::logger.insert_logf(logType::INFO, "[%u] %s", index, ssid);
+        }
+
+        return RESULT_OK;
+    }, "wifi_list", "List Wi-Fi networks stored for OTA (SSID only)", "storage");
 
     shell.add([](uint16_t file_index, uint32_t delay_msg_ms) -> uint8_t {
         SDFileInfo info{};
@@ -1072,6 +1173,10 @@ bool ROBOT::init() {
     } else if (!usb_storage.begin(sd_card)) {
         logger.insert_log(logType::ERRO,
                           "Failed to mount SD card through USB storage manager");
+    }
+
+    if (!ota.begin(sd_card, leds)) {
+        logger.insert_log(logType::ERRO, "Failed to initialize OTA updater");
     }
 
     receivedDataQueue = xQueueCreate(10, sizeof(message));

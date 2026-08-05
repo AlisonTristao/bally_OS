@@ -2,9 +2,10 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <esp_err.h>
-#include <esp_log.h>     
-#include <esp_system.h>  
-#include <esp_now.h>     
+#include <esp_log.h>
+#include <esp_system.h>
+#include <esp_now.h>
+#include <esp_ota_ops.h>
 
 // projetct header
 #include <Settings.h>
@@ -58,7 +59,12 @@ extern "C" void app_main(void) {
         ESP_LOGE("ROBOT_MAIN", "Failed to initialize the robot");
         vTaskDelay(WDOG_TIMEOUT_TK);
     }
-        
+
+    // Reaching this point means SD card, ESP-NOW, encoders and the rest of
+    // robot.init() all came up correctly. Confirm the running OTA image is
+    // healthy so the bootloader does not roll it back on the next boot.
+    esp_ota_mark_app_valid_cancel_rollback();
+
     ESP_LOGI("ROBOT_MAIN", "Robot initialized successfully");
 
     // configure the system callbacks for the logger, state machine, shell, etc.

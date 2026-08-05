@@ -30,6 +30,11 @@ stateName States::process_transition(stateName currentState, uint8_t buttons) {
         return DEBUG;
     }
 
+    // Never interrupt a firmware write in progress.
+    if (currentState == DEBUG && robot_.ota.is_flashing()) {
+        return DEBUG;
+    }
+
     if (currentState == DEBUG && nextState != DEBUG) {
         robot_.cancelDebugTests();
     }

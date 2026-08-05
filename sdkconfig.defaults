@@ -24,3 +24,6 @@ CONFIG_TINYUSB_MSC_BUFSIZE=8192
 CONFIG_TINYUSB_MSC_MOUNT_PATH="/sdcard"
 CONFIG_TINYUSB_DESC_PRODUCT_STRING="BallyRobot"
 CONFIG_TINYUSB_DESC_MSC_STRING="BallyRobot SD Card"
+
+# Automatic rollback if a newly OTA-flashed image never confirms itself healthy
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y

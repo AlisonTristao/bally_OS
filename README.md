@@ -25,6 +25,7 @@ Este projeto implementa o controle de um robô baseado em ESP32-S3, utilizando a
 - **Encoder**: Gerencia a leitura dos encoders usando periféricos de hardware do ESP32.
 - **HBridge**: Controle dos motores via ponte H, incluindo direção e PWM.
 - **Logger**: Sistema de logs e comandos, com envio via ESP-NOW ou porta serial.
+- **OTAUpdater**: Atualização de firmware sem fio a partir do estado DEBUG — conecta a uma rede Wi-Fi cadastrada no cartão SD e recebe o novo binário via HTTP.
 - **StateMachine**: Máquina de estados do robô, com transições e *callbacks* configuráveis.
 - **StaticObjects**: Inicializa e centraliza instâncias globais dos principais objetos (robô, sensores, motores, logger, etc.).
 - **TinyShell**: Interpretador de linha de comando embarcado. Organiza comandos em módulos, suporta autocompletar (*auto-completion*), converte dinamicamente os tipos de argumentos de *strings* para os tipos esperados, valida a execução e lida com erros de forma segura (*try-catch*).

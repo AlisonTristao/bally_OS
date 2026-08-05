@@ -25,6 +25,7 @@
 
 #include <Flags.h>
 #include <Logger.h>
+#include <OTAUpdater.h>
 #include <SDCard.h>
 #include <StateMachine.h>
 #include <USBMassStorage.h>
@@ -81,6 +82,7 @@ public:
     ArraySensor<LEN_SENSOR> array_sensor;
     SDCard sd_card;
     USBMassStorage usb_storage;
+    OTAUpdater ota;
 
     // Execute scheduled DEBUG tests without blocking the state-machine task.
     void processDebug();
