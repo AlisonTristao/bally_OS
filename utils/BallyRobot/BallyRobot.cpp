@@ -335,20 +335,19 @@ void ROBOT::setOutputs() {
     gpio_set_level(static_cast<gpio_num_t>(cfg.led3), (arr_stats & (1 << LED3_idx)));
 }
 
-bool ROBOT::startArraySensorTest(uint32_t samples, uint32_t interval_ms) {
-    if (samples == 0 ||
-        StateMachine::current_state.load(std::memory_order_acquire) != DEBUG ||
-        usb_storage.is_active()) {
-        return false;
-    }
+bool ROBOT::canScheduleDebugTest() const {
+    return StateMachine::current_state.load(std::memory_order_acquire) == DEBUG &&
+           !usb_storage.is_active();
+}
 
-    array_sensor_test_interval_ms.store(interval_ms,
-                                        std::memory_order_relaxed);
-    array_sensor_test_next_ms.store(
-        static_cast<uint32_t>(esp_timer_get_time() / 1000ULL),
-        std::memory_order_relaxed);
-    array_sensor_test_remaining.store(samples, std::memory_order_release);
-    return true;
+bool ROBOT::scheduleDebugTest(ScheduledDebugTest& test, uint32_t samples,
+                              uint32_t interval_ms) {
+    if (!canScheduleDebugTest()) return false;
+    return test.schedule(samples, interval_ms);
+}
+
+bool ROBOT::anyDebugTestActive() const {
+    return array_sensor_test_.active() || encoder_test_.active();
 }
 
 void ROBOT::processDebug() {
@@ -363,28 +362,23 @@ void ROBOT::processDebug() {
     ota.process(buttons.getFlags());
     if (ota.is_active()) return;
 
-    const uint32_t remaining =
-        array_sensor_test_remaining.load(std::memory_order_acquire);
-    if (remaining == 0) return;
+    // Add one `if (test.poll()) { ... }` block per ScheduledDebugTest member
+    // (IMU, H-bridge current, ...).
+    if (array_sensor_test_.poll()) {
+        logger.insert_log(logType::INFO, array_sensor->debug().c_str());
+    }
 
-    const uint32_t now_ms = static_cast<uint32_t>(
-        esp_timer_get_time() / 1000ULL);
-    const uint32_t next_ms =
-        array_sensor_test_next_ms.load(std::memory_order_relaxed);
-
-    // Signed subtraction keeps the comparison valid across millis overflow.
-    if (static_cast<int32_t>(now_ms - next_ms) < 0) return;
-
-    logger.insert_log(logType::INFO, array_sensor->debug().c_str());
-    array_sensor_test_remaining.store(remaining - 1,
-                                      std::memory_order_release);
-    array_sensor_test_next_ms.store(
-        now_ms + array_sensor_test_interval_ms.load(std::memory_order_relaxed),
-        std::memory_order_relaxed);
+    if (encoder_test_.poll()) {
+        logger.insert_logf(
+            logType::INFO, "Encoders: left=%lld right=%lld",
+            static_cast<long long>(encoder_left->getCount()),
+            static_cast<long long>(encoder_right->getCount()));
+    }
 }
 
 void ROBOT::cancelDebugTests() {
-    array_sensor_test_remaining.store(0, std::memory_order_release);
+    array_sensor_test_.cancel();
+    encoder_test_.cancel();
     ota.cancel();
 }
 
@@ -589,11 +583,14 @@ void ROBOT::startWrappers() {
         return RESULT_OK;
     }, "encoders", "Read the raw left/right encoder counts", "sensor");
 
-    // DEBUG commands schedule tests; no command blocks in a delay loop.
-    shell.create_module("debug", "Safe non-blocking robot tests");
+    // DEBUG sensor tests: each schedules periodic, non-blocking sampling
+    // (see ScheduledDebugTest/processDebug). Add one command per sensor
+    // here — IMU and H-bridge current are planned next.
+    shell.create_module("debug", "Safe non-blocking sensor tests");
 
     shell.add([](uint32_t samples, uint32_t interval_ms) -> uint8_t {
-        if (!instance_->startArraySensorTest(samples, interval_ms)) {
+        if (!instance_->scheduleDebugTest(instance_->array_sensor_test_,
+                                          samples, interval_ms)) {
             ROBOT::logger.insert_log(
                 logType::ERRO,
                 "Array test requires DEBUG state, USB inactive and samples > 0");
@@ -606,6 +603,22 @@ void ROBOT::startWrappers() {
             samples, interval_ms);
         return RESULT_OK;
     }, "test_arr_sensor", "Print sensor array: samples,interval_ms", "debug");
+
+    shell.add([](uint32_t samples, uint32_t interval_ms) -> uint8_t {
+        if (!instance_->scheduleDebugTest(instance_->encoder_test_,
+                                          samples, interval_ms)) {
+            ROBOT::logger.insert_log(
+                logType::ERRO,
+                "Encoder test requires DEBUG state, USB inactive and samples > 0");
+            return RESULT_ERROR;
+        }
+
+        ROBOT::logger.insert_logf(
+            logType::INFO,
+            "Encoder test scheduled: %u samples every %u ms",
+            samples, interval_ms);
+        return RESULT_OK;
+    }, "test_encoder", "Print left/right encoder counts: samples,interval_ms", "debug");
 
     // SD card and native USB MSC ownership.
     shell.create_module("storage", "SD card file management and USB MSC ownership");
@@ -641,8 +654,7 @@ void ROBOT::startWrappers() {
             return RESULT_ERROR;
         }
 
-        if (instance_->array_sensor_test_remaining.load(
-                std::memory_order_acquire) != 0) {
+        if (instance_->anyDebugTestActive()) {
             ROBOT::logger.insert_log(
                 logType::ERRO,
                 "USB storage blocked: wait for the DEBUG test to finish");
@@ -910,8 +922,7 @@ void ROBOT::startWrappers() {
             return RESULT_ERROR;
         }
 
-        if (instance_->array_sensor_test_remaining.load(
-                std::memory_order_acquire) != 0) {
+        if (instance_->anyDebugTestActive()) {
             ROBOT::logger.insert_log(
                 logType::ERRO, "OTA update blocked: wait for the DEBUG test to finish");
             return RESULT_ERROR;

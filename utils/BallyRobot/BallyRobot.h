@@ -36,6 +36,61 @@
 #include <SystemMonitor.h>
 #endif
 
+/**
+ * @brief Non-blocking, periodic sample scheduler backing the "debug" shell
+ * module's per-sensor tests (test_arr_sensor, test_encoder, and future ones
+ * such as IMU/H-bridge current).
+ *
+ * schedule()/cancel()/active() are called from the shell task; poll() is
+ * called once per pass from ROBOT::processDebug() on the state-machine task.
+ * Every field is atomic for that reason.
+ */
+class ScheduledDebugTest {
+public:
+    bool schedule(uint32_t samples, uint32_t interval_ms) {
+        if (samples == 0) return false;
+
+        interval_ms_.store(interval_ms, std::memory_order_relaxed);
+        next_ms_.store(static_cast<uint32_t>(esp_timer_get_time() / 1000ULL),
+                       std::memory_order_relaxed);
+        remaining_.store(samples, std::memory_order_release);
+        return true;
+    }
+
+    void cancel() { remaining_.store(0, std::memory_order_release); }
+
+    bool active() const {
+        return remaining_.load(std::memory_order_acquire) != 0;
+    }
+
+    /**
+     * @brief Check whether a sample is due right now.
+     * @return true once per due sample; advances the schedule and consumes
+     * one remaining sample as a side effect.
+     */
+    bool poll() {
+        const uint32_t remaining = remaining_.load(std::memory_order_acquire);
+        if (remaining == 0) return false;
+
+        const uint32_t now_ms =
+            static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
+        const uint32_t next_ms = next_ms_.load(std::memory_order_relaxed);
+
+        // Signed subtraction keeps the comparison valid across millis overflow.
+        if (static_cast<int32_t>(now_ms - next_ms) < 0) return false;
+
+        remaining_.store(remaining - 1, std::memory_order_release);
+        next_ms_.store(now_ms + interval_ms_.load(std::memory_order_relaxed),
+                       std::memory_order_relaxed);
+        return true;
+    }
+
+private:
+    std::atomic<uint32_t> remaining_{0};
+    std::atomic<uint32_t> interval_ms_{0};
+    std::atomic<uint32_t> next_ms_{0};
+};
+
 class ROBOT {
 public:
     // singleton pattern
@@ -140,10 +195,10 @@ private:
     static ROBOT* instance_;
     bool initialized = false;
 
-    // Non-blocking array sensor test controlled by the DEBUG shell module.
-    std::atomic<uint32_t> array_sensor_test_remaining{0};
-    std::atomic<uint32_t> array_sensor_test_interval_ms{0};
-    std::atomic<uint32_t> array_sensor_test_next_ms{0};
+    // Non-blocking per-sensor tests controlled by the "debug" shell module.
+    // Add one ScheduledDebugTest member per sensor (IMU, H-bridge current, ...).
+    ScheduledDebugTest array_sensor_test_;
+    ScheduledDebugTest encoder_test_;
     std::atomic<bool> direct_next_shell_output{false};
 
     // matriz of data to kalman filter
@@ -152,7 +207,12 @@ private:
 
     void initEKF();
 
-    bool startArraySensorTest(uint32_t samples, uint32_t interval_ms);
+    // Shared gate for every "debug" module test: only in the DEBUG state,
+    // and never while the SD card belongs to the USB host.
+    bool canScheduleDebugTest() const;
+    bool scheduleDebugTest(ScheduledDebugTest& test, uint32_t samples,
+                           uint32_t interval_ms);
+    bool anyDebugTestActive() const;
 
     // configure the one pin needed before the SD card can be mounted (CS,
     // fixed at compile time — see include/Settings.h)
