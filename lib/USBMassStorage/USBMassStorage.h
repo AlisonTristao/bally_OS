@@ -68,8 +68,6 @@ private:
     std::atomic<bool> usb_driver_installed_{false};
     std::atomic<bool> session_active_{false};
     std::atomic<bool> host_attached_{false};
-    std::atomic<bool> host_was_attached_{false};
-    std::atomic<uint32_t> app_return_started_ms_{0};
     std::atomic<bool> mount_transition_failed_{false};
 
     bool prepare_usb_identity();
