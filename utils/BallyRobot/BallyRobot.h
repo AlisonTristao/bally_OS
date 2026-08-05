@@ -32,6 +32,10 @@
 #include <StateMachine.h>
 #include <USBMassStorage.h>
 
+#ifdef ENABLE_SYSTEM_MONITOR
+#include <SystemMonitor.h>
+#endif
+
 class ROBOT {
 public:
     // singleton pattern
@@ -89,6 +93,9 @@ public:
     SDCard sd_card;
     USBMassStorage usb_storage;
     OTAUpdater ota;
+#ifdef ENABLE_SYSTEM_MONITOR
+    SystemMonitor sysmon;
+#endif
 
     // Execute scheduled DEBUG tests without blocking the state-machine task.
     void processDebug();
@@ -101,23 +108,22 @@ private:
     // default constructor
     ROBOT() :   machine(NONE, NULL, NULL),
                 sd_card(MISO, SCK, MOSI, CS),
-                //motor_left(AIN1, AIN2, CH0, PWM_A),
-                //motor_right(BIN1, BIN2, CH1, PWM_B),
                 EKF(),
                 buttons("Buttons"),
                 sideSensors("Side Sensors"),
                 leds("LEDs"),
                 motors("Motors")
-                //imu(Wire, 0x68), 
+                //imu(Wire, 0x68),
                 {
         // save the instance of the robot class to be used in the static functions
         instance_ = this;
     }
 
     // private peripheral objects
-    //HBridge motor_left;
-    //HBridge motor_right;
-    // Constructed in init(), see array_sensor above.
+    // Constructed in init(), once pins are known from settings.load() — same
+    // reason as array_sensor/encoder_* above.
+    std::optional<HBridge> motor_left;
+    std::optional<HBridge> motor_right;
     std::optional<Encoder> encoder_left;
     std::optional<Encoder> encoder_right;
     //ICM42688 imu;
@@ -133,8 +139,6 @@ private:
     // save a instance of the ROBOT class to be used in the static functions
     static ROBOT* instance_;
     bool initialized = false;
-    bool clock_synchronized = false;
-    char last_log_file[SDFileInfo::MAX_NAME_LENGTH] = {};
 
     // Non-blocking array sensor test controlled by the DEBUG shell module.
     std::atomic<uint32_t> array_sensor_test_remaining{0};
@@ -148,12 +152,6 @@ private:
 
     void initEKF();
 
-    // Date/time and SD log management used by the storage shell wrappers.
-    bool updateDateTime(uint16_t year, uint8_t month, uint8_t day,
-                        uint8_t hour, uint8_t minute, uint8_t second);
-    bool makeLogFilename(char* filename, size_t capacity);
-    bool findLatestLogFile(char* filename, size_t capacity);
-    bool flushLoggerToSD(bool append);
     bool startArraySensorTest(uint32_t samples, uint32_t interval_ms);
 
     // configure the one pin needed before the SD card can be mounted (CS,

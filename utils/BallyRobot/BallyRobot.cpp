@@ -173,16 +173,15 @@ bool ROBOT::configurePinsFromSettings()
         static_cast<gpio_num_t>(cfg.led2),
         static_cast<gpio_num_t>(cfg.led3),
 
-        static_cast<gpio_num_t>(cfg.ain1),
-        static_cast<gpio_num_t>(cfg.ain2),
-        static_cast<gpio_num_t>(cfg.bin1),
-        static_cast<gpio_num_t>(cfg.bin2),
-
         static_cast<gpio_num_t>(cfg.bzr),
 
         // S0/S1/S2 (mux select) are intentionally not configured here —
         // ArraySensor's constructor owns them, together with the ADC
         // channel setup for cfg.sig, and runs right after this function.
+        //
+        // ain1/ain2/bin1/bin2 (H-bridge inputs) are likewise owned by
+        // HBridge's constructor/init(), which configures them for LEDC PWM
+        // right after motor_left/motor_right are constructed in init().
     };
 
     for (gpio_num_t pin : out_pins) {
@@ -325,8 +324,8 @@ void ROBOT::resetFlags() {
 }
 
 void ROBOT::setOutputs() {
-    //motor_left.applyPWM(motors.getValue(MOTOR_LEFT_idx));
-    //motor_right.applyPWM(motors.getValue(MOTOR_RIGHT_idx));
+    motor_left->applyPWM(motors.getValue(MOTOR_LEFT_idx));
+    motor_right->applyPWM(motors.getValue(MOTOR_RIGHT_idx));
     // turn on the leds according to the BITS of the arr_stats variable
     uint8_t arr_stats = leds.getFlags();
     const SettingsData& cfg = settings.data();
@@ -509,153 +508,9 @@ void ROBOT::runEKF(void *param) {
     }
 }
 
-bool ROBOT::updateDateTime(uint16_t year, uint8_t month, uint8_t day,
-                           uint8_t hour, uint8_t minute, uint8_t second) {
-    if (year < 2020 || month < 1 || month > 12 || day < 1 || day > 31 ||
-        hour > 23 || minute > 59 || second > 59) {
-        return false;
-    }
-
-    // Interpret the command values as local Brazilian time (UTC-3 by default).
-    setenv("TZ", settings.data().timezone, 1);
-    tzset();
-
-    struct tm requested_time{};
-    requested_time.tm_year = year - 1900;
-    requested_time.tm_mon = month - 1;
-    requested_time.tm_mday = day;
-    requested_time.tm_hour = hour;
-    requested_time.tm_min = minute;
-    requested_time.tm_sec = second;
-    requested_time.tm_isdst = -1;
-
-    const time_t timestamp = mktime(&requested_time);
-    if (timestamp == static_cast<time_t>(-1)) return false;
-
-    // mktime normalizes invalid dates, such as 31 February. Compare the result
-    // to reject those values instead of silently changing the requested date.
-    struct tm verified_time{};
-    localtime_r(&timestamp, &verified_time);
-    if (verified_time.tm_year != year - 1900 ||
-        verified_time.tm_mon != month - 1 ||
-        verified_time.tm_mday != day ||
-        verified_time.tm_hour != hour ||
-        verified_time.tm_min != minute ||
-        verified_time.tm_sec != second) {
-        return false;
-    }
-
-    const struct timeval system_time{
-        .tv_sec = timestamp,
-        .tv_usec = 0,
-    };
-
-    if (settimeofday(&system_time, nullptr) != 0) return false;
-
-    clock_synchronized = true;
-    return true;
-}
-
-bool ROBOT::makeLogFilename(char* filename, size_t capacity) {
-    if (!clock_synchronized || filename == nullptr || capacity == 0) return false;
-
-    const time_t timestamp = time(nullptr);
-    struct tm local_time{};
-    if (localtime_r(&timestamp, &local_time) == nullptr) return false;
-
-    int written = snprintf(
-        filename, capacity, "log_%04d-%02d-%02d_%02d-%02d-%02d.blog",
-        local_time.tm_year + 1900, local_time.tm_mon + 1, local_time.tm_mday,
-        local_time.tm_hour, local_time.tm_min, local_time.tm_sec);
-
-    if (written <= 0 || static_cast<size_t>(written) >= capacity) return false;
-    if (!sd_card.file_exists(filename)) return true;
-
-    // Do not overwrite a log when two new flushes happen in the same second.
-    for (uint8_t suffix = 1; suffix < 100; ++suffix) {
-        written = snprintf(
-            filename, capacity,
-            "log_%04d-%02d-%02d_%02d-%02d-%02d_%02u.blog",
-            local_time.tm_year + 1900, local_time.tm_mon + 1,
-            local_time.tm_mday, local_time.tm_hour, local_time.tm_min,
-            local_time.tm_sec, suffix);
-
-        if (written > 0 && static_cast<size_t>(written) < capacity &&
-            !sd_card.file_exists(filename)) {
-            return true;
-        }
-    }
-
-    return false;
-}
-
-bool ROBOT::findLatestLogFile(char* filename, size_t capacity) {
-    if (filename == nullptr || capacity == 0) return false;
-    filename[0] = '\0';
-
-    const uint16_t file_count = sd_card.get_file_count();
-    for (uint16_t index = 0; index < file_count; ++index) {
-        SDFileInfo info{};
-        if (!sd_card.get_file_info(index, info)) continue;
-
-        const size_t name_length = strlen(info.name);
-        if (name_length < 10 || strncmp(info.name, "log_", 4) != 0 ||
-            strcmp(info.name + name_length - 5, ".blog") != 0) {
-            continue;
-        }
-
-        // ISO date/time in the filename makes lexical order chronological.
-        if (filename[0] == '\0' || strcmp(info.name, filename) > 0) {
-            const int written = snprintf(filename, capacity, "%s", info.name);
-            if (written <= 0 || static_cast<size_t>(written) >= capacity) {
-                filename[0] = '\0';
-                return false;
-            }
-        }
-    }
-
-    return filename[0] != '\0';
-}
-
-bool ROBOT::flushLoggerToSD(bool append) {
-    if (!sd_card.is_mounted()) return false;
-
-    char filename[SDFileInfo::MAX_NAME_LENGTH];
-
-    if (append) {
-        if (last_log_file[0] != '\0' && sd_card.file_exists(last_log_file)) {
-            snprintf(filename, sizeof(filename), "%s", last_log_file);
-        } else if (!findLatestLogFile(filename, sizeof(filename))) {
-            return false;
-        }
-    } else if (!makeLogFilename(filename, sizeof(filename))) {
-        return false;
-    }
-
-    if (!sd_card.open_write_stream(filename, append)) return false;
-
-    const bool stored = logger.flush_logs_to(
-        [](const uint8_t* data, size_t length, void* context) -> bool {
-            auto* card = static_cast<SDCard*>(context);
-            return card->write_stream(data, length);
-        },
-        &sd_card);
-
-    const bool closed = sd_card.close_stream();
-
-    if (!append) {
-        snprintf(last_log_file, sizeof(last_log_file), "%s", filename);
-    } else if (last_log_file[0] == '\0') {
-        snprintf(last_log_file, sizeof(last_log_file), "%s", filename);
-    }
-
-    return stored && closed;
-}
-
 void ROBOT::startWrappers() {
-    // commands for testing and debugging
-    shell.create_module("robot", "Module for robot control commands");
-    shell.add(testPacket, "test_packet", "Send a long test packet to evaluate multi-packet handling", "robot");
+    // Raw actuator/virtual-input I/O: motors, LEDs, virtual button/side-sensor triggers.
+    shell.create_module("robot", "Raw actuator and virtual-input commands");
 
     shell.add([](uint8_t btn_idx) -> uint8_t {
         // set the flag of the button with the given index
@@ -673,8 +528,8 @@ void ROBOT::startWrappers() {
         return RESULT_OK;
     }, "ssr", "Virtually trigger a side sensor", "robot");
 
-    shell.add([](uint8_t led_idx, uint8_t pwm_value, uint32_t time) -> uint8_t {
-        // set the PWM value for the motor with the given index
+    shell.add([](uint8_t led_idx, int8_t pwm_value, uint32_t time) -> uint8_t {
+        // set the PWM value for the motor with the given index (-100..100)
         if (led_idx >= Flags_in::MAX_FLAGS)
             return RESULT_ERROR;
         instance_->motors.setValue(led_idx, pwm_value, time);
@@ -691,6 +546,48 @@ void ROBOT::startWrappers() {
         instance_->leds.setFlag(pin, time);
         return RESULT_OK;
     }, "set_led", "turn on a LED", "robot");
+
+    // Array sensor (line follower) and wheel encoders.
+    shell.create_module("sensor", "Array sensor (line follower) and wheel encoders");
+
+    shell.add([]() -> uint8_t {
+        if (StateMachine::current_state.load(std::memory_order_acquire) == RUN) {
+            ROBOT::logger.insert_log(logType::ERRO,
+                                     "Calibration blocked while RUN is active");
+            return RESULT_ERROR;
+        }
+
+        const SettingsData& cfg = instance_->settings.data();
+        const bool ok = instance_->array_sensor->calibrate(cfg.samples, cfg.delay_sample);
+        ROBOT::logger.insert_logf(logType::INFO, "Calibration %s",
+                                  ok ? "succeeded" : "failed");
+        return ok ? RESULT_OK : RESULT_ERROR;
+    }, "calibrate", "Calibrate the array sensor using the configured sample count", "sensor");
+
+    shell.add([]() -> uint8_t {
+        ROBOT::logger.insert_log(logType::INFO,
+                                 instance_->array_sensor->calibrate_status().c_str());
+        return RESULT_OK;
+    }, "calibrate_status", "Show the array sensor's stored calibration values", "sensor");
+
+    shell.add([]() -> uint8_t {
+        ROBOT::logger.insert_logf(logType::INFO, "Line position: %.3f",
+                                  instance_->array_sensor->get_line_position());
+        return RESULT_OK;
+    }, "position", "Read the current normalized line position (-1..1)", "sensor");
+
+    shell.add([]() -> uint8_t {
+        ROBOT::logger.insert_log(logType::INFO, instance_->array_sensor->raw().c_str());
+        return RESULT_OK;
+    }, "raw", "Show raw ADC readings for every sensor channel", "sensor");
+
+    shell.add([]() -> uint8_t {
+        ROBOT::logger.insert_logf(
+            logType::INFO, "Encoders: left=%lld right=%lld",
+            static_cast<long long>(instance_->encoder_left->getCount()),
+            static_cast<long long>(instance_->encoder_right->getCount()));
+        return RESULT_OK;
+    }, "encoders", "Read the raw left/right encoder counts", "sensor");
 
     // DEBUG commands schedule tests; no command blocks in a delay loop.
     shell.create_module("debug", "Safe non-blocking robot tests");
@@ -709,6 +606,9 @@ void ROBOT::startWrappers() {
             samples, interval_ms);
         return RESULT_OK;
     }, "test_arr_sensor", "Print sensor array: samples,interval_ms", "debug");
+
+    // SD card and native USB MSC ownership.
+    shell.create_module("storage", "SD card file management and USB MSC ownership");
 
     shell.add([]() -> uint8_t {
         if (StateMachine::current_state.load(std::memory_order_acquire) !=
@@ -761,7 +661,7 @@ void ROBOT::startWrappers() {
             "USB storage enabled; safely eject the drive on the PC before leaving DEBUG");
         instance_->sendNextShellOutputDirect();
         return RESULT_OK;
-    }, "turnonstorage", "Expose the SD card through native USB MSC", "debug");
+    }, "expose", "Expose the SD card through native USB MSC (DEBUG state)", "storage");
 
     shell.add([]() -> uint8_t {
         if (!instance_->usb_storage.is_ready()) {
@@ -791,67 +691,7 @@ void ROBOT::startWrappers() {
         ROBOT::logger.send_log_direct(logType::INFO, status);
         instance_->sendNextShellOutputDirect();
         return RESULT_OK;
-    }, "storage_status", "Show current SD card owner", "debug");
-
-    shell.add([]() -> uint8_t {
-        if (StateMachine::current_state.load(std::memory_order_acquire) !=
-            DEBUG) {
-            ROBOT::logger.insert_log(
-                logType::ERRO, "OTA update requires DEBUG state; enter DEBUG first");
-            return RESULT_ERROR;
-        }
-
-        if (instance_->usb_storage.is_active() || !instance_->sd_card.is_mounted()) {
-            ROBOT::logger.insert_log(
-                logType::ERRO, "OTA update unavailable: SD card is not mounted for robot");
-            return RESULT_ERROR;
-        }
-
-        if (instance_->array_sensor_test_remaining.load(
-                std::memory_order_acquire) != 0) {
-            ROBOT::logger.insert_log(
-                logType::ERRO, "OTA update blocked: wait for the DEBUG test to finish");
-            return RESULT_ERROR;
-        }
-
-        if (!instance_->ota.start()) {
-            ROBOT::logger.insert_log(
-                logType::ERRO,
-                "Failed to start OTA update: no networks stored in " OTA_WIFI_LIST_FILE);
-            return RESULT_ERROR;
-        }
-
-        ROBOT::logger.insert_log(
-            logType::INFO,
-            "OTA update started: scanning for a known network; press any button to cancel");
-        return RESULT_OK;
-    }, "ota_start", "Join a known Wi-Fi network and accept a firmware upload", "debug");
-
-    shell.add([]() -> uint8_t {
-        const char* status = "idle";
-        switch (instance_->ota.phase()) {
-            case OTAUpdater::Phase::SCANNING:   status = "scanning for a known network"; break;
-            case OTAUpdater::Phase::CONNECTING: status = "connecting"; break;
-            case OTAUpdater::Phase::SERVING:    status = "serving OTA updates"; break;
-            case OTAUpdater::Phase::IDLE:        status = "idle"; break;
-        }
-
-        char text[128];
-        if (instance_->ota.phase() == OTAUpdater::Phase::SERVING) {
-            snprintf(text, sizeof(text), "OTA: %s, ssid=%s ip=%s",
-                     status, instance_->ota.connected_ssid(),
-                     instance_->ota.connected_ip());
-        } else {
-            snprintf(text, sizeof(text), "OTA: %s", status);
-        }
-
-        ROBOT::logger.send_log_direct(logType::INFO, text);
-        instance_->sendNextShellOutputDirect();
-        return RESULT_OK;
-    }, "ota_status", "Show the current OTA update sub-mode status", "debug");
-
-    // SD card, retained PSRAM logs and robot clock commands.
-    shell.create_module("storage", "SD card and retained log management");
+    }, "status", "Show current SD card owner", "storage");
 
     shell.add([]() -> uint8_t {
         uint64_t total_bytes = 0;
@@ -885,73 +725,6 @@ void ROBOT::startWrappers() {
     }, "usage", "Show SD card total, used and free bytes", "storage");
 
     shell.add([]() -> uint8_t {
-        char used_text[24];
-        char capacity_text[24];
-        formatBytes(ROBOT::logger.get_used_bytes(), used_text,
-                    sizeof(used_text));
-        formatBytes(ROBOT::logger.get_capacity_bytes(), capacity_text,
-                    sizeof(capacity_text));
-
-        ROBOT::logger.insert_logf(
-            logType::INFO,
-            "PSRAM logger used=%s capacity=%s (%.2f%%)",
-            used_text,
-            capacity_text,
-            ROBOT::logger.get_write_pct());
-        return RESULT_OK;
-    }, "psram_usage", "Show retained Logger PSRAM usage", "storage");
-
-    shell.add([](uint16_t year, uint8_t month, uint8_t day,
-                 uint8_t hour, uint8_t minute, uint8_t second) -> uint8_t {
-        if (!instance_->updateDateTime(
-                year, month, day, hour, minute, second)) {
-            ROBOT::logger.insert_log(logType::ERRO,
-                                     "Invalid date/time or clock update failed");
-            return RESULT_ERROR;
-        }
-
-        ROBOT::logger.insert_logf(
-            logType::INFO,
-            "Robot time updated: %04u-%02u-%02u %02u:%02u:%02u",
-            year, month, day, hour, minute, second);
-        return RESULT_OK;
-    }, "set_datetime", "Set local time: year,month,day,hour,minute,second",
-       "storage");
-
-    shell.add([]() -> uint8_t {
-        if (!instance_->flushLoggerToSD(false)) {
-            ROBOT::logger.insert_log(
-                logType::ERRO,
-                "Failed to create a new SD log; synchronize date/time first");
-            return RESULT_ERROR;
-        }
-
-        char response[SDFileInfo::MAX_NAME_LENGTH + 32];
-        snprintf(response, sizeof(response), "PSRAM saved to %s",
-                 instance_->last_log_file);
-        ROBOT::logger.send_log_direct(logType::INFO, response);
-        instance_->sendNextShellOutputDirect();
-        return RESULT_OK;
-    }, "flush_new", "Save retained PSRAM logs into a new dated file", "storage");
-
-    shell.add([]() -> uint8_t {
-        if (!instance_->flushLoggerToSD(true)) {
-            ROBOT::logger.insert_log(
-                logType::ERRO,
-                "Failed to append PSRAM logs to the latest SD log");
-            return RESULT_ERROR;
-        }
-
-        char response[SDFileInfo::MAX_NAME_LENGTH + 36];
-        snprintf(response, sizeof(response), "PSRAM appended to %s",
-                 instance_->last_log_file);
-        ROBOT::logger.send_log_direct(logType::INFO, response);
-        instance_->sendNextShellOutputDirect();
-        return RESULT_OK;
-    }, "flush_append", "Append retained PSRAM logs to the latest log file",
-       "storage");
-
-    shell.add([]() -> uint8_t {
         if (!instance_->sd_card.is_mounted()) return RESULT_ERROR;
 
         const uint16_t count = instance_->sd_card.get_file_count();
@@ -971,41 +744,107 @@ void ROBOT::startWrappers() {
         return RESULT_OK;
     }, "list_logs", "List files stored at the SD card root", "storage");
 
-    shell.add([](std::string ssid, std::string password) -> uint8_t {
-        if (!instance_->ota.add_network(ssid.c_str(), password.c_str())) {
-            ROBOT::logger.insert_log(
-                logType::ERRO,
-                "Failed to add network: invalid ssid/password, list full or SD unavailable");
+    shell.add([](uint16_t file_index) -> uint8_t {
+        SDFileInfo info{};
+        if (!instance_->sd_card.get_file_info(file_index, info) ||
+            !instance_->sd_card.remove_file(info.name)) {
+            ROBOT::logger.insert_log(logType::ERRO,
+                                     "Invalid log index or delete failed");
             return RESULT_ERROR;
         }
 
-        ROBOT::logger.insert_logf(logType::INFO, "Network added: %s",
-                                  ssid.c_str());
+        ROBOT::logger.insert_logf(logType::INFO, "Deleted %s", info.name);
         return RESULT_OK;
-    }, "wifi_add", "Add a Wi-Fi network for OTA: ssid,password", "storage");
+    }, "delete_log", "Delete a file by index (see list_logs)", "storage");
 
-    shell.add([](uint16_t index) -> uint8_t {
-        if (!instance_->ota.remove_network(index)) {
-            ROBOT::logger.insert_log(logType::ERRO, "Invalid network index");
+    shell.add([](uint16_t file_index, std::string new_name) -> uint8_t {
+        SDFileInfo info{};
+        if (!instance_->sd_card.get_file_info(file_index, info) ||
+            !instance_->sd_card.rename_file(info.name, new_name.c_str())) {
+            ROBOT::logger.insert_log(logType::ERRO,
+                                     "Invalid log index or rename failed");
             return RESULT_ERROR;
         }
 
-        ROBOT::logger.insert_logf(logType::INFO, "Network %u removed", index);
+        ROBOT::logger.insert_logf(logType::INFO, "Renamed %s to %s",
+                                  info.name, new_name.c_str());
         return RESULT_OK;
-    }, "wifi_remove", "Remove a stored Wi-Fi network by index", "storage");
+    }, "rename_log", "Rename a file by index: file_index,new_name", "storage");
+
+    // Retained PSRAM log buffer and its SD-backed files.
+    shell.create_module("logger", "Retained PSRAM log buffer and SD log files");
+
+    shell.add(testPacket, "test_packet",
+             "Send a long test packet to evaluate multi-packet handling", "logger");
 
     shell.add([]() -> uint8_t {
-        const uint16_t count = instance_->ota.network_count();
-        ROBOT::logger.insert_logf(logType::INFO, "OTA networks: %u", count);
+        char used_text[24];
+        char capacity_text[24];
+        formatBytes(ROBOT::logger.get_used_bytes(), used_text,
+                    sizeof(used_text));
+        formatBytes(ROBOT::logger.get_capacity_bytes(), capacity_text,
+                    sizeof(capacity_text));
 
-        for (uint16_t index = 0; index < count; ++index) {
-            char ssid[OTA_SSID_MAX_LEN];
-            if (!instance_->ota.get_network(index, ssid, sizeof(ssid))) continue;
-            ROBOT::logger.insert_logf(logType::INFO, "[%u] %s", index, ssid);
+        ROBOT::logger.insert_logf(
+            logType::INFO,
+            "PSRAM logger used=%s capacity=%s (%.2f%%)",
+            used_text,
+            capacity_text,
+            ROBOT::logger.get_write_pct());
+        return RESULT_OK;
+    }, "psram_usage", "Show retained Logger PSRAM usage", "logger");
+
+    shell.add([](uint16_t year, uint8_t month, uint8_t day,
+                 uint8_t hour, uint8_t minute, uint8_t second) -> uint8_t {
+        if (!ROBOT::logger.set_datetime(year, month, day, hour, minute, second,
+                                        instance_->settings.data().timezone)) {
+            ROBOT::logger.insert_log(logType::ERRO,
+                                     "Invalid date/time or clock update failed");
+            return RESULT_ERROR;
         }
 
+        ROBOT::logger.insert_logf(
+            logType::INFO,
+            "Robot time updated: %04u-%02u-%02u %02u:%02u:%02u",
+            year, month, day, hour, minute, second);
         return RESULT_OK;
-    }, "wifi_list", "List Wi-Fi networks stored for OTA (SSID only)", "storage");
+    }, "set_datetime", "Set local time: year,month,day,hour,minute,second",
+       "logger");
+
+    shell.add([]() -> uint8_t {
+        char filename[SDFileInfo::MAX_NAME_LENGTH] = {};
+        if (!ROBOT::logger.flush_to_sd(instance_->sd_card, false, filename,
+                                       sizeof(filename))) {
+            ROBOT::logger.insert_log(
+                logType::ERRO,
+                "Failed to create a new SD log; synchronize date/time first");
+            return RESULT_ERROR;
+        }
+
+        char response[sizeof(filename) + 32];
+        snprintf(response, sizeof(response), "PSRAM saved to %s", filename);
+        ROBOT::logger.send_log_direct(logType::INFO, response);
+        instance_->sendNextShellOutputDirect();
+        return RESULT_OK;
+    }, "flush_new", "Save retained PSRAM logs into a new dated file", "logger");
+
+    shell.add([]() -> uint8_t {
+        char filename[SDFileInfo::MAX_NAME_LENGTH] = {};
+        if (!ROBOT::logger.flush_to_sd(instance_->sd_card, true, filename,
+                                       sizeof(filename))) {
+            ROBOT::logger.insert_log(
+                logType::ERRO,
+                "Failed to append PSRAM logs to the latest SD log");
+            return RESULT_ERROR;
+        }
+
+        char response[sizeof(filename) + 36];
+        snprintf(response, sizeof(response), "PSRAM appended to %s", filename);
+        ROBOT::logger.send_log_direct(logType::INFO, response);
+        instance_->sendNextShellOutputDirect();
+        return RESULT_OK;
+    }, "flush_append", "Append retained PSRAM logs to the latest log file",
+       "logger");
 
     shell.add([](uint16_t file_index, uint32_t delay_msg_ms) -> uint8_t {
         SDFileInfo info{};
@@ -1052,7 +891,103 @@ void ROBOT::startWrappers() {
             success ? "finished" : "failed", sent_messages, info.name);
 
         return success ? RESULT_OK : RESULT_ERROR;
-    }, "print_log", "Replay file by index: file_index,delay_msg_ms", "storage");
+    }, "print_log", "Replay file by index: file_index,delay_msg_ms", "logger");
+
+    // Wi-Fi OTA firmware updates (DEBUG state only).
+    shell.create_module("ota", "Wi-Fi OTA firmware updates (DEBUG state)");
+
+    shell.add([]() -> uint8_t {
+        if (StateMachine::current_state.load(std::memory_order_acquire) !=
+            DEBUG) {
+            ROBOT::logger.insert_log(
+                logType::ERRO, "OTA update requires DEBUG state; enter DEBUG first");
+            return RESULT_ERROR;
+        }
+
+        if (instance_->usb_storage.is_active() || !instance_->sd_card.is_mounted()) {
+            ROBOT::logger.insert_log(
+                logType::ERRO, "OTA update unavailable: SD card is not mounted for robot");
+            return RESULT_ERROR;
+        }
+
+        if (instance_->array_sensor_test_remaining.load(
+                std::memory_order_acquire) != 0) {
+            ROBOT::logger.insert_log(
+                logType::ERRO, "OTA update blocked: wait for the DEBUG test to finish");
+            return RESULT_ERROR;
+        }
+
+        if (!instance_->ota.start()) {
+            ROBOT::logger.insert_log(
+                logType::ERRO,
+                "Failed to start OTA update: no networks stored in " OTA_WIFI_LIST_FILE);
+            return RESULT_ERROR;
+        }
+
+        ROBOT::logger.insert_log(
+            logType::INFO,
+            "OTA update started: scanning for a known network; press any button to cancel");
+        return RESULT_OK;
+    }, "start", "Join a known Wi-Fi network and accept a firmware upload", "ota");
+
+    shell.add([]() -> uint8_t {
+        const char* status = "idle";
+        switch (instance_->ota.phase()) {
+            case OTAUpdater::Phase::SCANNING:   status = "scanning for a known network"; break;
+            case OTAUpdater::Phase::CONNECTING: status = "connecting"; break;
+            case OTAUpdater::Phase::SERVING:    status = "serving OTA updates"; break;
+            case OTAUpdater::Phase::IDLE:        status = "idle"; break;
+        }
+
+        char text[128];
+        if (instance_->ota.phase() == OTAUpdater::Phase::SERVING) {
+            snprintf(text, sizeof(text), "OTA: %s, ssid=%s ip=%s",
+                     status, instance_->ota.connected_ssid(),
+                     instance_->ota.connected_ip());
+        } else {
+            snprintf(text, sizeof(text), "OTA: %s", status);
+        }
+
+        ROBOT::logger.send_log_direct(logType::INFO, text);
+        instance_->sendNextShellOutputDirect();
+        return RESULT_OK;
+    }, "status", "Show the current OTA update sub-mode status", "ota");
+
+    shell.add([](std::string ssid, std::string password) -> uint8_t {
+        if (!instance_->ota.add_network(ssid.c_str(), password.c_str())) {
+            ROBOT::logger.insert_log(
+                logType::ERRO,
+                "Failed to add network: invalid ssid/password, list full or SD unavailable");
+            return RESULT_ERROR;
+        }
+
+        ROBOT::logger.insert_logf(logType::INFO, "Network added: %s",
+                                  ssid.c_str());
+        return RESULT_OK;
+    }, "wifi_add", "Add a Wi-Fi network for OTA: ssid,password", "ota");
+
+    shell.add([](uint16_t index) -> uint8_t {
+        if (!instance_->ota.remove_network(index)) {
+            ROBOT::logger.insert_log(logType::ERRO, "Invalid network index");
+            return RESULT_ERROR;
+        }
+
+        ROBOT::logger.insert_logf(logType::INFO, "Network %u removed", index);
+        return RESULT_OK;
+    }, "wifi_remove", "Remove a stored Wi-Fi network by index", "ota");
+
+    shell.add([]() -> uint8_t {
+        const uint16_t count = instance_->ota.network_count();
+        ROBOT::logger.insert_logf(logType::INFO, "OTA networks: %u", count);
+
+        for (uint16_t index = 0; index < count; ++index) {
+            char ssid[OTA_SSID_MAX_LEN];
+            if (!instance_->ota.get_network(index, ssid, sizeof(ssid))) continue;
+            ROBOT::logger.insert_logf(logType::INFO, "[%u] %s", index, ssid);
+        }
+
+        return RESULT_OK;
+    }, "wifi_list", "List Wi-Fi networks stored for OTA (SSID only)", "ota");
 
     // Runtime settings backed by settings.conf on the SD card (see
     // lib/RobotSettings). "set"/"reset"/"reset_all" only change the
@@ -1159,6 +1094,37 @@ void ROBOT::startWrappers() {
             "All settings reset to defaults in memory; run 'settings save' to persist");
         return RESULT_OK;
     }, "reset_all", "Reset every setting to compiled-in defaults, in memory", "settings");
+
+#ifdef ENABLE_SYSTEM_MONITOR
+    // System health: CPU load, memory, uptime (built only when enabled).
+    shell.create_module("sysmon", "System health: CPU load, memory, uptime");
+
+    shell.add([]() -> uint8_t {
+        ROBOT::logger.insert_logf(logType::INFO, "Core temperature: %.1f C",
+                                  instance_->sysmon.getCoreTemperature());
+        return RESULT_OK;
+    }, "temp", "Show the SoC core temperature", "sysmon");
+
+    shell.add([]() -> uint8_t {
+        ROBOT::logger.insert_log(logType::INFO, instance_->sysmon.getUptime().c_str());
+        return RESULT_OK;
+    }, "uptime", "Show system uptime", "sysmon");
+
+    shell.add([]() -> uint8_t {
+        ROBOT::logger.insert_log(logType::INFO, instance_->sysmon.getMemoryStats().c_str());
+        return RESULT_OK;
+    }, "memory", "Show heap/PSRAM usage stats", "sysmon");
+
+    shell.add([]() -> uint8_t {
+        ROBOT::logger.insert_log(logType::INFO, instance_->sysmon.getTaskStats().c_str());
+        return RESULT_OK;
+    }, "tasks", "Show per-task CPU load and stack usage", "sysmon");
+
+    shell.add([]() -> uint8_t {
+        ROBOT::logger.insert_log(logType::INFO, instance_->sysmon.getFullReport().c_str());
+        return RESULT_OK;
+    }, "report", "Show the full system health report on demand", "sysmon");
+#endif
 }
 
 // ==============================================================================
@@ -1328,10 +1294,22 @@ bool ROBOT::init() {
     array_sensor.emplace(cfg.s0, cfg.s1, cfg.s2, cfg.sig, cfg.len_sensor);
     encoder_left.emplace(cfg.enc_a0, cfg.enc_a1);
     encoder_right.emplace(cfg.enc_b0, cfg.enc_b1);
+    // Two LEDC channels per motor (IN1/IN2); CH0..CH3 (Settings.h) are
+    // reserved exactly for this pair of H-bridges.
+    motor_left.emplace(cfg.ain1, cfg.ain2, CH0, CH1);
+    motor_right.emplace(cfg.bin1, cfg.bin2, CH2, CH3);
 
     if (!ota.begin(sd_card, leds)) {
         logger.insert_log(logType::ERRO, "Failed to initialize OTA updater");
     }
+
+#ifdef ENABLE_SYSTEM_MONITOR
+    sysmon.begin();
+    sysmon.setOutputCallback([](const std::string& data) {
+        if (!data.empty()) ROBOT::logger.insert_log(logType::DEBG, data.c_str());
+    });
+    sysmon.setLoggerCallback([]() { return ROBOT::logger.get_write_pct(); });
+#endif
 
     receivedDataQueue = xQueueCreate(10, sizeof(message));
     if (receivedDataQueue == nullptr) {
@@ -1342,8 +1320,14 @@ bool ROBOT::init() {
     if (!configureCommunication())
         return false;
 
-    //motor_left.init();
-    //motor_right.init();
+    if (motor_left->init() != ESP_OK) {
+        ROBOT::logger.insert_log(logType::ERRO, "Failed to initialize left motor");
+        return false;
+    }
+    if (motor_right->init() != ESP_OK) {
+        ROBOT::logger.insert_log(logType::ERRO, "Failed to initialize right motor");
+        return false;
+    }
 
     if (!encoder_left->init()) {
         ROBOT::logger.insert_log(logType::ERRO, "Failed to initialize left encoder");

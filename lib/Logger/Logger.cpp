@@ -1,11 +1,15 @@
 #include <Logger.h>
+#include <SDCard.h>
 
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
 
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <ctime>
+#include <sys/time.h>
 
 Logger::Logger()
     : send_callback_(defaultSendCallback) {
@@ -440,4 +444,150 @@ bool Logger::send_message(const message& msg) {
     free_mutex();
 
     return callback(reinterpret_cast<const uint8_t*>(&msg), sizeof(msg));
+}
+
+bool Logger::set_datetime(uint16_t year, uint8_t month, uint8_t day,
+                          uint8_t hour, uint8_t minute, uint8_t second,
+                          const char* posix_tz) {
+    if (year < 2020 || month < 1 || month > 12 || day < 1 || day > 31 ||
+        hour > 23 || minute > 59 || second > 59) {
+        return false;
+    }
+
+    setenv("TZ", posix_tz, 1);
+    tzset();
+
+    struct tm requested_time{};
+    requested_time.tm_year = year - 1900;
+    requested_time.tm_mon = month - 1;
+    requested_time.tm_mday = day;
+    requested_time.tm_hour = hour;
+    requested_time.tm_min = minute;
+    requested_time.tm_sec = second;
+    requested_time.tm_isdst = -1;
+
+    const time_t timestamp = mktime(&requested_time);
+    if (timestamp == static_cast<time_t>(-1)) return false;
+
+    // mktime normalizes invalid dates, such as 31 February. Compare the result
+    // to reject those values instead of silently changing the requested date.
+    struct tm verified_time{};
+    localtime_r(&timestamp, &verified_time);
+    if (verified_time.tm_year != year - 1900 ||
+        verified_time.tm_mon != month - 1 ||
+        verified_time.tm_mday != day ||
+        verified_time.tm_hour != hour ||
+        verified_time.tm_min != minute ||
+        verified_time.tm_sec != second) {
+        return false;
+    }
+
+    const struct timeval system_time{
+        .tv_sec = timestamp,
+        .tv_usec = 0,
+    };
+
+    if (settimeofday(&system_time, nullptr) != 0) return false;
+
+    clock_synchronized_ = true;
+    return true;
+}
+
+bool Logger::make_log_filename(SDCard& card, char* filename, size_t capacity) const {
+    if (!clock_synchronized_ || filename == nullptr || capacity == 0) return false;
+
+    const time_t timestamp = time(nullptr);
+    struct tm local_time{};
+    if (localtime_r(&timestamp, &local_time) == nullptr) return false;
+
+    int written = snprintf(
+        filename, capacity, "log_%04d-%02d-%02d_%02d-%02d-%02d.blog",
+        local_time.tm_year + 1900, local_time.tm_mon + 1, local_time.tm_mday,
+        local_time.tm_hour, local_time.tm_min, local_time.tm_sec);
+
+    if (written <= 0 || static_cast<size_t>(written) >= capacity) return false;
+    if (!card.file_exists(filename)) return true;
+
+    // Do not overwrite a log when two new flushes happen in the same second.
+    for (uint8_t suffix = 1; suffix < 100; ++suffix) {
+        written = snprintf(
+            filename, capacity,
+            "log_%04d-%02d-%02d_%02d-%02d-%02d_%02u.blog",
+            local_time.tm_year + 1900, local_time.tm_mon + 1,
+            local_time.tm_mday, local_time.tm_hour, local_time.tm_min,
+            local_time.tm_sec, suffix);
+
+        if (written > 0 && static_cast<size_t>(written) < capacity &&
+            !card.file_exists(filename)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool Logger::find_latest_log_file(SDCard& card, char* filename, size_t capacity) const {
+    if (filename == nullptr || capacity == 0) return false;
+    filename[0] = '\0';
+
+    const uint16_t file_count = card.get_file_count();
+    for (uint16_t index = 0; index < file_count; ++index) {
+        SDFileInfo info{};
+        if (!card.get_file_info(index, info)) continue;
+
+        const size_t name_length = strlen(info.name);
+        if (name_length < 10 || strncmp(info.name, "log_", 4) != 0 ||
+            strcmp(info.name + name_length - 5, ".blog") != 0) {
+            continue;
+        }
+
+        // ISO date/time in the filename makes lexical order chronological.
+        if (filename[0] == '\0' || strcmp(info.name, filename) > 0) {
+            const int written = snprintf(filename, capacity, "%s", info.name);
+            if (written <= 0 || static_cast<size_t>(written) >= capacity) {
+                filename[0] = '\0';
+                return false;
+            }
+        }
+    }
+
+    return filename[0] != '\0';
+}
+
+bool Logger::flush_to_sd(SDCard& card, bool append,
+                         char* out_filename, size_t out_capacity) {
+    if (!card.is_mounted()) return false;
+
+    char filename[kLogFilenameCapacity];
+
+    if (append) {
+        if (last_log_file_[0] != '\0' && card.file_exists(last_log_file_)) {
+            snprintf(filename, sizeof(filename), "%s", last_log_file_);
+        } else if (!find_latest_log_file(card, filename, sizeof(filename))) {
+            return false;
+        }
+    } else if (!make_log_filename(card, filename, sizeof(filename))) {
+        return false;
+    }
+
+    if (!card.open_write_stream(filename, append)) return false;
+
+    const bool stored = flush_logs_to(
+        [](const uint8_t* data, size_t length, void* context) -> bool {
+            auto* out_card = static_cast<SDCard*>(context);
+            return out_card->write_stream(data, length);
+        },
+        &card);
+
+    const bool closed = card.close_stream();
+
+    if (!append || last_log_file_[0] == '\0') {
+        snprintf(last_log_file_, sizeof(last_log_file_), "%s", filename);
+    }
+
+    if (out_filename != nullptr && out_capacity > 0) {
+        snprintf(out_filename, out_capacity, "%s", filename);
+    }
+
+    return stored && closed;
 }

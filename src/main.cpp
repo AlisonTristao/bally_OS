@@ -32,8 +32,6 @@ ROBOT& robot = ROBOT::getInstance();
 States& states = States::getInstance();
 
 #ifdef ENABLE_SYSTEM_MONITOR
-#include <SystemMonitor.h>
-SystemMonitor monitor;
 static StackType_t xSystemMonitorStack[M4KB];
 static StaticTask_t xSystemMonitorBuffer;
 static void init_system_monitor();
@@ -137,21 +135,17 @@ static void start_freertos_tasks() {
 
 #ifdef ENABLE_SYSTEM_MONITOR
 static void init_system_monitor() {
-    monitor.begin();
-    monitor.setOutputCallback([](const std::string& data) {
-        if (!data.empty()) robot.logger.insert_log(logType::DEBG, data.c_str());
-    });
-    monitor.setLoggerCallback([]() { return robot.logger.get_write_pct(); });
-
+    // robot.sysmon is already configured (begin()/callbacks) by robot.init();
+    // this task only drives its periodic report.
     xTaskCreateStaticPinnedToCore(
         [](void* param) {
-            SystemMonitor* mon = static_cast<SystemMonitor*>(param);
+            (void)param;
             while (true) {
-                mon->update();
-                mon->report();
+                robot.sysmon.update();
+                robot.sysmon.report();
                 vTaskDelay(pdMS_TO_TICKS(robot.settings.data().sysmon_freq_ms));
             }
-        }, "system_monitor", M4KB, &monitor, 1, xSystemMonitorStack, &xSystemMonitorBuffer, PRO_CPU_NUM
+        }, "system_monitor", M4KB, NULL, 1, xSystemMonitorStack, &xSystemMonitorBuffer, PRO_CPU_NUM
     );
     ESP_LOGI("ROBOT_MAIN", "System monitor initialized successfully");
 }

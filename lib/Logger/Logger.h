@@ -4,6 +4,7 @@
 // autor: Alison Tristão
 // email: AlisonTristao@hotmail.com
 
+#include <cstddef>
 #include <cstdint>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
@@ -12,6 +13,8 @@
 #ifndef SHARED_MESSAGE_TYPES_H
 #error "This library depends on SharedMessageTypes.h, to use the data structures and definitions for the log messages. "
 #endif
+
+class SDCard;
 
 class Logger {
 public:
@@ -81,6 +84,29 @@ public:
     bool send_message(const message& msg);
 
     /**
+     * @brief Set the system clock used to name new SD log files, validating
+     * the calendar date instead of silently normalizing an invalid one.
+     *
+     * @param posix_tz TZ string applied before interpreting the given time
+     * as local (see RobotSettings::data().timezone).
+     */
+    bool set_datetime(uint16_t year, uint8_t month, uint8_t day,
+                      uint8_t hour, uint8_t minute, uint8_t second,
+                      const char* posix_tz);
+
+    /**
+     * @brief Save every retained PSRAM log to the SD card: either start a
+     * new, uniquely-named dated file or append to the most recently written
+     * one (falling back to the newest matching file already on the card).
+     *
+     * @param out_filename Optional; receives the file name written to.
+     * @return true when every retained message was written and the file
+     * closed cleanly.
+     */
+    bool flush_to_sd(SDCard& card, bool append,
+                     char* out_filename = nullptr, size_t out_capacity = 0);
+
+    /**
      * @brief Get the current write index of the logger's buffer. This is used for debugging purposes to track where the next log message will be written in the buffer.
      * 
      * @return The current write index of the logger's buffer.
@@ -126,6 +152,16 @@ private:
     SemaphoreHandle_t mutex_ = NULL;
     SendCallback send_callback_;
     bool initialized_ = false;
+
+    // SD log file naming/appending state (flush_to_sd/set_datetime).
+    // Mirrors SDFileInfo::MAX_NAME_LENGTH (lib/SDCard/SDCard.h) without
+    // requiring Logger.h to include the full SDCard header.
+    static constexpr size_t kLogFilenameCapacity = 128;
+    bool clock_synchronized_ = false;
+    char last_log_file_[kLogFilenameCapacity] = {};
+
+    bool make_log_filename(SDCard& card, char* filename, size_t capacity) const;
+    bool find_latest_log_file(SDCard& card, char* filename, size_t capacity) const;
 
     // private methods for the logger
     /*
