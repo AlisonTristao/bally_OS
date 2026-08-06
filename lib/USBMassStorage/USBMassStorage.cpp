@@ -6,6 +6,12 @@
 #include "tinyusb_default_config.h"
 #include "tinyusb_msc.h"
 
+#include <cstdio>
+#include <TinyShell.h>
+#include <Logger.h>
+#include <Format.h>
+#include <StateMachine.h>
+
 namespace {
 
 constexpr char USB_HEX_DIGITS[] = "0123456789ABCDEF";
@@ -251,4 +257,95 @@ bool USBMassStorage::sync_mount_state() {
     app_has_access_.store(app_access);
     card_->set_app_mounted(app_access);
     return true;
+}
+
+// ============================================================================
+// Shell commands
+// ============================================================================
+
+void USBMassStorage::register_shell_commands(TinyShell& shell, Logger& logger, SDCard& sd_card,
+                                             std::function<bool()> any_debug_test_active,
+                                             std::function<void()> mark_direct_output) {
+    shell.create_module("storage", "SD card file management and USB MSC ownership");
+
+    shell.add([this, &logger, &sd_card, any_debug_test_active, mark_direct_output]() -> uint8_t {
+        if (StateMachine::current_state.load(std::memory_order_acquire) !=
+            DEBUG) {
+            logger.insert_log(
+                logType::ERRO,
+                "USB storage requires DEBUG state; enter DEBUG first");
+            return RESULT_ERROR;
+        }
+
+        if (is_exposed()) {
+            logger.send_log_direct(logType::INFO,
+                                   "USB storage is already enabled");
+            return RESULT_OK;
+        }
+
+        if (!is_ready() ||
+            !app_has_access() ||
+            !sd_card.is_mounted()) {
+            logger.insert_log(
+                logType::ERRO,
+                "USB storage unavailable: SD card is not mounted for robot");
+            return RESULT_ERROR;
+        }
+
+        if (sd_card.has_open_stream()) {
+            logger.insert_log(
+                logType::ERRO,
+                "USB storage blocked: close the active SD file first");
+            return RESULT_ERROR;
+        }
+
+        if (any_debug_test_active()) {
+            logger.insert_log(
+                logType::ERRO,
+                "USB storage blocked: wait for the DEBUG test to finish");
+            return RESULT_ERROR;
+        }
+
+        if (!expose()) {
+            logger.insert_log(
+                logType::ERRO,
+                "Failed to transfer SD card ownership to native USB");
+            return RESULT_ERROR;
+        }
+
+        logger.send_log_direct(
+            logType::INFO,
+            "USB storage enabled; safely eject the drive on the PC before leaving DEBUG");
+        mark_direct_output();
+        return RESULT_OK;
+    }, "expose", "Expose the SD card through native USB MSC (DEBUG state)", "storage");
+
+    shell.add([this, &logger, mark_direct_output]() -> uint8_t {
+        if (!is_ready()) {
+            logger.insert_log(logType::ERRO,
+                              "USB storage is not initialized");
+            return RESULT_ERROR;
+        }
+
+        const char* owner = nullptr;
+        if (is_exposed()) {
+            owner = "PC owns SD";
+        } else if (is_active()) {
+            owner = host_is_attached()
+                ? "PC connected, waiting for media"
+                : "waiting for PC connection";
+        } else {
+            owner = "robot owns SD";
+        }
+
+        char capacity_text[24];
+        formatBytes(capacity_bytes(), capacity_text, sizeof(capacity_text));
+        char status[96];
+        snprintf(status, sizeof(status), "USB storage: %s; media=%s",
+                 owner, capacity_text);
+
+        logger.send_log_direct(logType::INFO, status);
+        mark_direct_output();
+        return RESULT_OK;
+    }, "status", "Show current SD card owner", "storage");
 }

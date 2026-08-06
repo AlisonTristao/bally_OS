@@ -13,6 +13,9 @@
 using MonitorCallback = std::function<void(const std::string&)>;
 using GetLoggerIndexCallback = float (*)();
 
+class TinyShell;
+class Logger;
+
 struct TaskRecord {
     TaskHandle_t handle;
     char name[16];
@@ -57,4 +60,10 @@ public:
     std::string getFullReport();
 
     void report();
+
+    /**
+     * @brief Register the "sysmon" shell module (temp/uptime/memory/tasks/
+     * report), backed by this instance.
+     */
+    void register_shell_commands(TinyShell& shell, Logger& logger);
 };

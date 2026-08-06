@@ -1,4 +1,5 @@
 .pio
 .vscode
 .log
+.claude
 /managed_components/

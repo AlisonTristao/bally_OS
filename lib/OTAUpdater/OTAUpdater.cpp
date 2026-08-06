@@ -7,12 +7,17 @@
 #include "esp_log.h"
 #include "esp_now.h"
 #include "esp_ota_ops.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "mdns.h"
 
 #include <Flags.h>
 #include <SDCard.h>
+#include <TinyShell.h>
+#include <Logger.h>
+#include <USBMassStorage.h>
+#include <StateMachine.h>
 
 namespace {
 
@@ -708,4 +713,131 @@ void OTAUpdater::ip_event_handler(void* arg, esp_event_base_t base,
         }
         self->got_ip_.store(true, std::memory_order_release);
     }
+}
+
+// ==============================================================================
+// Shell commands
+// ==============================================================================
+
+void OTAUpdater::register_shell_commands(TinyShell& shell, Logger& logger, SDCard& sd_card,
+                                         USBMassStorage& usb_storage,
+                                         std::function<bool()> any_debug_test_active,
+                                         std::function<void()> mark_direct_output) {
+    shell.create_module("ota", "Wi-Fi OTA firmware updates (DEBUG state)");
+
+    shell.add([this, &logger, &sd_card, &usb_storage, any_debug_test_active]() -> uint8_t {
+        if (StateMachine::current_state.load(std::memory_order_acquire) !=
+            DEBUG) {
+            logger.insert_log(
+                logType::ERRO, "OTA update requires DEBUG state; enter DEBUG first");
+            return RESULT_ERROR;
+        }
+
+        if (usb_storage.is_active() || !sd_card.is_mounted()) {
+            logger.insert_log(
+                logType::ERRO, "OTA update unavailable: SD card is not mounted for robot");
+            return RESULT_ERROR;
+        }
+
+        if (any_debug_test_active()) {
+            logger.insert_log(
+                logType::ERRO, "OTA update blocked: wait for the DEBUG test to finish");
+            return RESULT_ERROR;
+        }
+
+        if (!start()) {
+            logger.insert_log(
+                logType::ERRO,
+                "Failed to start OTA update: no networks stored in " OTA_WIFI_LIST_FILE);
+            return RESULT_ERROR;
+        }
+
+        logger.insert_log(
+            logType::INFO,
+            "OTA update started: scanning for a known network; press any button to cancel");
+        return RESULT_OK;
+    }, "start", "Join a known Wi-Fi network and accept a firmware upload", "ota");
+
+    shell.add([this, &logger, mark_direct_output]() -> uint8_t {
+        const char* status = "idle";
+        switch (phase()) {
+            case OTAUpdater::Phase::SCANNING:       status = "scanning for a known network"; break;
+            case OTAUpdater::Phase::CONNECTING:     status = "connecting"; break;
+            case OTAUpdater::Phase::CONNECT_FAILED: status = "connect failed, retrying"; break;
+            case OTAUpdater::Phase::SERVING:        status = "serving OTA updates"; break;
+            case OTAUpdater::Phase::IDLE:            status = "idle"; break;
+        }
+
+        char text[160];
+        if (phase() == OTAUpdater::Phase::SERVING) {
+            snprintf(text, sizeof(text),
+                     "OTA: %s, ssid=%s ip=%s (or http://%s.local/)",
+                     status, connected_ssid(),
+                     connected_ip(), hostname());
+        } else {
+            snprintf(text, sizeof(text), "OTA: %s", status);
+        }
+
+        logger.send_log_direct(logType::INFO, text);
+        mark_direct_output();
+        return RESULT_OK;
+    }, "status", "Show the current OTA update sub-mode status", "ota");
+
+    shell.add([&logger, mark_direct_output]() -> uint8_t {
+        // A successful upload sets the new image as the boot partition but
+        // deliberately does not reboot on its own (see
+        // OTAUpdater::finish_update) — this is the remote trigger for that,
+        // reachable over ESP-NOW since OTA already handed the channel back.
+        logger.send_log_direct(logType::INFO, "Rebooting...");
+        mark_direct_output();
+
+        esp_timer_handle_t reboot_timer;
+        const esp_timer_create_args_t timer_args = {
+            .callback = [](void*) { esp_restart(); },
+            .arg = nullptr,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name = "shell_reboot",
+            .skip_unhandled_events = false,
+        };
+        esp_timer_create(&timer_args, &reboot_timer);
+        esp_timer_start_once(reboot_timer, 500000);
+
+        return RESULT_OK;
+    }, "reboot", "Restart the robot now (e.g. to boot into a staged OTA update)", "ota");
+
+    shell.add([this, &logger](std::string ssid, std::string password) -> uint8_t {
+        if (!add_network(ssid.c_str(), password.c_str())) {
+            logger.insert_log(
+                logType::ERRO,
+                "Failed to add network: invalid ssid/password, list full or SD unavailable");
+            return RESULT_ERROR;
+        }
+
+        logger.insert_logf(logType::INFO, "Network added: %s",
+                           ssid.c_str());
+        return RESULT_OK;
+    }, "wifi_add", "Add a Wi-Fi network for OTA: ssid,password", "ota");
+
+    shell.add([this, &logger](uint16_t index) -> uint8_t {
+        if (!remove_network(index)) {
+            logger.insert_log(logType::ERRO, "Invalid network index");
+            return RESULT_ERROR;
+        }
+
+        logger.insert_logf(logType::INFO, "Network %u removed", index);
+        return RESULT_OK;
+    }, "wifi_remove", "Remove a stored Wi-Fi network by index", "ota");
+
+    shell.add([this, &logger]() -> uint8_t {
+        const uint16_t count = network_count();
+        logger.insert_logf(logType::INFO, "OTA networks: %u", count);
+
+        for (uint16_t index = 0; index < count; ++index) {
+            char ssid[OTA_SSID_MAX_LEN];
+            if (!get_network(index, ssid, sizeof(ssid))) continue;
+            logger.insert_logf(logType::INFO, "[%u] %s", index, ssid);
+        }
+
+        return RESULT_OK;
+    }, "wifi_list", "List Wi-Fi networks stored for OTA (SSID only)", "ota");
 }

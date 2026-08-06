@@ -7,6 +7,8 @@
 #include "driver/gpio.h"
 
 #include <SDCard.h>
+#include <TinyShell.h>
+#include <Logger.h>
 
 namespace {
 constexpr size_t kMaxModuleNameLength = 32;
@@ -344,4 +346,112 @@ bool RobotSettings::load(SDCard& card, uint16_t* skipped_lines) {
     }
 
     return true;
+}
+
+// ============================================================================
+// Shell commands
+// ============================================================================
+
+void RobotSettings::register_shell_commands(TinyShell& shell, Logger& logger, SDCard& sd_card,
+                                            std::function<void()> mark_direct_output) {
+    shell.create_module("settings", "Runtime robot settings backed by settings.conf");
+
+    shell.add([this, &logger](std::string module, std::string key) -> uint8_t {
+        std::string value;
+        if (!get(module.c_str(), key.c_str(), value)) {
+            logger.insert_logf(logType::ERRO, "Unknown setting: %s.%s",
+                               module.c_str(), key.c_str());
+            return RESULT_ERROR;
+        }
+
+        logger.insert_logf(logType::INFO, "%s.%s=%s", module.c_str(),
+                           key.c_str(), value.c_str());
+        return RESULT_OK;
+    }, "get", "Read one setting: module,key", "settings");
+
+    shell.add([this, &logger](std::string module, std::string key, std::string value) -> uint8_t {
+        if (!set(module.c_str(), key.c_str(), value.c_str())) {
+            logger.insert_logf(
+                logType::ERRO,
+                "Failed to set %s.%s: unknown setting or invalid value",
+                module.c_str(), key.c_str());
+            return RESULT_ERROR;
+        }
+
+        logger.insert_logf(
+            logType::INFO,
+            "%s.%s set in memory; run 'settings save' to persist, reboot to apply",
+            module.c_str(), key.c_str());
+        return RESULT_OK;
+    }, "set", "Change one setting in memory: module,key,value", "settings");
+
+    shell.add([this, &logger](std::string module) -> uint8_t {
+        std::string out;
+        list(module.c_str(), out);
+
+        if (out.empty()) {
+            logger.insert_logf(logType::ERRO, "Unknown settings module: %s",
+                               module.c_str());
+            return RESULT_ERROR;
+        }
+
+        logger.insert_log(logType::INFO, out.c_str());
+        return RESULT_OK;
+    }, "list", "List every setting in one module", "settings");
+
+    shell.add([this, &logger]() -> uint8_t {
+        std::string out;
+        list_all(out);
+        logger.insert_log(logType::INFO, out.c_str());
+        return RESULT_OK;
+    }, "list_all", "List every setting in every module", "settings");
+
+    shell.add([this, &logger, &sd_card, mark_direct_output]() -> uint8_t {
+        if (!save(sd_card)) {
+            logger.insert_log(
+                logType::ERRO, "Failed to save settings.conf: SD card not mounted");
+            return RESULT_ERROR;
+        }
+
+        logger.send_log_direct(logType::INFO, "Settings saved to settings.conf");
+        mark_direct_output();
+        return RESULT_OK;
+    }, "save", "Persist current settings to settings.conf", "settings");
+
+    shell.add([this, &logger, &sd_card]() -> uint8_t {
+        uint16_t skipped = 0;
+        if (!load(sd_card, &skipped)) {
+            logger.insert_log(
+                logType::ERRO, "Failed to load settings.conf: SD card not mounted");
+            return RESULT_ERROR;
+        }
+
+        logger.insert_logf(
+            logType::INFO,
+            "Settings reloaded from settings.conf (%u line(s) ignored); reboot to apply",
+            skipped);
+        return RESULT_OK;
+    }, "load", "Reload settings.conf from SD, discarding unsaved edits", "settings");
+
+    shell.add([this, &logger](std::string module) -> uint8_t {
+        if (!reset_module(module.c_str())) {
+            logger.insert_logf(logType::ERRO, "Unknown settings module: %s",
+                               module.c_str());
+            return RESULT_ERROR;
+        }
+
+        logger.insert_logf(
+            logType::INFO,
+            "%s reset to defaults in memory; run 'settings save' to persist",
+            module.c_str());
+        return RESULT_OK;
+    }, "reset", "Reset one module to compiled-in defaults, in memory", "settings");
+
+    shell.add([this, &logger]() -> uint8_t {
+        reset_all();
+        logger.insert_log(
+            logType::INFO,
+            "All settings reset to defaults in memory; run 'settings save' to persist");
+        return RESULT_OK;
+    }, "reset_all", "Reset every setting to compiled-in defaults, in memory", "settings");
 }

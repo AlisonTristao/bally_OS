@@ -9,6 +9,10 @@
 #include <dirent.h>
 #include <sys/stat.h>
 
+#include <TinyShell.h>
+#include <Logger.h>
+#include <Format.h>
+
 namespace {
 
 constexpr size_t MBR_DISK_SIGNATURE_OFFSET = 440;
@@ -497,4 +501,88 @@ bool SDCard::close_stream() {
 
 bool SDCard::stream_has_error() const {
     return stream_ != nullptr && ferror(stream_) != 0;
+}
+
+// ============================================================================
+// Shell commands
+// ============================================================================
+
+void SDCard::register_shell_commands(TinyShell& shell, Logger& logger) {
+    shell.create_module("storage", "SD card file management and USB MSC ownership");
+
+    shell.add([this, &logger]() -> uint8_t {
+        uint64_t total_bytes = 0;
+        uint64_t used_bytes = 0;
+        uint64_t free_bytes = 0;
+
+        if (!get_storage_info(total_bytes, used_bytes, free_bytes)) {
+            logger.insert_log(logType::ERRO, "Failed to read SD card usage");
+            return RESULT_ERROR;
+        }
+
+        const float used_percent = total_bytes == 0
+            ? 0.0f
+            : (used_bytes * 100.0f) / static_cast<float>(total_bytes);
+
+        char total_text[24];
+        char used_text[24];
+        char free_text[24];
+        formatBytes(total_bytes, total_text, sizeof(total_text));
+        formatBytes(used_bytes, used_text, sizeof(used_text));
+        formatBytes(free_bytes, free_text, sizeof(free_text));
+
+        logger.insert_logf(
+            logType::INFO,
+            "SD total=%s used=%s free=%s (%.2f%%)",
+            total_text, used_text, free_text,
+            used_percent);
+        return RESULT_OK;
+    }, "usage", "Show SD card total, used and free bytes", "storage");
+
+    shell.add([this, &logger]() -> uint8_t {
+        if (!is_mounted()) return RESULT_ERROR;
+
+        const uint16_t count = get_file_count();
+        logger.insert_logf(logType::INFO, "SD files: %u", count);
+
+        for (uint16_t index = 0; index < count; ++index) {
+            SDFileInfo info{};
+            if (!get_file_info(index, info)) continue;
+
+            char size_text[24];
+            formatBytes(info.size, size_text, sizeof(size_text));
+
+            logger.insert_logf(
+                logType::INFO, "[%u] %s (%s)", index, info.name, size_text);
+        }
+
+        return RESULT_OK;
+    }, "list_logs", "List files stored at the SD card root", "storage");
+
+    shell.add([this, &logger](uint16_t file_index) -> uint8_t {
+        SDFileInfo info{};
+        if (!get_file_info(file_index, info) ||
+            !remove_file(info.name)) {
+            logger.insert_log(logType::ERRO,
+                              "Invalid log index or delete failed");
+            return RESULT_ERROR;
+        }
+
+        logger.insert_logf(logType::INFO, "Deleted %s", info.name);
+        return RESULT_OK;
+    }, "delete_log", "Delete a file by index (see list_logs)", "storage");
+
+    shell.add([this, &logger](uint16_t file_index, std::string new_name) -> uint8_t {
+        SDFileInfo info{};
+        if (!get_file_info(file_index, info) ||
+            !rename_file(info.name, new_name.c_str())) {
+            logger.insert_log(logType::ERRO,
+                              "Invalid log index or rename failed");
+            return RESULT_ERROR;
+        }
+
+        logger.insert_logf(logType::INFO, "Renamed %s to %s",
+                           info.name, new_name.c_str());
+        return RESULT_OK;
+    }, "rename_log", "Rename a file by index: file_index,new_name", "storage");
 }

@@ -7,15 +7,20 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 
 #include "esp_event.h"
 #include "esp_http_server.h"
 
 #include <Settings.h>
 #include <SharedMessageTypes.h>
+#include <OtaDefaults.h>
 
 class SDCard;
 class Flags_out;
+class TinyShell;
+class Logger;
+class USBMassStorage;
 
 // Reports scan/connect/upload progress and failures (with reason, when
 // known) so they land in the retained log even though ESP-NOW is off the
@@ -43,12 +48,12 @@ using OtaLogCallback = void (*)(logType type, const char* msg);
  * upload, same as before this existed.
  */
 struct OtaTuning {
-    uint32_t led_step_ms        = 150;    // carousel step while OTA is active
-    uint32_t led_hold_ms        = 200;    // refresh window for solid status LEDs
-    uint32_t led_fail_hold_ms   = 800;    // red "connect failed" hold before retrying
-    uint32_t connect_timeout_ms = 10000;  // per-network connect timeout
-    uint32_t retry_scan_ms      = 5000;   // delay before re-scanning when nothing matched
-    uint8_t  espnow_channel     = 1;      // channel restored after leaving OTA
+    uint32_t led_step_ms        = OtaDefaults::led_step_ms;
+    uint32_t led_hold_ms        = OtaDefaults::led_hold_ms;
+    uint32_t led_fail_hold_ms   = OtaDefaults::led_fail_hold_ms;
+    uint32_t connect_timeout_ms = OtaDefaults::connect_timeout_ms;
+    uint32_t retry_scan_ms      = OtaDefaults::retry_scan_ms;
+    uint8_t  espnow_channel     = OtaDefaults::espnow_channel;
     const char* hostname        = nullptr;      // mDNS hostname: http://<name>.local/
     const char* instance_name   = nullptr;      // mDNS human-readable instance name
     const char* password        = nullptr;      // required in the X-OTA-Password header to POST /update
@@ -166,6 +171,20 @@ public:
      * @brief Number of networks currently stored in OTA_WIFI_LIST_FILE.
      */
     uint16_t network_count() const;
+
+    /**
+     * @brief Register the "ota" shell module (start/status/reboot/wifi_add/
+     * wifi_remove/wifi_list), backed by this instance.
+     * @param any_debug_test_active Polled by "start"; true while another
+     * DEBUG sensor test (owned by ROBOT, not this class) is running.
+     * @param mark_direct_output Called after "status" sends its reply, so
+     * that response is not itself retained in the PSRAM log (see
+     * ROBOT::sendNextShellOutputDirect).
+     */
+    void register_shell_commands(TinyShell& shell, Logger& logger, SDCard& sd_card,
+                                 USBMassStorage& usb_storage,
+                                 std::function<bool()> any_debug_test_active,
+                                 std::function<void()> mark_direct_output);
 
 private:
     struct Credential {

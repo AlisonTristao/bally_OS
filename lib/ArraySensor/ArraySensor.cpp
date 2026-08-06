@@ -6,6 +6,11 @@
 #include "driver/gpio.h"
 #include "esp_rom_sys.h"
 
+#include <TinyShell.h>
+#include <Logger.h>
+#include <RobotSettings.h>
+#include <StateMachine.h>
+
 namespace {
 uint8_t clamp_len(uint8_t len) {
     if (len == 0) return 1;
@@ -338,4 +343,41 @@ std::string ArraySensor::raw()
     }
 
     return status;
+}
+
+// ============================================================================
+// Shell commands
+// ============================================================================
+
+void ArraySensor::register_shell_commands(TinyShell& shell, Logger& logger, RobotSettings& settings) {
+    shell.create_module("sensor", "Array sensor (line follower) and wheel encoders");
+
+    shell.add([this, &logger, &settings]() -> uint8_t {
+        if (StateMachine::current_state.load(std::memory_order_acquire) == RUN) {
+            logger.insert_log(logType::ERRO,
+                              "Calibration blocked while RUN is active");
+            return RESULT_ERROR;
+        }
+
+        const SettingsData& cfg = settings.data();
+        const bool ok = calibrate(cfg.samples, cfg.delay_sample);
+        logger.insert_logf(logType::INFO, "Calibration %s",
+                           ok ? "succeeded" : "failed");
+        return ok ? RESULT_OK : RESULT_ERROR;
+    }, "calibrate", "Calibrate the array sensor using the configured sample count", "sensor");
+
+    shell.add([this, &logger]() -> uint8_t {
+        logger.insert_log(logType::INFO, calibrate_status().c_str());
+        return RESULT_OK;
+    }, "calibrate_status", "Show the array sensor's stored calibration values", "sensor");
+
+    shell.add([this, &logger]() -> uint8_t {
+        logger.insert_logf(logType::INFO, "Line position: %.3f", get_line_position());
+        return RESULT_OK;
+    }, "position", "Read the current normalized line position (-1..1)", "sensor");
+
+    shell.add([this, &logger]() -> uint8_t {
+        logger.insert_log(logType::INFO, raw().c_str());
+        return RESULT_OK;
+    }, "raw", "Show raw ADC readings for every sensor channel", "sensor");
 }

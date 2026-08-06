@@ -10,6 +10,9 @@
 #include "driver/gpio.h"
 #include "sdmmc_cmd.h"
 
+class TinyShell;
+class Logger;
+
 struct SDFileInfo {
     static constexpr size_t MAX_NAME_LENGTH = 128;
 
@@ -165,6 +168,14 @@ public:
     size_t read_stream(void* buffer, size_t capacity);
     bool close_stream();
     bool stream_has_error() const;
+
+    /**
+     * @brief Register this card's "storage" shell module commands (usage/
+     * list_logs/delete_log/rename_log) — plain SD file management, as
+     * opposed to USBMassStorage's ownership-transfer commands (expose/
+     * status), which share the same "storage" module name.
+     */
+    void register_shell_commands(TinyShell& shell, Logger& logger);
 
 private:
     friend class USBMassStorage;

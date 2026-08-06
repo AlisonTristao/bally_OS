@@ -6,10 +6,13 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 
 #include "tinyusb_msc.h"
 
 class SDCard;
+class TinyShell;
+class Logger;
 
 /**
  * @brief Transfer exclusive SD card access between the robot and a USB host.
@@ -53,6 +56,21 @@ public:
 
     // Called by the TinyUSB device event bridge in the implementation file.
     void handle_host_connection(bool attached);
+
+    /**
+     * @brief Register this manager's "storage" shell module commands
+     * (expose/status) — SD/USB ownership transfer, as opposed to SDCard's
+     * plain file management (usage/list_logs/...), which share the same
+     * "storage" module name.
+     * @param any_debug_test_active Polled by "expose"; true while a DEBUG
+     * sensor test (owned by ROBOT, not this class) is running.
+     * @param mark_direct_output Called after "expose"/"status" send their
+     * reply, so it is not itself retained in the PSRAM log (see
+     * ROBOT::sendNextShellOutputDirect).
+     */
+    void register_shell_commands(TinyShell& shell, Logger& logger, SDCard& sd_card,
+                                 std::function<bool()> any_debug_test_active,
+                                 std::function<void()> mark_direct_output);
 
 private:
     friend void usb_storage_event(tinyusb_msc_storage_handle_t handle,

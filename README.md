@@ -23,10 +23,14 @@ Este projeto implementa o controle de um robô baseado em ESP32-S3, utilizando a
 
 - **ArraySensor**: Gerencia o array de sensores frontais, incluindo calibração, leitura e normalização dos valores.
 - **Encoder**: Gerencia a leitura dos encoders usando periféricos de hardware do ESP32.
+- **Format**: Header-only, sem dependências — formatação de tamanhos em bytes (`"12.34 MB"`) reaproveitada por SDCard, USBMassStorage e Logger.
 - **HBridge**: Controle dos motores via ponte H, incluindo direção e PWM.
 - **Logger**: Sistema de logs e comandos, com envio via ESP-NOW ou porta serial.
 - **OTAUpdater**: Atualização de firmware sem fio a partir do estado DEBUG — conecta a uma rede Wi-Fi cadastrada no cartão SD e recebe o novo binário via HTTP.
+- **RobotSettings**: Armazena e persiste (`settings.conf` no SD) todos os parâmetros configuráveis em runtime.
+- **SDCard** / **USBMassStorage**: Acesso ao cartão SD e transferência de propriedade exclusiva do FAT entre o robô e um host USB.
 - **StateMachine**: Máquina de estados do robô, com transições e *callbacks* configuráveis.
+- **SystemMonitor**: Relatório opcional de saúde do sistema (CPU, memória, temperatura), habilitado por `ENABLE_SYSTEM_MONITOR`.
 - **StaticObjects**: Inicializa e centraliza instâncias globais dos principais objetos (robô, sensores, motores, logger, etc.).
 - **TinyShell**: Interpretador de linha de comando embarcado. Organiza comandos em módulos, suporta autocompletar (*auto-completion*), converte dinamicamente os tipos de argumentos de *strings* para os tipos esperados, valida a execução e lida com erros de forma segura (*try-catch*).
 
@@ -34,6 +38,22 @@ Este projeto implementa o controle de um robô baseado em ESP32-S3, utilizando a
 - **robot/**: Implementação dos estados (Setup, Wait, Calibrate, Debug, Run, Finish, Telemetry, Error).
 - **include/**: Definições globais necessárias para configurar o robô.
 - **utils/**: Contém as configurações globais das funcionalidades do robô, centralizadas no objeto `ROBOT`, que permite criar apenas uma instância. Esse objeto unifica o acesso aos sensores, motores, utilidades dos sensores, logger, controle e demais recursos.
+
+### Organização e Acoplamento entre Módulos
+
+Cada pasta em `lib/` é pensada para ser compilável e compreensível isoladamente. Duas regras mantêm isso na prática:
+
+1. **Dependência entre bibliotecas só quando justificada, e sempre explícita.** A maioria dos módulos (`Flags`, `StateMachine`, `HBridge`, `Encoder`, `ArraySensor`, `SystemMonitor`, `Format`) não inclui nenhuma outra biblioteca do projeto. Onde uma dependência é real — `Logger` grava no `SDCard`; `OTAUpdater` usa `SDCard`/`Flags_out`; `USBMassStorage` usa `SDCard` — o header só faz `class Nome;` (forward declaration) e o `.cpp` inclui o header completo. Isso limita o acoplamento à implementação, não à interface pública: quem só usa a classe por referência/ponteiro nunca precisa saber o que ela inclui por baixo.
+2. **`RobotSettings` não conhece os módulos que consomem suas configurações.** É a camada mais "de baixo" da configuração em runtime (dados + persistência em `settings.conf`); quem lê valores dela (`OTAUpdater`, `ArraySensor`, `Logger`, ...) depende dela, nunca o contrário. Essa direção já existia para a maior parte dos campos, mas `RobotSettings.h` chegava a incluir `OTAUpdater.h` inteiro (puxando `esp_event.h`/`esp_http_server.h`/o protocolo de mensagens do `Logger`) só para copiar 6 valores padrão de `OtaTuning`. Foi extraído um header sem dependências, `lib/OTAUpdater/OtaDefaults.h`, incluído tanto por `OTAUpdater.h` quanto por `RobotSettings.h` — a duplicação de literais virou uma dependência compartilhada de mão única.
+
+**Comandos de shell: cada módulo registra os próprios.** Antes, `utils/BallyRobot/BallyRobot.cpp` definia os ~55 comandos de *todos* os módulos (OTA, storage, sensores, EKF, settings, sysmon...) em uma única função de 700 linhas — o ponto de maior acoplamento real do projeto, mesmo com as bibliotecas já desacopladas entre si. Agora cada classe expõe um método `register_shell_commands(TinyShell&, ...)`, implementado no seu próprio `.cpp`, recebendo por parâmetro só o que precisa (ex.: `OTAUpdater::register_shell_commands` recebe `Logger&`, `SDCard&`, `USBMassStorage&` e um `std::function<bool()>` para consultar se algum teste de DEBUG está ativo — sem precisar saber que "teste de DEBUG" é um conceito do `ROBOT`). `ROBOT::startWrappers()` ficou como o que deveria ser: uma lista de chamadas de composição, não a lógica de cada comando.
+
+Três módulos de shell continuam em `ROBOT` (`registerRobotIOCommands`/`registerKalmanCommands`/`registerDebugCommands`, em `utils/BallyRobot/BallyRobot.cpp`), de propósito — não por falta de tempo de mover:
+- **`robot`** (btn/ssr/set_pwm/set_led): aciona os `Flags_in`/`Flags_out`/`Flags_pwm` que o próprio `ROBOT` compõe; não há uma biblioteca "dona" além dele.
+- **`kalman`** (estado do EKF + log periódico): o filtro (`TinyEKF`) é uma dependência externa vendorizada, sem wrapper próprio no `lib/`; quem realmente possui a instância, o timer de amostragem e os vetores de controle/medição é o `ROBOT`.
+- **`debug`** (`test_arr_sensor`/`test_encoder`): o agendamento e o *gate* (estado DEBUG + USB ocioso) são aplicados uniformemente sobre vários sensores a partir de estado privado do `ROBOT`, não pertencem a nenhum sensor individual.
+
+Isso é esperado de um *composition root*: `ROBOT`/`BallyRobot` continua sendo o único lugar que conhece e instancia todos os subsistemas — é para isso que ele existe — mas parou de conter a lógica de negócio de cada um deles.
 
 ## Fluxo Detalhado do Sistema
 

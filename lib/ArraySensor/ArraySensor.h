@@ -6,6 +6,10 @@
 
 #include "esp_adc/adc_oneshot.h"
 
+class TinyShell;
+class Logger;
+class RobotSettings;
+
 class ArraySensor {
 public:
     // Hardware ceiling: the analog multiplexer has 8 channels (S0..S2
@@ -33,6 +37,17 @@ public:
     std::string debug();
 
     std::string raw();
+
+    /**
+     * @brief Register this sensor's "sensor" shell module commands
+     * (calibrate/calibrate_status/position/raw). Owned here instead of the
+     * ROBOT composition root so the calibration workflow lives next to the
+     * class it operates on.
+     * @param settings Read live at call time (cfg.samples/delay_sample), not
+     * captured, so a "settings set" takes effect on the next calibrate
+     * without re-registering.
+     */
+    void register_shell_commands(TinyShell& shell, Logger& logger, RobotSettings& settings);
 
 private:
     // Pinos de seleção do multiplexador

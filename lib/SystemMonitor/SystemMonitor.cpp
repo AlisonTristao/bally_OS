@@ -4,6 +4,9 @@
 #include <string.h>
 #include <algorithm>
 
+#include <TinyShell.h>
+#include <Logger.h>
+
 SystemMonitor::SystemMonitor() {
     temp_sensor = NULL;
     is_initialized = false;
@@ -246,4 +249,38 @@ std::string SystemMonitor::getFullReport() {
 
 void SystemMonitor::report() {
     dispatch(getFullReport());
+}
+
+// ============================================================================
+// Shell commands
+// ============================================================================
+
+void SystemMonitor::register_shell_commands(TinyShell& shell, Logger& logger) {
+    shell.create_module("sysmon", "System health: CPU load, memory, uptime");
+
+    shell.add([this, &logger]() -> uint8_t {
+        logger.insert_logf(logType::INFO, "Core temperature: %.1f C",
+                           getCoreTemperature());
+        return RESULT_OK;
+    }, "temp", "Show the SoC core temperature", "sysmon");
+
+    shell.add([this, &logger]() -> uint8_t {
+        logger.insert_log(logType::INFO, getUptime().c_str());
+        return RESULT_OK;
+    }, "uptime", "Show system uptime", "sysmon");
+
+    shell.add([this, &logger]() -> uint8_t {
+        logger.insert_log(logType::INFO, getMemoryStats().c_str());
+        return RESULT_OK;
+    }, "memory", "Show heap/PSRAM usage stats", "sysmon");
+
+    shell.add([this, &logger]() -> uint8_t {
+        logger.insert_log(logType::INFO, getTaskStats().c_str());
+        return RESULT_OK;
+    }, "tasks", "Show per-task CPU load and stack usage", "sysmon");
+
+    shell.add([this, &logger]() -> uint8_t {
+        logger.insert_log(logType::INFO, getFullReport().c_str());
+        return RESULT_OK;
+    }, "report", "Show the full system health report on demand", "sysmon");
 }

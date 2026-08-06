@@ -45,24 +45,6 @@ Logger ROBOT::logger;
 // HELPER FUNCTIONS
 // ==============================================================================
 
-static void formatBytes(uint64_t bytes, char* output, size_t capacity) {
-    const char* unit = "B";
-    double value = static_cast<double>(bytes);
-
-    if (bytes >= (1024ULL * 1024ULL * 1024ULL)) {
-        value /= 1024.0 * 1024.0 * 1024.0;
-        unit = "GB";
-    } else if (bytes >= (1024ULL * 1024ULL)) {
-        value /= 1024.0 * 1024.0;
-        unit = "MB";
-    } else if (bytes >= 1024ULL) {
-        value /= 1024.0;
-        unit = "kB";
-    }
-
-    snprintf(output, capacity, "%.2f %s", value, unit);
-}
-
 static void readMacAddress() {
     uint8_t baseMac[6];
     esp_err_t ret = esp_wifi_get_mac(WIFI_IF_STA, baseMac);
@@ -76,32 +58,6 @@ static void readMacAddress() {
     } else {
         ROBOT::logger.insert_log(logType::ERRO, "Failed to read MAC address");
     }
-}
-
-uint8_t testPacket() {
-    // Envia um texto longo numerado para testar fragmentacao e perda de pacotes
-    // Referencia: Terminal log da GLaDOS (Portal) - "Still Alive"
-    const char* long_text =
-        "[01/14] Forms FORM-29827281-12-2: Notice of Dismissal\n"
-        "[02/14] Aperture Science computer-aided enrichment center\n"
-        "[03/14] This was a triumph.\n"
-        "[04/14] I'm making a note here: HUGE SUCCESS.\n"
-        "[05/14] It's hard to overstate my satisfaction.\n"
-        "[06/14] Aperture Science\n"
-        "[07/14] We do what we must because we can.\n"
-        "[08/14] For the good of all of us.\n"
-        "[09/14] Except the ones who are dead.\n"
-        "[10/14] But there's no sense crying over every mistake.\n"
-        "[11/14] You just keep on trying till you run out of cake.\n"
-        "[12/14] And the Science gets done.\n"
-        "[13/14] And you make a neat gun.\n"
-        "[14/14] For the people who are still alive.\n";
-
-    // When info logs are enabled, push to logger to validate its packetization path.
-    #if defined(LOG_ALL) || defined(LOG_INFO)
-        ROBOT::logger.insert_log(logType::INFO, long_text);
-        return RESULT_OK;
-    #endif
 }
 
 // ==============================================================================
@@ -590,6 +546,47 @@ void ROBOT::runEKF(void *param) {
 }
 
 void ROBOT::startWrappers() {
+    // Modules owned by ROBOT itself — see the declarations in BallyRobot.h
+    // for why each one stays here instead of moving to a subsystem lib.
+    registerRobotIOCommands();
+    registerKalmanCommands();
+    registerDebugCommands();
+
+    // Every other module is owned by the subsystem it operates on. "sensor"
+    // and "storage" are each split across two owners below (array sensor vs.
+    // encoders; SD file management vs. USB ownership) — both register into
+    // the same TinyShell module name, which TinyShell allows.
+    array_sensor->register_shell_commands(shell, logger, settings);
+    Encoder::register_shell_commands(shell, logger, *encoder_left, *encoder_right);
+
+    usb_storage.register_shell_commands(
+        shell, logger, sd_card,
+        [this]() { return anyDebugTestActive(); },
+        [this]() { sendNextShellOutputDirect(); });
+    sd_card.register_shell_commands(shell, logger);
+
+    logger.register_shell_commands(
+        shell, sd_card, settings,
+        [this]() { sendNextShellOutputDirect(); });
+
+    ota.register_shell_commands(
+        shell, logger, sd_card, usb_storage,
+        [this]() { return anyDebugTestActive(); },
+        [this]() { sendNextShellOutputDirect(); });
+
+    // "set"/"reset"/"reset_all" only change the in-memory copy; "save"
+    // persists it, and every change needs a reboot to actually take effect
+    // (pins, timers and EKF init are all applied once, at boot).
+    settings.register_shell_commands(
+        shell, logger, sd_card,
+        [this]() { sendNextShellOutputDirect(); });
+
+#ifdef ENABLE_SYSTEM_MONITOR
+    sysmon.register_shell_commands(shell, logger);
+#endif
+}
+
+void ROBOT::registerRobotIOCommands() {
     // Raw actuator/virtual-input I/O: motors, LEDs, virtual button/side-sensor triggers.
     shell.create_module("robot", "Raw actuator and virtual-input commands");
 
@@ -627,49 +624,9 @@ void ROBOT::startWrappers() {
         instance_->leds.setFlag(pin, time);
         return RESULT_OK;
     }, "set_led", "turn on a LED", "robot");
+}
 
-    // Array sensor (line follower) and wheel encoders.
-    shell.create_module("sensor", "Array sensor (line follower) and wheel encoders");
-
-    shell.add([]() -> uint8_t {
-        if (StateMachine::current_state.load(std::memory_order_acquire) == RUN) {
-            ROBOT::logger.insert_log(logType::ERRO,
-                                     "Calibration blocked while RUN is active");
-            return RESULT_ERROR;
-        }
-
-        const SettingsData& cfg = instance_->settings.data();
-        const bool ok = instance_->array_sensor->calibrate(cfg.samples, cfg.delay_sample);
-        ROBOT::logger.insert_logf(logType::INFO, "Calibration %s",
-                                  ok ? "succeeded" : "failed");
-        return ok ? RESULT_OK : RESULT_ERROR;
-    }, "calibrate", "Calibrate the array sensor using the configured sample count", "sensor");
-
-    shell.add([]() -> uint8_t {
-        ROBOT::logger.insert_log(logType::INFO,
-                                 instance_->array_sensor->calibrate_status().c_str());
-        return RESULT_OK;
-    }, "calibrate_status", "Show the array sensor's stored calibration values", "sensor");
-
-    shell.add([]() -> uint8_t {
-        ROBOT::logger.insert_logf(logType::INFO, "Line position: %.3f",
-                                  instance_->array_sensor->get_line_position());
-        return RESULT_OK;
-    }, "position", "Read the current normalized line position (-1..1)", "sensor");
-
-    shell.add([]() -> uint8_t {
-        ROBOT::logger.insert_log(logType::INFO, instance_->array_sensor->raw().c_str());
-        return RESULT_OK;
-    }, "raw", "Show raw ADC readings for every sensor channel", "sensor");
-
-    shell.add([]() -> uint8_t {
-        ROBOT::logger.insert_logf(
-            logType::INFO, "Encoders: left=%lld right=%lld",
-            static_cast<long long>(instance_->encoder_left->getCount()),
-            static_cast<long long>(instance_->encoder_right->getCount()));
-        return RESULT_OK;
-    }, "encoders", "Read the raw left/right encoder counts", "sensor");
-
+void ROBOT::registerKalmanCommands() {
     // EKF (Kalman) state and periodic tuning log. Unlike the "debug" module
     // below, this is available in any state (including RUN) since tuning
     // the filter means watching it while the robot is actually driving.
@@ -701,7 +658,9 @@ void ROBOT::startWrappers() {
         ROBOT::logger.insert_log(logType::INFO, "Kalman log stopped");
         return RESULT_OK;
     }, "stop_log", "Stop periodic EKF logging", "kalman");
+}
 
+void ROBOT::registerDebugCommands() {
     // DEBUG sensor tests: each schedules periodic, non-blocking sampling
     // (see ScheduledDebugTest/processDebug). Add one command per sensor
     // here — IMU and H-bridge current are planned next.
@@ -738,547 +697,6 @@ void ROBOT::startWrappers() {
             samples, interval_ms);
         return RESULT_OK;
     }, "test_encoder", "Print left/right encoder counts: samples,interval_ms", "debug");
-
-    // SD card and native USB MSC ownership.
-    shell.create_module("storage", "SD card file management and USB MSC ownership");
-
-    shell.add([]() -> uint8_t {
-        if (StateMachine::current_state.load(std::memory_order_acquire) !=
-            DEBUG) {
-            ROBOT::logger.insert_log(
-                logType::ERRO,
-                "USB storage requires DEBUG state; enter DEBUG first");
-            return RESULT_ERROR;
-        }
-
-        if (instance_->usb_storage.is_exposed()) {
-            ROBOT::logger.send_log_direct(logType::INFO,
-                                          "USB storage is already enabled");
-            return RESULT_OK;
-        }
-
-        if (!instance_->usb_storage.is_ready() ||
-            !instance_->usb_storage.app_has_access() ||
-            !instance_->sd_card.is_mounted()) {
-            ROBOT::logger.insert_log(
-                logType::ERRO,
-                "USB storage unavailable: SD card is not mounted for robot");
-            return RESULT_ERROR;
-        }
-
-        if (instance_->sd_card.has_open_stream()) {
-            ROBOT::logger.insert_log(
-                logType::ERRO,
-                "USB storage blocked: close the active SD file first");
-            return RESULT_ERROR;
-        }
-
-        if (instance_->anyDebugTestActive()) {
-            ROBOT::logger.insert_log(
-                logType::ERRO,
-                "USB storage blocked: wait for the DEBUG test to finish");
-            return RESULT_ERROR;
-        }
-
-        if (!instance_->usb_storage.expose()) {
-            ROBOT::logger.insert_log(
-                logType::ERRO,
-                "Failed to transfer SD card ownership to native USB");
-            return RESULT_ERROR;
-        }
-
-        ROBOT::logger.send_log_direct(
-            logType::INFO,
-            "USB storage enabled; safely eject the drive on the PC before leaving DEBUG");
-        instance_->sendNextShellOutputDirect();
-        return RESULT_OK;
-    }, "expose", "Expose the SD card through native USB MSC (DEBUG state)", "storage");
-
-    shell.add([]() -> uint8_t {
-        if (!instance_->usb_storage.is_ready()) {
-            ROBOT::logger.insert_log(logType::ERRO,
-                                     "USB storage is not initialized");
-            return RESULT_ERROR;
-        }
-
-        const char* owner = nullptr;
-        if (instance_->usb_storage.is_exposed()) {
-            owner = "PC owns SD";
-        } else if (instance_->usb_storage.is_active()) {
-            owner = instance_->usb_storage.host_is_attached()
-                ? "PC connected, waiting for media"
-                : "waiting for PC connection";
-        } else {
-            owner = "robot owns SD";
-        }
-
-        char capacity_text[24];
-        formatBytes(instance_->usb_storage.capacity_bytes(), capacity_text,
-                    sizeof(capacity_text));
-        char status[96];
-        snprintf(status, sizeof(status), "USB storage: %s; media=%s",
-                 owner, capacity_text);
-
-        ROBOT::logger.send_log_direct(logType::INFO, status);
-        instance_->sendNextShellOutputDirect();
-        return RESULT_OK;
-    }, "status", "Show current SD card owner", "storage");
-
-    shell.add([]() -> uint8_t {
-        uint64_t total_bytes = 0;
-        uint64_t used_bytes = 0;
-        uint64_t free_bytes = 0;
-
-        if (!instance_->sd_card.get_storage_info(
-                total_bytes, used_bytes, free_bytes)) {
-            ROBOT::logger.insert_log(logType::ERRO,
-                                     "Failed to read SD card usage");
-            return RESULT_ERROR;
-        }
-
-        const float used_percent = total_bytes == 0
-            ? 0.0f
-            : (used_bytes * 100.0f) / static_cast<float>(total_bytes);
-
-        char total_text[24];
-        char used_text[24];
-        char free_text[24];
-        formatBytes(total_bytes, total_text, sizeof(total_text));
-        formatBytes(used_bytes, used_text, sizeof(used_text));
-        formatBytes(free_bytes, free_text, sizeof(free_text));
-
-        ROBOT::logger.insert_logf(
-            logType::INFO,
-            "SD total=%s used=%s free=%s (%.2f%%)",
-            total_text, used_text, free_text,
-            used_percent);
-        return RESULT_OK;
-    }, "usage", "Show SD card total, used and free bytes", "storage");
-
-    shell.add([]() -> uint8_t {
-        if (!instance_->sd_card.is_mounted()) return RESULT_ERROR;
-
-        const uint16_t count = instance_->sd_card.get_file_count();
-        ROBOT::logger.insert_logf(logType::INFO, "SD files: %u", count);
-
-        for (uint16_t index = 0; index < count; ++index) {
-            SDFileInfo info{};
-            if (!instance_->sd_card.get_file_info(index, info)) continue;
-
-            char size_text[24];
-            formatBytes(info.size, size_text, sizeof(size_text));
-
-            ROBOT::logger.insert_logf(
-                logType::INFO, "[%u] %s (%s)", index, info.name, size_text);
-        }
-
-        return RESULT_OK;
-    }, "list_logs", "List files stored at the SD card root", "storage");
-
-    shell.add([](uint16_t file_index) -> uint8_t {
-        SDFileInfo info{};
-        if (!instance_->sd_card.get_file_info(file_index, info) ||
-            !instance_->sd_card.remove_file(info.name)) {
-            ROBOT::logger.insert_log(logType::ERRO,
-                                     "Invalid log index or delete failed");
-            return RESULT_ERROR;
-        }
-
-        ROBOT::logger.insert_logf(logType::INFO, "Deleted %s", info.name);
-        return RESULT_OK;
-    }, "delete_log", "Delete a file by index (see list_logs)", "storage");
-
-    shell.add([](uint16_t file_index, std::string new_name) -> uint8_t {
-        SDFileInfo info{};
-        if (!instance_->sd_card.get_file_info(file_index, info) ||
-            !instance_->sd_card.rename_file(info.name, new_name.c_str())) {
-            ROBOT::logger.insert_log(logType::ERRO,
-                                     "Invalid log index or rename failed");
-            return RESULT_ERROR;
-        }
-
-        ROBOT::logger.insert_logf(logType::INFO, "Renamed %s to %s",
-                                  info.name, new_name.c_str());
-        return RESULT_OK;
-    }, "rename_log", "Rename a file by index: file_index,new_name", "storage");
-
-    // Retained PSRAM log buffer and its SD-backed files.
-    shell.create_module("logger", "Retained PSRAM log buffer and SD log files");
-
-    shell.add(testPacket, "test_packet",
-             "Send a long test packet to evaluate multi-packet handling", "logger");
-
-    shell.add([]() -> uint8_t {
-        char used_text[24];
-        char capacity_text[24];
-        formatBytes(ROBOT::logger.get_used_bytes(), used_text,
-                    sizeof(used_text));
-        formatBytes(ROBOT::logger.get_capacity_bytes(), capacity_text,
-                    sizeof(capacity_text));
-
-        ROBOT::logger.insert_logf(
-            logType::INFO,
-            "PSRAM logger used=%s capacity=%s (%.2f%%)",
-            used_text,
-            capacity_text,
-            ROBOT::logger.get_write_pct());
-        return RESULT_OK;
-    }, "psram_usage", "Show retained Logger PSRAM usage", "logger");
-
-    shell.add([](uint16_t year, uint8_t month, uint8_t day,
-                 uint8_t hour, uint8_t minute, uint8_t second) -> uint8_t {
-        if (!ROBOT::logger.set_datetime(year, month, day, hour, minute, second,
-                                        instance_->settings.data().timezone)) {
-            ROBOT::logger.insert_log(logType::ERRO,
-                                     "Invalid date/time or clock update failed");
-            return RESULT_ERROR;
-        }
-
-        ROBOT::logger.insert_logf(
-            logType::INFO,
-            "Robot time updated: %04u-%02u-%02u %02u:%02u:%02u",
-            year, month, day, hour, minute, second);
-        return RESULT_OK;
-    }, "set_datetime", "Set local time: year,month,day,hour,minute,second",
-       "logger");
-
-    shell.add([]() -> uint8_t {
-        char filename[SDFileInfo::MAX_NAME_LENGTH] = {};
-        if (!ROBOT::logger.flush_to_sd(instance_->sd_card, false, filename,
-                                       sizeof(filename))) {
-            ROBOT::logger.insert_log(
-                logType::ERRO,
-                "Failed to create a new SD log; synchronize date/time first");
-            return RESULT_ERROR;
-        }
-
-        char response[sizeof(filename) + 32];
-        snprintf(response, sizeof(response), "PSRAM saved to %s", filename);
-        ROBOT::logger.send_log_direct(logType::INFO, response);
-        instance_->sendNextShellOutputDirect();
-        return RESULT_OK;
-    }, "flush_new", "Save retained PSRAM logs into a new dated file", "logger");
-
-    shell.add([]() -> uint8_t {
-        char filename[SDFileInfo::MAX_NAME_LENGTH] = {};
-        if (!ROBOT::logger.flush_to_sd(instance_->sd_card, true, filename,
-                                       sizeof(filename))) {
-            ROBOT::logger.insert_log(
-                logType::ERRO,
-                "Failed to append PSRAM logs to the latest SD log");
-            return RESULT_ERROR;
-        }
-
-        char response[sizeof(filename) + 36];
-        snprintf(response, sizeof(response), "PSRAM appended to %s", filename);
-        ROBOT::logger.send_log_direct(logType::INFO, response);
-        instance_->sendNextShellOutputDirect();
-        return RESULT_OK;
-    }, "flush_append", "Append retained PSRAM logs to the latest log file",
-       "logger");
-
-    shell.add([](uint16_t file_index, uint32_t delay_msg_ms) -> uint8_t {
-        SDFileInfo info{};
-        if (!instance_->sd_card.get_file_info(file_index, info) ||
-            info.size % sizeof(message) != 0 ||
-            !instance_->sd_card.open_read_stream(info.name)) {
-            ROBOT::logger.insert_log(logType::ERRO,
-                                     "Invalid log index or file format");
-            return RESULT_ERROR;
-        }
-
-        bool success = true;
-        uint32_t sent_messages = 0;
-
-        while (true) {
-            message stored_message{};
-            const size_t read = instance_->sd_card.read_stream(
-                &stored_message, sizeof(stored_message));
-
-            if (read == 0) break;
-            if (read != sizeof(stored_message) ||
-                stored_message.content.size > MAX_CONTENT_SIZE ||
-                stored_message.packet_number == 0 ||
-                stored_message.total_packets == 0 ||
-                !ROBOT::logger.send_message(stored_message)) {
-                success = false;
-                break;
-            }
-
-            ++sent_messages;
-            if (delay_msg_ms > 0) {
-                TickType_t delay_ticks = pdMS_TO_TICKS(delay_msg_ms);
-                if (delay_ticks == 0) delay_ticks = 1;
-                vTaskDelay(delay_ticks);
-            }
-        }
-
-        if (instance_->sd_card.stream_has_error()) success = false;
-        if (!instance_->sd_card.close_stream()) success = false;
-
-        ROBOT::logger.insert_logf(
-            success ? logType::INFO : logType::ERRO,
-            "Log playback %s: %u messages from %s",
-            success ? "finished" : "failed", sent_messages, info.name);
-
-        return success ? RESULT_OK : RESULT_ERROR;
-    }, "print_log", "Replay file by index: file_index,delay_msg_ms", "logger");
-
-    // Wi-Fi OTA firmware updates (DEBUG state only).
-    shell.create_module("ota", "Wi-Fi OTA firmware updates (DEBUG state)");
-
-    shell.add([]() -> uint8_t {
-        if (StateMachine::current_state.load(std::memory_order_acquire) !=
-            DEBUG) {
-            ROBOT::logger.insert_log(
-                logType::ERRO, "OTA update requires DEBUG state; enter DEBUG first");
-            return RESULT_ERROR;
-        }
-
-        if (instance_->usb_storage.is_active() || !instance_->sd_card.is_mounted()) {
-            ROBOT::logger.insert_log(
-                logType::ERRO, "OTA update unavailable: SD card is not mounted for robot");
-            return RESULT_ERROR;
-        }
-
-        if (instance_->anyDebugTestActive()) {
-            ROBOT::logger.insert_log(
-                logType::ERRO, "OTA update blocked: wait for the DEBUG test to finish");
-            return RESULT_ERROR;
-        }
-
-        if (!instance_->ota.start()) {
-            ROBOT::logger.insert_log(
-                logType::ERRO,
-                "Failed to start OTA update: no networks stored in " OTA_WIFI_LIST_FILE);
-            return RESULT_ERROR;
-        }
-
-        ROBOT::logger.insert_log(
-            logType::INFO,
-            "OTA update started: scanning for a known network; press any button to cancel");
-        return RESULT_OK;
-    }, "start", "Join a known Wi-Fi network and accept a firmware upload", "ota");
-
-    shell.add([]() -> uint8_t {
-        const char* status = "idle";
-        switch (instance_->ota.phase()) {
-            case OTAUpdater::Phase::SCANNING:       status = "scanning for a known network"; break;
-            case OTAUpdater::Phase::CONNECTING:     status = "connecting"; break;
-            case OTAUpdater::Phase::CONNECT_FAILED: status = "connect failed, retrying"; break;
-            case OTAUpdater::Phase::SERVING:        status = "serving OTA updates"; break;
-            case OTAUpdater::Phase::IDLE:            status = "idle"; break;
-        }
-
-        char text[160];
-        if (instance_->ota.phase() == OTAUpdater::Phase::SERVING) {
-            snprintf(text, sizeof(text),
-                     "OTA: %s, ssid=%s ip=%s (or http://%s.local/)",
-                     status, instance_->ota.connected_ssid(),
-                     instance_->ota.connected_ip(), instance_->ota.hostname());
-        } else {
-            snprintf(text, sizeof(text), "OTA: %s", status);
-        }
-
-        ROBOT::logger.send_log_direct(logType::INFO, text);
-        instance_->sendNextShellOutputDirect();
-        return RESULT_OK;
-    }, "status", "Show the current OTA update sub-mode status", "ota");
-
-    shell.add([]() -> uint8_t {
-        // A successful upload sets the new image as the boot partition but
-        // deliberately does not reboot on its own (see
-        // OTAUpdater::finish_update) — this is the remote trigger for that,
-        // reachable over ESP-NOW since OTA already handed the channel back.
-        ROBOT::logger.send_log_direct(logType::INFO, "Rebooting...");
-        instance_->sendNextShellOutputDirect();
-
-        esp_timer_handle_t reboot_timer;
-        const esp_timer_create_args_t timer_args = {
-            .callback = [](void*) { esp_restart(); },
-            .arg = nullptr,
-            .dispatch_method = ESP_TIMER_TASK,
-            .name = "shell_reboot",
-            .skip_unhandled_events = false,
-        };
-        esp_timer_create(&timer_args, &reboot_timer);
-        esp_timer_start_once(reboot_timer, 500000);
-
-        return RESULT_OK;
-    }, "reboot", "Restart the robot now (e.g. to boot into a staged OTA update)", "ota");
-
-    shell.add([](std::string ssid, std::string password) -> uint8_t {
-        if (!instance_->ota.add_network(ssid.c_str(), password.c_str())) {
-            ROBOT::logger.insert_log(
-                logType::ERRO,
-                "Failed to add network: invalid ssid/password, list full or SD unavailable");
-            return RESULT_ERROR;
-        }
-
-        ROBOT::logger.insert_logf(logType::INFO, "Network added: %s",
-                                  ssid.c_str());
-        return RESULT_OK;
-    }, "wifi_add", "Add a Wi-Fi network for OTA: ssid,password", "ota");
-
-    shell.add([](uint16_t index) -> uint8_t {
-        if (!instance_->ota.remove_network(index)) {
-            ROBOT::logger.insert_log(logType::ERRO, "Invalid network index");
-            return RESULT_ERROR;
-        }
-
-        ROBOT::logger.insert_logf(logType::INFO, "Network %u removed", index);
-        return RESULT_OK;
-    }, "wifi_remove", "Remove a stored Wi-Fi network by index", "ota");
-
-    shell.add([]() -> uint8_t {
-        const uint16_t count = instance_->ota.network_count();
-        ROBOT::logger.insert_logf(logType::INFO, "OTA networks: %u", count);
-
-        for (uint16_t index = 0; index < count; ++index) {
-            char ssid[OTA_SSID_MAX_LEN];
-            if (!instance_->ota.get_network(index, ssid, sizeof(ssid))) continue;
-            ROBOT::logger.insert_logf(logType::INFO, "[%u] %s", index, ssid);
-        }
-
-        return RESULT_OK;
-    }, "wifi_list", "List Wi-Fi networks stored for OTA (SSID only)", "ota");
-
-    // Runtime settings backed by settings.conf on the SD card (see
-    // lib/RobotSettings). "set"/"reset"/"reset_all" only change the
-    // in-memory copy; "save" persists it, and every change needs a reboot
-    // to actually take effect (pins, timers and EKF init are all applied
-    // once, at boot).
-    shell.create_module("settings", "Runtime robot settings backed by settings.conf");
-
-    shell.add([](std::string module, std::string key) -> uint8_t {
-        std::string value;
-        if (!instance_->settings.get(module.c_str(), key.c_str(), value)) {
-            ROBOT::logger.insert_logf(logType::ERRO, "Unknown setting: %s.%s",
-                                      module.c_str(), key.c_str());
-            return RESULT_ERROR;
-        }
-
-        ROBOT::logger.insert_logf(logType::INFO, "%s.%s=%s", module.c_str(),
-                                  key.c_str(), value.c_str());
-        return RESULT_OK;
-    }, "get", "Read one setting: module,key", "settings");
-
-    shell.add([](std::string module, std::string key, std::string value) -> uint8_t {
-        if (!instance_->settings.set(module.c_str(), key.c_str(), value.c_str())) {
-            ROBOT::logger.insert_logf(
-                logType::ERRO,
-                "Failed to set %s.%s: unknown setting or invalid value",
-                module.c_str(), key.c_str());
-            return RESULT_ERROR;
-        }
-
-        ROBOT::logger.insert_logf(
-            logType::INFO,
-            "%s.%s set in memory; run 'settings save' to persist, reboot to apply",
-            module.c_str(), key.c_str());
-        return RESULT_OK;
-    }, "set", "Change one setting in memory: module,key,value", "settings");
-
-    shell.add([](std::string module) -> uint8_t {
-        std::string out;
-        instance_->settings.list(module.c_str(), out);
-
-        if (out.empty()) {
-            ROBOT::logger.insert_logf(logType::ERRO, "Unknown settings module: %s",
-                                      module.c_str());
-            return RESULT_ERROR;
-        }
-
-        ROBOT::logger.insert_log(logType::INFO, out.c_str());
-        return RESULT_OK;
-    }, "list", "List every setting in one module", "settings");
-
-    shell.add([]() -> uint8_t {
-        std::string out;
-        instance_->settings.list_all(out);
-        ROBOT::logger.insert_log(logType::INFO, out.c_str());
-        return RESULT_OK;
-    }, "list_all", "List every setting in every module", "settings");
-
-    shell.add([]() -> uint8_t {
-        if (!instance_->settings.save(instance_->sd_card)) {
-            ROBOT::logger.insert_log(
-                logType::ERRO, "Failed to save settings.conf: SD card not mounted");
-            return RESULT_ERROR;
-        }
-
-        ROBOT::logger.send_log_direct(logType::INFO, "Settings saved to settings.conf");
-        instance_->sendNextShellOutputDirect();
-        return RESULT_OK;
-    }, "save", "Persist current settings to settings.conf", "settings");
-
-    shell.add([]() -> uint8_t {
-        uint16_t skipped = 0;
-        if (!instance_->settings.load(instance_->sd_card, &skipped)) {
-            ROBOT::logger.insert_log(
-                logType::ERRO, "Failed to load settings.conf: SD card not mounted");
-            return RESULT_ERROR;
-        }
-
-        ROBOT::logger.insert_logf(
-            logType::INFO,
-            "Settings reloaded from settings.conf (%u line(s) ignored); reboot to apply",
-            skipped);
-        return RESULT_OK;
-    }, "load", "Reload settings.conf from SD, discarding unsaved edits", "settings");
-
-    shell.add([](std::string module) -> uint8_t {
-        if (!instance_->settings.reset_module(module.c_str())) {
-            ROBOT::logger.insert_logf(logType::ERRO, "Unknown settings module: %s",
-                                      module.c_str());
-            return RESULT_ERROR;
-        }
-
-        ROBOT::logger.insert_logf(
-            logType::INFO,
-            "%s reset to defaults in memory; run 'settings save' to persist",
-            module.c_str());
-        return RESULT_OK;
-    }, "reset", "Reset one module to compiled-in defaults, in memory", "settings");
-
-    shell.add([]() -> uint8_t {
-        instance_->settings.reset_all();
-        ROBOT::logger.insert_log(
-            logType::INFO,
-            "All settings reset to defaults in memory; run 'settings save' to persist");
-        return RESULT_OK;
-    }, "reset_all", "Reset every setting to compiled-in defaults, in memory", "settings");
-
-#ifdef ENABLE_SYSTEM_MONITOR
-    // System health: CPU load, memory, uptime (built only when enabled).
-    shell.create_module("sysmon", "System health: CPU load, memory, uptime");
-
-    shell.add([]() -> uint8_t {
-        ROBOT::logger.insert_logf(logType::INFO, "Core temperature: %.1f C",
-                                  instance_->sysmon.getCoreTemperature());
-        return RESULT_OK;
-    }, "temp", "Show the SoC core temperature", "sysmon");
-
-    shell.add([]() -> uint8_t {
-        ROBOT::logger.insert_log(logType::INFO, instance_->sysmon.getUptime().c_str());
-        return RESULT_OK;
-    }, "uptime", "Show system uptime", "sysmon");
-
-    shell.add([]() -> uint8_t {
-        ROBOT::logger.insert_log(logType::INFO, instance_->sysmon.getMemoryStats().c_str());
-        return RESULT_OK;
-    }, "memory", "Show heap/PSRAM usage stats", "sysmon");
-
-    shell.add([]() -> uint8_t {
-        ROBOT::logger.insert_log(logType::INFO, instance_->sysmon.getTaskStats().c_str());
-        return RESULT_OK;
-    }, "tasks", "Show per-task CPU load and stack usage", "sysmon");
-
-    shell.add([]() -> uint8_t {
-        ROBOT::logger.insert_log(logType::INFO, instance_->sysmon.getFullReport().c_str());
-        return RESULT_OK;
-    }, "report", "Show the full system health report on demand", "sysmon");
-#endif
 }
 
 // ==============================================================================

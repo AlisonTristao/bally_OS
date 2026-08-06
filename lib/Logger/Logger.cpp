@@ -1,8 +1,12 @@
 #include <Logger.h>
 #include <SDCard.h>
+#include <TinyShell.h>
+#include <RobotSettings.h>
+#include <Format.h>
 
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
+#include "freertos/task.h"
 
 #include <cstdarg>
 #include <cstdio>
@@ -590,4 +594,151 @@ bool Logger::flush_to_sd(SDCard& card, bool append,
     }
 
     return stored && closed;
+}
+
+// ============================================================================
+// Shell commands
+// ============================================================================
+
+void Logger::register_shell_commands(TinyShell& shell, SDCard& sd_card, RobotSettings& settings,
+                                     std::function<void()> mark_direct_output) {
+    shell.create_module("logger", "Retained PSRAM log buffer and SD log files");
+
+    shell.add([this]() -> uint8_t {
+        // Envia um texto longo numerado para testar fragmentacao e perda de pacotes
+        // Referencia: Terminal log da GLaDOS (Portal) - "Still Alive"
+        const char* long_text =
+            "[01/14] Forms FORM-29827281-12-2: Notice of Dismissal\n"
+            "[02/14] Aperture Science computer-aided enrichment center\n"
+            "[03/14] This was a triumph.\n"
+            "[04/14] I'm making a note here: HUGE SUCCESS.\n"
+            "[05/14] It's hard to overstate my satisfaction.\n"
+            "[06/14] Aperture Science\n"
+            "[07/14] We do what we must because we can.\n"
+            "[08/14] For the good of all of us.\n"
+            "[09/14] Except the ones who are dead.\n"
+            "[10/14] But there's no sense crying over every mistake.\n"
+            "[11/14] You just keep on trying till you run out of cake.\n"
+            "[12/14] And the Science gets done.\n"
+            "[13/14] And you make a neat gun.\n"
+            "[14/14] For the people who are still alive.\n";
+
+        // When info logs are enabled, push to logger to validate its packetization path.
+        #if defined(LOG_ALL) || defined(LOG_INFO)
+            insert_log(logType::INFO, long_text);
+            return RESULT_OK;
+        #endif
+    }, "test_packet", "Send a long test packet to evaluate multi-packet handling", "logger");
+
+    shell.add([this]() -> uint8_t {
+        char used_text[24];
+        char capacity_text[24];
+        formatBytes(get_used_bytes(), used_text, sizeof(used_text));
+        formatBytes(get_capacity_bytes(), capacity_text, sizeof(capacity_text));
+
+        insert_logf(
+            logType::INFO,
+            "PSRAM logger used=%s capacity=%s (%.2f%%)",
+            used_text,
+            capacity_text,
+            get_write_pct());
+        return RESULT_OK;
+    }, "psram_usage", "Show retained Logger PSRAM usage", "logger");
+
+    shell.add([this, &settings](uint16_t year, uint8_t month, uint8_t day,
+                 uint8_t hour, uint8_t minute, uint8_t second) -> uint8_t {
+        if (!set_datetime(year, month, day, hour, minute, second,
+                          settings.data().timezone)) {
+            insert_log(logType::ERRO,
+                       "Invalid date/time or clock update failed");
+            return RESULT_ERROR;
+        }
+
+        insert_logf(
+            logType::INFO,
+            "Robot time updated: %04u-%02u-%02u %02u:%02u:%02u",
+            year, month, day, hour, minute, second);
+        return RESULT_OK;
+    }, "set_datetime", "Set local time: year,month,day,hour,minute,second",
+       "logger");
+
+    shell.add([this, &sd_card, mark_direct_output]() -> uint8_t {
+        char filename[SDFileInfo::MAX_NAME_LENGTH] = {};
+        if (!flush_to_sd(sd_card, false, filename, sizeof(filename))) {
+            insert_log(
+                logType::ERRO,
+                "Failed to create a new SD log; synchronize date/time first");
+            return RESULT_ERROR;
+        }
+
+        char response[sizeof(filename) + 32];
+        snprintf(response, sizeof(response), "PSRAM saved to %s", filename);
+        send_log_direct(logType::INFO, response);
+        mark_direct_output();
+        return RESULT_OK;
+    }, "flush_new", "Save retained PSRAM logs into a new dated file", "logger");
+
+    shell.add([this, &sd_card, mark_direct_output]() -> uint8_t {
+        char filename[SDFileInfo::MAX_NAME_LENGTH] = {};
+        if (!flush_to_sd(sd_card, true, filename, sizeof(filename))) {
+            insert_log(
+                logType::ERRO,
+                "Failed to append PSRAM logs to the latest SD log");
+            return RESULT_ERROR;
+        }
+
+        char response[sizeof(filename) + 36];
+        snprintf(response, sizeof(response), "PSRAM appended to %s", filename);
+        send_log_direct(logType::INFO, response);
+        mark_direct_output();
+        return RESULT_OK;
+    }, "flush_append", "Append retained PSRAM logs to the latest log file",
+       "logger");
+
+    shell.add([this, &sd_card](uint16_t file_index, uint32_t delay_msg_ms) -> uint8_t {
+        SDFileInfo info{};
+        if (!sd_card.get_file_info(file_index, info) ||
+            info.size % sizeof(message) != 0 ||
+            !sd_card.open_read_stream(info.name)) {
+            insert_log(logType::ERRO,
+                       "Invalid log index or file format");
+            return RESULT_ERROR;
+        }
+
+        bool success = true;
+        uint32_t sent_messages = 0;
+
+        while (true) {
+            message stored_message{};
+            const size_t read = sd_card.read_stream(
+                &stored_message, sizeof(stored_message));
+
+            if (read == 0) break;
+            if (read != sizeof(stored_message) ||
+                stored_message.content.size > MAX_CONTENT_SIZE ||
+                stored_message.packet_number == 0 ||
+                stored_message.total_packets == 0 ||
+                !send_message(stored_message)) {
+                success = false;
+                break;
+            }
+
+            ++sent_messages;
+            if (delay_msg_ms > 0) {
+                TickType_t delay_ticks = pdMS_TO_TICKS(delay_msg_ms);
+                if (delay_ticks == 0) delay_ticks = 1;
+                vTaskDelay(delay_ticks);
+            }
+        }
+
+        if (sd_card.stream_has_error()) success = false;
+        if (!sd_card.close_stream()) success = false;
+
+        insert_logf(
+            success ? logType::INFO : logType::ERRO,
+            "Log playback %s: %u messages from %s",
+            success ? "finished" : "failed", sent_messages, info.name);
+
+        return success ? RESULT_OK : RESULT_ERROR;
+    }, "print_log", "Replay file by index: file_index,delay_msg_ms", "logger");
 }

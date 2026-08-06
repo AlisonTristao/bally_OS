@@ -1,6 +1,9 @@
 
 #include "Encoder.h"
 
+#include <TinyShell.h>
+#include <Logger.h>
+
 // variable static of PCNT
 Encoder *Encoder::usedPCNTs[4] = {
     NULL,
@@ -137,4 +140,17 @@ void Encoder::pausePCNT() {
 void Encoder::resumePCNT() {
     // resume the PCNT
     if(unit) pcnt_unit_start(unit);
+}
+
+void Encoder::register_shell_commands(TinyShell& shell, Logger& logger,
+                                      Encoder& left, Encoder& right) {
+    shell.create_module("sensor", "Array sensor (line follower) and wheel encoders");
+
+    shell.add([&logger, &left, &right]() -> uint8_t {
+        logger.insert_logf(
+            logType::INFO, "Encoders: left=%lld right=%lld",
+            static_cast<long long>(left.getCount()),
+            static_cast<long long>(right.getCount()));
+        return RESULT_OK;
+    }, "encoders", "Read the raw left/right encoder counts", "sensor");
 }

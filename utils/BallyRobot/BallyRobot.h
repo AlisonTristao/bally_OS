@@ -257,8 +257,31 @@ private:
     // configure the wifi and the esp-now settings for the robot
     bool configureCommunication();
 
-    // start wrappers
+    // Register every shell module. Most modules are owned by the subsystem
+    // they operate on (see each lib's own register_shell_commands); this
+    // function is now just the composition root wiring those together,
+    // plus the three modules below that stay here because their guards or
+    // shared state span multiple private members with no single owning
+    // subsystem.
     void startWrappers();
+
+    // "robot": raw actuator/virtual-input I/O (btn/ssr/set_pwm/set_led).
+    // Stays here — buttons/sideSensors/leds/motors are this composition's
+    // own wiring of the generic Flags_in/out/pwm primitives (lib/Flags),
+    // not something any single subsystem owns.
+    void registerRobotIOCommands();
+
+    // "kalman": EKF state + periodic tuning log. Stays here — EKF is an
+    // external vendored filter (TinyEKF) with no home-grown wrapper lib of
+    // its own; ROBOT is what actually owns the filter instance, the sample
+    // timer and the control/measurement vectors.
+    void registerKalmanCommands();
+
+    // "debug": scheduled, non-blocking per-sensor tests. Stays here — the
+    // DEBUG-state/USB-idle gate (canScheduleDebugTest) and the scheduler
+    // state (array_sensor_test_/encoder_test_) are ROBOT-private, applied
+    // uniformly across sensors rather than owned by any one of them.
+    void registerDebugCommands();
 
     // set the time limit for the flags, to reset them after a certain time
     void setTimeLimit();

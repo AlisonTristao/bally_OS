@@ -5,14 +5,24 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
 
-// For OtaTuning's default-constructed values, which back the ota_* field
-// defaults below — kept in one place (see OTAUpdater.h) instead of
-// repeating the literals here too.
-#include <OTAUpdater.h>
+// Project-wide compile-time constants: OTA_MDNS_NAME_MAX_LEN and
+// OTA_PASSWORD_MAX_LEN size the ota_* buffers below. Included explicitly
+// (this header used to get it only transitively, via OTAUpdater.h).
+#include <Settings.h>
+
+// For OTAUpdater's canonical default values, which back the ota_* field
+// defaults below — kept in one dependency-free header (shared with
+// OTAUpdater.h's OtaTuning) instead of repeating the literals here, without
+// pulling OTAUpdater's full interface (esp_event.h/esp_http_server.h/...)
+// into this generic settings-storage module.
+#include <OtaDefaults.h>
 
 class SDCard;
+class TinyShell;
+class Logger;
 
 // SD card root file where the runtime settings are persisted. Same
 // convention as OTA_WIFI_LIST_FILE (Settings.h): plain text, relative to the
@@ -89,16 +99,17 @@ struct SettingsData {
 
     // -------- ota (Wi-Fi OTA sub-mode timing/identity; ESP-NOW home channel) --
     // Applied via OTAUpdater::configure()/OtaTuning (lib/OTAUpdater) — see
-    // ROBOT::init(). Numeric defaults are pulled from a default-constructed
-    // OtaTuning (the canonical copy) instead of repeating the literals here.
-    // espnow_channel is also read directly by ROBOT::configureCommunication()
-    // to bring ESP-NOW up on the same channel OTA restores on cancel().
-    uint32_t ota_led_step_ms        = OtaTuning{}.led_step_ms;
-    uint32_t ota_led_hold_ms        = OtaTuning{}.led_hold_ms;
-    uint32_t ota_led_fail_hold_ms   = OtaTuning{}.led_fail_hold_ms;
-    uint32_t ota_connect_timeout_ms = OtaTuning{}.connect_timeout_ms;
-    uint32_t ota_retry_scan_ms      = OtaTuning{}.retry_scan_ms;
-    uint8_t  espnow_channel         = OtaTuning{}.espnow_channel;
+    // ROBOT::init(). Numeric defaults are pulled from OtaDefaults (the
+    // canonical copy, shared with OtaTuning's own defaults) instead of
+    // repeating the literals here. espnow_channel is also read directly by
+    // ROBOT::configureCommunication() to bring ESP-NOW up on the same
+    // channel OTA restores on cancel().
+    uint32_t ota_led_step_ms        = OtaDefaults::led_step_ms;
+    uint32_t ota_led_hold_ms        = OtaDefaults::led_hold_ms;
+    uint32_t ota_led_fail_hold_ms   = OtaDefaults::led_fail_hold_ms;
+    uint32_t ota_connect_timeout_ms = OtaDefaults::connect_timeout_ms;
+    uint32_t ota_retry_scan_ms      = OtaDefaults::retry_scan_ms;
+    uint8_t  espnow_channel         = OtaDefaults::espnow_channel;
     // OtaTuning::hostname/instance_name/password default to nullptr (see
     // its own comment) precisely so these three stay the one real literal
     // home. Empty ota_password disables the check; also update the
@@ -176,6 +187,16 @@ public:
 
     /// Derived from sample_micros; replaces the old FREQ_EKF macro.
     float freq_ekf() const;
+
+    /**
+     * @brief Register the "settings" shell module (get/set/list/list_all/
+     * save/load/reset/reset_all), backed by this instance.
+     * @param mark_direct_output Called after "save" sends its confirmation,
+     * so that response is not itself retained in the PSRAM log (see
+     * ROBOT::sendNextShellOutputDirect — the same reasoning it documents).
+     */
+    void register_shell_commands(TinyShell& shell, Logger& logger, SDCard& sd_card,
+                                 std::function<void()> mark_direct_output);
 
 private:
     SettingsData data_;

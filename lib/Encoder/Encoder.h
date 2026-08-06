@@ -9,6 +9,9 @@
 #include "driver/gpio.h"
 #include "esp_ipc.h"
 
+class TinyShell;
+class Logger;
+
 /**********************/
 /* Class Of Encoder  */
 /**********************/  
@@ -106,6 +109,16 @@ class Encoder{
          * @param core: core to run the ISR
          */
         static uint8_t core_to_run_ISR;
+
+        /**
+         * @brief Register the "sensor" module's "encoders" shell command,
+         * reporting both wheel encoders' raw counts in one line. Static (and
+         * takes both instances) since the differential-drive left/right
+         * pairing is the caller's wiring, not something a single Encoder
+         * instance knows about itself.
+         */
+        static void register_shell_commands(TinyShell& shell, Logger& logger,
+                                            Encoder& left, Encoder& right);
 };
 
 #endif // ENCODER_H

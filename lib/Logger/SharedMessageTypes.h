@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 #include <cstring>
-#include <settings.h>
+#include <Settings.h>
 
 // enum to define log types, categorizing sent messages
 // Shared, byte-for-byte, with the T-Dongle receiver firmware

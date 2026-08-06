@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <SharedMessageTypes.h>
@@ -15,6 +16,8 @@
 #endif
 
 class SDCard;
+class TinyShell;
+class RobotSettings;
 
 class Logger {
 public:
@@ -118,6 +121,19 @@ public:
     uint32_t get_used_bytes() const { return used_bytes_; }
     uint32_t get_capacity_bytes() const { return storage_capacity_; }
     uint32_t get_pending_send_bytes() const { return pending_send_bytes_; }
+
+    /**
+     * @brief Register the "logger" shell module (test_packet/psram_usage/
+     * set_datetime/flush_new/flush_append/print_log), backed by this
+     * instance.
+     * @param settings Read live at call time (data().timezone) by
+     * "set_datetime", not captured.
+     * @param mark_direct_output Called after "flush_new"/"flush_append" send
+     * their reply, so it is not itself retained in the PSRAM log (see
+     * ROBOT::sendNextShellOutputDirect).
+     */
+    void register_shell_commands(TinyShell& shell, SDCard& sd_card, RobotSettings& settings,
+                                 std::function<void()> mark_direct_output);
 
 private:
     // private members for the logger
