@@ -441,13 +441,24 @@ void ROBOT::checkStateMachine() {
 
 void ROBOT::handleReceiveStatic(const esp_now_recv_info_t *recv_info, const uint8_t *incomingData, int len) {
     const uint8_t* mac = recv_info->src_addr;
-    (void)mac; 
-    (void)len;
+    (void)mac;
 
     if (instance_->receivedDataQueue == nullptr) {
         ROBOT::logger.insert_log(logType::ERRO, "Receive callback called but queue is not initialized");
         return;
     }
+
+    // Only a full `message` struct is safe to read below; anything else
+    // (partial/garbage frame) is dropped instead of read out of bounds —
+    // incomingData is only `len` bytes long, not necessarily sizeof(message).
+    if (len != static_cast<int>(sizeof(message))) return;
+
+    // Heartbeat probe from the T-Dongle (see SharedMessageTypes.h): the
+    // ESP-NOW driver already sent the low-level delivery ACK back to it on
+    // the radio itself, which is all "we're connected" needs. Drop it here,
+    // before the queue, so it never reaches the shell (as an empty command
+    // line) or the retained PSRAM log.
+    if (reinterpret_cast<const message*>(incomingData)->type == logType::PING) return;
 
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
     xQueueSendFromISR(instance_->receivedDataQueue, incomingData, &xHigherPriorityTaskWoken);
