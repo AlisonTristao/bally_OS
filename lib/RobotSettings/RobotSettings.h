@@ -99,10 +99,14 @@ struct SettingsData {
     uint32_t ota_connect_timeout_ms = OtaTuning{}.connect_timeout_ms;
     uint32_t ota_retry_scan_ms      = OtaTuning{}.retry_scan_ms;
     uint8_t  espnow_channel         = OtaTuning{}.espnow_channel;
-    // OtaTuning::hostname/instance_name default to nullptr (see its own
-    // comment) precisely so these two stay the one real literal home.
+    // OtaTuning::hostname/instance_name/password default to nullptr (see
+    // its own comment) precisely so these three stay the one real literal
+    // home. Empty ota_password disables the check; also update the
+    // X-OTA-Password header baked into platformio.ini's upload_command if
+    // this changes, since that tool can't read settings.conf.
     char ota_hostname[OTA_MDNS_NAME_MAX_LEN]      = "ballyrobot";
     char ota_instance_name[OTA_MDNS_NAME_MAX_LEN] = "BallyRobot OTA";
+    char ota_password[OTA_PASSWORD_MAX_LEN]       = "657585";
 };
 
 enum class SettingType : uint8_t { U32, U8, FLOAT, PIN, STRING };

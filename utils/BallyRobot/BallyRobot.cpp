@@ -10,6 +10,7 @@
 #include "freertos/task.h"
 #include "freertos/queue.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "driver/gpio.h"
 #include "esp_wifi.h"
@@ -1013,6 +1014,28 @@ void ROBOT::startWrappers() {
         return RESULT_OK;
     }, "status", "Show the current OTA update sub-mode status", "ota");
 
+    shell.add([]() -> uint8_t {
+        // A successful upload sets the new image as the boot partition but
+        // deliberately does not reboot on its own (see
+        // OTAUpdater::finish_update) — this is the remote trigger for that,
+        // reachable over ESP-NOW since OTA already handed the channel back.
+        ROBOT::logger.send_log_direct(logType::INFO, "Rebooting...");
+        instance_->sendNextShellOutputDirect();
+
+        esp_timer_handle_t reboot_timer;
+        const esp_timer_create_args_t timer_args = {
+            .callback = [](void*) { esp_restart(); },
+            .arg = nullptr,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name = "shell_reboot",
+            .skip_unhandled_events = false,
+        };
+        esp_timer_create(&timer_args, &reboot_timer);
+        esp_timer_start_once(reboot_timer, 500000);
+
+        return RESULT_OK;
+    }, "reboot", "Restart the robot now (e.g. to boot into a staged OTA update)", "ota");
+
     shell.add([](std::string ssid, std::string password) -> uint8_t {
         if (!instance_->ota.add_network(ssid.c_str(), password.c_str())) {
             ROBOT::logger.insert_log(
@@ -1401,6 +1424,7 @@ bool ROBOT::init() {
         .espnow_channel     = cfg.espnow_channel,
         .hostname           = cfg.ota_hostname,
         .instance_name      = cfg.ota_instance_name,
+        .password           = cfg.ota_password,
     });
     if (!ota.begin(sd_card, leds, [](logType type, const char* msg) {
             ROBOT::logger.insert_log(type, msg);

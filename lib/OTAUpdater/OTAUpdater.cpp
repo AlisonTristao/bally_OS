@@ -20,10 +20,6 @@ uint32_t now_ms() {
     return static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
 }
 
-void reboot_after_response(void*) {
-    esp_restart();
-}
-
 // Short, human-readable hint for the common WIFI_EVENT_STA_DISCONNECTED
 // reasons; the numeric code is always logged alongside this, since not
 // every reason is worth naming here.
@@ -79,8 +75,9 @@ const char kUploadPageFmt[] =
     "function u(){"
     "var f=document.getElementById('f').files[0];"
     "if(!f)return;"
+    "var p=prompt('OTA password (leave blank if none):')||'';"
     "document.getElementById('s').textContent='Uploading...';"
-    "fetch('/update',{method:'POST',body:f})"
+    "fetch('/update',{method:'POST',headers:{'X-OTA-Password':p},body:f})"
     ".then(function(r){return r.text();})"
     ".then(function(t){document.getElementById('s').textContent=t;})"
     ".catch(function(e){document.getElementById('s').textContent='Error: '+e;});"
@@ -135,7 +132,7 @@ bool OTAUpdater::begin(SDCard& card, Flags_out& leds, OtaLogCallback log_cb) {
 void OTAUpdater::configure(const OtaTuning& tuning) {
     tuning_ = tuning;
 
-    // A null pointer here just means "not given" — leave whatever name is
+    // A null pointer here just means "not given" — leave whatever value is
     // already in place (e.g. from an earlier configure() call) rather than
     // blanking it out.
     if (tuning.hostname != nullptr) {
@@ -143,6 +140,9 @@ void OTAUpdater::configure(const OtaTuning& tuning) {
     }
     if (tuning.instance_name != nullptr) {
         snprintf(instance_name_, sizeof(instance_name_), "%s", tuning.instance_name);
+    }
+    if (tuning.password != nullptr) {
+        snprintf(password_, sizeof(password_), "%s", tuning.password);
     }
 }
 
@@ -555,6 +555,19 @@ esp_err_t OTAUpdater::handle_root_get(httpd_req_t* req) {
 esp_err_t OTAUpdater::handle_update_post(httpd_req_t* req) {
     auto* self = static_cast<OTAUpdater*>(req->user_ctx);
 
+    // Empty password_ (never configured) means auth is off, same as before
+    // this existed — see OtaTuning::password.
+    if (self->password_[0] != '\0') {
+        char given[OTA_PASSWORD_MAX_LEN] = {};
+        if (httpd_req_get_hdr_value_str(req, "X-OTA-Password", given,
+                                        sizeof(given)) != ESP_OK ||
+            strcmp(given, self->password_) != 0) {
+            self->log(logType::WARN, "OTA: upload rejected, wrong or missing password");
+            httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Wrong OTA password");
+            return ESP_FAIL;
+        }
+    }
+
     if (req->content_len == 0) {
         self->log(logType::ERRO, "OTA: upload rejected, empty body");
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Empty body");
@@ -618,22 +631,35 @@ esp_err_t OTAUpdater::handle_update_post(httpd_req_t* req) {
         return ESP_FAIL;
     }
 
-    self->log(logType::INFO, "OTA: firmware written OK, rebooting");
-    httpd_resp_sendstr(req, "OK, rebooting...\n");
+    self->log(logType::INFO, "OTA: firmware written OK, waiting for reset");
+    httpd_resp_sendstr(
+        req, "OK. Reset the robot (or send 'ota reboot') to boot into it.\n");
 
-    // Let the HTTP response flush before resetting.
-    esp_timer_handle_t reboot_timer;
+    // Deferred to ESP_TIMER_TASK rather than run here: finish_update() calls
+    // cancel(), which calls httpd_stop() — doing that from inside this very
+    // request handler, on the httpd server's own task, deadlocks (the stop
+    // waits for the task to go idle, but the task is stuck waiting on it).
+    // The delay also lets this response finish sending before Wi-Fi drops.
+    esp_timer_handle_t finish_timer;
     const esp_timer_create_args_t timer_args = {
-        .callback = &reboot_after_response,
-        .arg = nullptr,
+        .callback = &OTAUpdater::finish_update,
+        .arg = self,
         .dispatch_method = ESP_TIMER_TASK,
-        .name = "ota_reboot",
+        .name = "ota_finish",
         .skip_unhandled_events = false,
     };
-    esp_timer_create(&timer_args, &reboot_timer);
-    esp_timer_start_once(reboot_timer, 500000);
+    esp_timer_create(&timer_args, &finish_timer);
+    esp_timer_start_once(finish_timer, 500000);
 
     return ESP_OK;
+}
+
+void OTAUpdater::finish_update(void* arg) {
+    auto* self = static_cast<OTAUpdater*>(arg);
+    self->cancel();
+    self->log(logType::INFO,
+              "OTA: firmware staged as the active boot partition — reset "
+              "the robot (or send 'ota reboot') to boot into it");
 }
 
 // ==============================================================================

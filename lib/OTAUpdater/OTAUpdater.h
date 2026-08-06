@@ -26,19 +26,21 @@ using OtaLogCallback = void (*)(logType type, const char* msg);
 
 /**
  * @brief Runtime-tunable OTA settings (RobotSettings, module "ota"): timing,
- * the ESP-NOW home channel restored on cancel(), and the mDNS identity.
- * This struct is the single canonical home for the numeric defaults —
- * SettingsData (lib/RobotSettings) derives its own field defaults from a
- * default-constructed OtaTuning instead of repeating the literals, so a
- * robot that never calls configure() still behaves the same either way.
+ * the ESP-NOW home channel restored on cancel(), the mDNS identity, and the
+ * upload password. This struct is the single canonical home for the
+ * numeric defaults — SettingsData (lib/RobotSettings) derives its own field
+ * defaults from a default-constructed OtaTuning instead of repeating the
+ * literals, so a robot that never calls configure() still behaves the same
+ * either way.
  *
- * hostname/instance_name are borrowed pointers (e.g. into a SettingsData
- * instance that outlives the OTAUpdater): configure() copies them into its
- * own fixed buffers immediately, so nothing needs to stay valid afterwards.
- * They default to nullptr, and configure() leaves its buffers untouched
- * (mDNS just stays off, see ensure_mdns()) rather than substituting a
- * second, driftable copy of RobotSettings' ota_hostname/ota_instance_name
- * defaults — the only place those literals belong.
+ * hostname/instance_name/password are borrowed pointers (e.g. into a
+ * SettingsData instance that outlives the OTAUpdater): configure() copies
+ * them into its own fixed buffers immediately, so nothing needs to stay
+ * valid afterwards. They default to nullptr, and configure() leaves the
+ * corresponding buffer untouched rather than substituting a second,
+ * driftable copy of RobotSettings' own defaults — the only place those
+ * literals belong. An untouched (empty) password means /update accepts any
+ * upload, same as before this existed.
  */
 struct OtaTuning {
     uint32_t led_step_ms        = 150;    // carousel step while OTA is active
@@ -49,6 +51,7 @@ struct OtaTuning {
     uint8_t  espnow_channel     = 1;      // channel restored after leaving OTA
     const char* hostname        = nullptr;      // mDNS hostname: http://<name>.local/
     const char* instance_name   = nullptr;      // mDNS human-readable instance name
+    const char* password        = nullptr;      // required in the X-OTA-Password header to POST /update
 };
 
 /**
@@ -68,6 +71,14 @@ struct OtaTuning {
  * is actually being written. Once connected, the device also answers to
  * "<hostname>.local" over mDNS (see OtaTuning::hostname) so the upload URL
  * does not depend on knowing its IP.
+ *
+ * A write that finishes successfully does not reboot on its own: it just
+ * sets the new image as the active boot partition, then leaves OTA the same
+ * way a button press does (Wi-Fi down, ESP-NOW channel restored). The new
+ * firmware only takes over on the next reset — power cycle, watchdog, or a
+ * remote "ota reboot" — so ESP-NOW stays reachable in between to give that
+ * command, instead of the robot going dark mid-air-upload for a reboot that
+ * happens whether or not the upload actually worked.
  */
 class OTAUpdater {
 public:
@@ -166,10 +177,12 @@ private:
     Flags_out* leds_ = nullptr;
     OtaLogCallback log_cb_ = nullptr;
     OtaTuning tuning_;
-    // Empty until configure() is given a real name (see OtaTuning); mDNS
-    // just stays off rather than substituting a literal here too.
+    // Empty until configure() is given real values (see OtaTuning); mDNS
+    // just stays off, and /update accepts any upload, rather than
+    // substituting a literal here too.
     char hostname_[OTA_MDNS_NAME_MAX_LEN] = {};
     char instance_name_[OTA_MDNS_NAME_MAX_LEN] = {};
+    char password_[OTA_PASSWORD_MAX_LEN] = {};
     bool events_registered_ = false;
     bool mdns_ready_ = false;
 
@@ -227,6 +240,17 @@ private:
 
     static esp_err_t handle_root_get(httpd_req_t* req);
     static esp_err_t handle_update_post(httpd_req_t* req);
+
+    /**
+     * @brief esp_timer callback (ESP_TIMER_TASK), scheduled from
+     * handle_update_post() after a successful write. Restores ESP-NOW —
+     * cancel() calls httpd_stop(), which would deadlock if called directly
+     * from inside the httpd request handler that just finished. Does not
+     * reboot; the new image is already the active boot partition (see
+     * esp_ota_set_boot_partition() in handle_update_post()), so any
+     * subsequent reset — including a remote "ota reboot" — boots into it.
+     */
+    static void finish_update(void* arg);
 };
 
 #endif // OTA_UPDATER_H
