@@ -248,6 +248,8 @@ bool ROBOT::configurePinsFromSettings()
 }
 
 bool ROBOT::configureCommunication() {
+    if (communication_configured_) return true;
+
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         nvs_flash_erase();
@@ -262,6 +264,7 @@ bool ROBOT::configureCommunication() {
     
     if (esp_wifi_set_mode(WIFI_MODE_STA) != ESP_OK || esp_wifi_start() != ESP_OK) {
         ROBOT::logger.insert_log(logType::ERRO, "Failed to configure WiFi mode");
+        ESP_LOGE("ROBOT_INIT", "Failed to configure WiFi mode");
         return false;
     }
 
@@ -273,8 +276,9 @@ bool ROBOT::configureCommunication() {
 
     // initialize ESP-NOW
     esp_err_t err = esp_now_init();
-    if (err != ESP_OK) {
+    if (err != ESP_OK && err != ESP_ERR_ESPNOW_EXIST) {
         ROBOT::logger.insert_log(logType::ERRO, "Failed to initialize ESP-NOW");
+        ESP_LOGE("ROBOT_INIT", "Failed to initialize ESP-NOW (0x%x)", err);
         return false;
     }
 
@@ -282,12 +286,14 @@ bool ROBOT::configureCommunication() {
     err = esp_now_register_recv_cb(handleReceiveStatic);
     if (err != ESP_OK) {
         ROBOT::logger.insert_log(logType::ERRO, "Failed to register receive callback");
+        ESP_LOGE("ROBOT_INIT", "Failed to register receive callback (0x%x)", err);
         return false;
     }
 
     err = esp_now_register_send_cb(handleSendStatic);
     if (err != ESP_OK) {
         ROBOT::logger.insert_log(logType::ERRO, "Failed to register send callback");
+        ESP_LOGE("ROBOT_INIT", "Failed to register send callback (0x%x)", err);
         return false;
     }
 
@@ -303,12 +309,14 @@ bool ROBOT::configureCommunication() {
         err = esp_now_add_peer(&peerInfo);
         if (err != ESP_OK && err != ESP_ERR_ESPNOW_EXIST) {
             ROBOT::logger.insert_log(logType::ERRO, "Failed to add ESP-NOW peer");
+            ESP_LOGE("ROBOT_INIT", "Failed to add ESP-NOW peer (0x%x)", err);
             return false;
         }
     #else
         #warning "MAC_ADDR not defined; ESP-NOW peer not added"
     #endif
 
+    communication_configured_ = true;
     return true;
 }
 
@@ -1281,8 +1289,10 @@ bool ROBOT::init() {
 
     // Only CS needs to exist before the SD card can mount and
     // settings.conf can be read; the rest of the pin config comes after.
-    if (!configurePinsEarly())
+    if (!configurePinsEarly()) {
+        ESP_LOGE("ROBOT_INIT", "Failed to configure early pins (CS)");
         return false;
+    }
 
     logger.begin();
     shell.begin();
@@ -1291,9 +1301,11 @@ bool ROBOT::init() {
     // It starts mounted for the robot and only exposes it on a DEBUG command.
     if (!sd_card.begin()) {
         logger.insert_log(logType::ERRO, "Failed to initialize SD card");
+        ESP_LOGE("ROBOT_INIT", "Failed to initialize SD card");
     } else if (!usb_storage.begin(sd_card)) {
         logger.insert_log(logType::ERRO,
                           "Failed to mount SD card through USB storage manager");
+        ESP_LOGE("ROBOT_INIT", "Failed to mount SD card through USB storage manager");
     }
 
     // Load settings.conf (or, if missing/unmounted, keep the compiled-in
@@ -1314,8 +1326,10 @@ bool ROBOT::init() {
     // Configure the remaining pins now that settings are known, then build
     // the peripherals whose constructors need those pins (ArraySensor
     // touches GPIO/ADC immediately, so it cannot be built earlier).
-    if (!configurePinsFromSettings())
+    if (!configurePinsFromSettings()) {
+        ESP_LOGE("ROBOT_INIT", "Failed to configure pins from settings");
         return false;
+    }
 
     const SettingsData& cfg = settings.data();
     array_sensor.emplace(cfg.s0, cfg.s1, cfg.s2, cfg.sig, cfg.len_sensor);
@@ -1326,10 +1340,6 @@ bool ROBOT::init() {
     motor_left.emplace(cfg.ain1, cfg.ain2, CH0, CH1);
     motor_right.emplace(cfg.bin1, cfg.bin2, CH2, CH3);
     imu.emplace(cfg.sda_pin, cfg.scl_pin, IMU_I2C_ADDRESS);
-
-    if (!ota.begin(sd_card, leds)) {
-        logger.insert_log(logType::ERRO, "Failed to initialize OTA updater");
-    }
 
 #ifdef ENABLE_SYSTEM_MONITOR
     sysmon.begin();
@@ -1345,24 +1355,35 @@ bool ROBOT::init() {
         return false;
     }
 
+    // Must run before ota.begin(): it creates the default event loop and
+    // netif that esp_netif_create_default_wifi_sta() (called from
+    // OTAUpdater::begin) requires, otherwise it aborts with ESP_ERR_INVALID_STATE.
     if (!configureCommunication())
         return false;
 
+    if (!ota.begin(sd_card, leds)) {
+        logger.insert_log(logType::ERRO, "Failed to initialize OTA updater");
+    }
+
     if (motor_left->init() != ESP_OK) {
         ROBOT::logger.insert_log(logType::ERRO, "Failed to initialize left motor");
+        ESP_LOGE("ROBOT_INIT", "Failed to initialize left motor");
         return false;
     }
     if (motor_right->init() != ESP_OK) {
         ROBOT::logger.insert_log(logType::ERRO, "Failed to initialize right motor");
+        ESP_LOGE("ROBOT_INIT", "Failed to initialize right motor");
         return false;
     }
 
     if (!encoder_left->init()) {
         ROBOT::logger.insert_log(logType::ERRO, "Failed to initialize left encoder");
+        ESP_LOGE("ROBOT_INIT", "Failed to initialize left encoder");
         return false;
     }
     if (!encoder_right->init()) {
         ROBOT::logger.insert_log(logType::ERRO, "Failed to initialize right encoder");
+        ESP_LOGE("ROBOT_INIT", "Failed to initialize right encoder");
         return false;
     }
 

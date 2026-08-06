@@ -194,6 +194,12 @@ private:
     static ROBOT* instance_;
     bool initialized = false;
 
+    // Guards configureCommunication(): init() can be retried by app_main's
+    // `while (!robot.init())` loop after a later step fails (e.g. motor),
+    // and wifi/esp-now bring-up is not safe to redo (esp_wifi_init(),
+    // esp_now_init(), esp_now_add_peer()... all error/warn on a second call).
+    bool communication_configured_ = false;
+
     // Set once in init() from imu->begin()'s result. Gates the IMU read in
     // sampleEKF() — skipping it when the sensor never answered avoids
     // retrying (and blocking on) an I2C timeout on every EKF tick.

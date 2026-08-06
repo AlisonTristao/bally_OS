@@ -18,6 +18,11 @@ CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 
 CONFIG_COMPILER_CXX_EXCEPTIONS=y
 
+# Default (3584) is too small for ROBOT::init() (SD card, settings, WiFi/
+# ESP-NOW/OTA bring-up, motors, encoders), which all run on this task's
+# stack before any FreeRTOS task with its own stack takes over.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
 # Native USB Mass Storage used to expose the SD card in DEBUG state.
 CONFIG_TINYUSB_MSC_ENABLED=y
 CONFIG_TINYUSB_MSC_BUFSIZE=8192

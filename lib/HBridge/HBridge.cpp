@@ -38,7 +38,16 @@ esp_err_t HBridge::initTimer()
     ledc_timer.freq_hz         = PWM_FREQUENCY_HZ;
     ledc_timer.clk_cfg         = LEDC_AUTO_CLK;
 
-    const esp_err_t err = ledc_timer_config(&ledc_timer);
+    esp_err_t err = ledc_timer_config(&ledc_timer);
+
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    // setDuty() uses ledc_set_duty_and_update(), which requires the fade
+    // service to be installed once beforehand — otherwise it fails with
+    // "LEDC fade channel init error, not enough memory or service not installed".
+    err = ledc_fade_func_install(0);
 
     if (err == ESP_OK) {
         timer_initialized = true;
