@@ -42,7 +42,7 @@ stateName States::process_transition(stateName currentState, uint8_t buttons) {
     #if defined(LOG_ALL) || defined(LOG_INFO)
     if (nextState != currentState)
         // log message
-        robot_.logger.insert_logf(logType::INFO, "state transition: %s -> %s", stateToString(currentState), stateToString(nextState));
+        robot_.logger.insert_logf(logType::INFO, "state changed: %s -> %s", stateToString(currentState), stateToString(nextState));
     #endif
 
     return nextState; 

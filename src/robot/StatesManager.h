@@ -24,16 +24,20 @@ inline constexpr Transition transitionTable[] = {
 // --- convergence on finish ---
 { RUN,              (1 << BIT_0),         FINISH },
 { DEBUG,            (1 << BIT_0),         FINISH },
-// { CALIBRATE,     (1 << BIT_0),         FINISH }, 
 
 // --- go to telemetry ---
-{ FINISH,           (1 << BIT_1),         TELEMETRY }, 
+{ FINISH,           (1 << BIT_1),         TELEMETRY },
 
 // --- return to wait ---
 { FINISH,           (1 << BIT_0),         WAIT },
-{ TELEMETRY,        (1 << BIT_0),         WAIT },
-// { CALIBRATE,     (1 << BIT_0),         WAIT }, 
+
+// --- fail-safe: any button dumps whatever telemetry is available before a reboot ---
+{ ERROR,            (1 << BIT_0) | (1 << BIT_1) | (1 << BIT_2), TELEMETRY },
 };
+// note: CALIBRATE and TELEMETRY are not listed above — both self-transition
+// back to WAIT from inside their own action function (see
+// calibrate_function()/telemetry_function()), the same one-shot pattern as
+// SETUP.
 inline constexpr int NUM_TRANSITIONS = sizeof(transitionTable) / sizeof(Transition);
 
 class States {

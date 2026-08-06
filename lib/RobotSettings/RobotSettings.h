@@ -107,6 +107,11 @@ struct SettingsData {
     char ota_hostname[OTA_MDNS_NAME_MAX_LEN]      = "ballyrobot";
     char ota_instance_name[OTA_MDNS_NAME_MAX_LEN] = "BallyRobot OTA";
     char ota_password[OTA_PASSWORD_MAX_LEN]       = "657585";
+
+    // -------- error (ERROR state LED indication) --------
+    // Half-period of the synchronized all-LEDs blink shown in ERROR (see
+    // ROBOT::blinkErrorLeds()); 250ms -> 2Hz full on/off cycle.
+    uint32_t error_blink_ms = 250;
 };
 
 enum class SettingType : uint8_t { U32, U8, FLOAT, PIN, STRING };

@@ -88,6 +88,8 @@ const SettingEntry RobotSettings::kTable[] = {
     ENTRY("ota", ota_hostname,           STRING),
     ENTRY("ota", ota_instance_name,      STRING),
     ENTRY("ota", ota_password,           STRING),
+
+    ENTRY("error", error_blink_ms, U32),
 };
 
 #undef ENTRY

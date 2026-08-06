@@ -156,6 +156,17 @@ public:
     void processDebug();
     void cancelDebugTests();
 
+    // Force both motors to zero immediately. Belt-and-suspenders on top of
+    // the flags' own timeout-based auto shutoff (see Flags_pwm) — used by
+    // DEBUG (processDebug) and ERROR (error_function), where "keep the
+    // motors off" cannot wait for a flag to expire.
+    void stopMotors();
+
+    // Toggle every LED together at settings.data().error_blink_ms (module
+    // "error") to make the fail-safe ERROR state visible without telemetry.
+    // Call once per pass; non-blocking.
+    void blinkErrorLeds();
+
     // Keep selected shell responses out of the retained PSRAM log.
     void sendNextShellOutputDirect();
     bool consumeDirectShellOutputRequest();

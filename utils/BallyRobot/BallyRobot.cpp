@@ -387,11 +387,27 @@ bool ROBOT::anyDebugTestActive() const {
     return array_sensor_test_.active() || encoder_test_.active();
 }
 
+void ROBOT::stopMotors() {
+    motors.setValue(MOTOR_LEFT_idx, 0, settings.data().delay_flags);
+    motors.setValue(MOTOR_RIGHT_idx, 0, settings.data().delay_flags);
+}
+
+void ROBOT::blinkErrorLeds() {
+    const uint32_t half_period_ms = settings.data().error_blink_ms;
+    const uint32_t now_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
+
+    // On for one half-period, off for the other: only refresh the flags
+    // during the "on" half, and let their own timeout (see Flags_out) turn
+    // them off during the other half instead of clearing them here.
+    if ((now_ms / half_period_ms) % 2 != 0) return;
+
+    for (uint8_t i = 0; i < 4; ++i) leds.setFlag(i, half_period_ms);
+}
+
 void ROBOT::processDebug() {
     // DEBUG is a safe test state: keep both motor commands at zero on every
     // pass, while the normal outer task delay continues yielding the CPU.
-    motors.setValue(MOTOR_LEFT_idx, 0, settings.data().delay_flags);
-    motors.setValue(MOTOR_RIGHT_idx, 0, settings.data().delay_flags);
+    stopMotors();
 
     usb_storage.process();
     if (usb_storage.is_active()) return;
