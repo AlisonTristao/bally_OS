@@ -1,4 +1,4 @@
-# Bally Software - Robô ESP32-S3
+# Bally OS - Robô ESP32-S3
 
 Este projeto implementa o controle de um robô baseado em ESP32-S3, utilizando arquitetura orientada a objetos, FreeRTOS, comunicação ESP-NOW e execução paralela em dois núcleos.
 
