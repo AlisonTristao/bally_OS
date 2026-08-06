@@ -20,9 +20,7 @@
 
 #include <TinyShell.h>
 #include <TinyEKF.h>
-//#include "driver/i2c.h"
-//#include <ICM42688.h>
-//#include <Wire.h> // pendencia - parar de usar isso aqui - Arduino
+#include <ICM42688.h>
 
 #include <Flags.h>
 #include <Logger.h>
@@ -167,7 +165,6 @@ private:
                 sideSensors("Side Sensors"),
                 leds("LEDs"),
                 motors("Motors")
-                //imu(Wire, 0x68),
                 {
         // save the instance of the robot class to be used in the static functions
         instance_ = this;
@@ -180,7 +177,7 @@ private:
     std::optional<HBridge> motor_right;
     std::optional<Encoder> encoder_left;
     std::optional<Encoder> encoder_right;
-    //ICM42688 imu;
+    std::optional<ICM42688> imu;
     // Constructed in initEKF() (called from init(), after settings.load())
     // since Q/R are const and set from settings — same reason as
     // array_sensor/encoder_*/motor_* above.
@@ -196,6 +193,11 @@ private:
     // save a instance of the ROBOT class to be used in the static functions
     static ROBOT* instance_;
     bool initialized = false;
+
+    // Set once in init() from imu->begin()'s result. Gates the IMU read in
+    // sampleEKF() — skipping it when the sensor never answered avoids
+    // retrying (and blocking on) an I2C timeout on every EKF tick.
+    bool imu_ready_ = false;
 
     // Non-blocking per-sensor tests controlled by the "debug" shell module.
     // Add one ScheduledDebugTest member per sensor (IMU, H-bridge current, ...).

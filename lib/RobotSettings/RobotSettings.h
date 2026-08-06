@@ -79,7 +79,7 @@ struct SettingsData {
     // -------- pins_mux (analog multiplexer feeding the array sensor) --------
     int32_t s0 = 12, s1 = 11, s2 = 10, sig = 13;
 
-    // -------- pins_i2c (unused downstream today; kept for completeness) --
+    // -------- pins_i2c (IMU, ICM42688) --------
     int32_t sda_pin = 18, scl_pin = 17;
 };
 

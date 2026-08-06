@@ -24,6 +24,11 @@
 #define PI 3.14159265358979323846
 #endif
 
+// IMU I2C address (AD0 strapped low); gyro/accel unit conversions for the EKF.
+static constexpr uint8_t IMU_I2C_ADDRESS = 0x68;
+static constexpr float   kDegToRad       = static_cast<float>(PI) / 180.0f;
+static constexpr float   kGravityMss     = 9.81f;
+
 // ==============================================================================
 // STATIC MEMBER INITIALIZATION
 // ==============================================================================
@@ -477,12 +482,20 @@ void ROBOT::sampleEKF(void *param) {
 
     instance_->measurement[0] = instance_->getSpeedFromEncoders();
     instance_->measurement[1] = instance_->getOmegaFromEncoders();
-    instance_->measurement[2] = 0;
-    instance_->measurement[3] = 0;
-    instance_->measurement[4] = 0;
-    //instance_->imu.gyrZ() * kDegToRad,
-    //instance_->imu.accX() * 9.81f, 
-    //instance_->imu.accY() * 9.81f};
+
+    // Skipped while the IMU never answered at boot (imu_ready_ == false):
+    // retrying an I2C transaction against a disconnected sensor here would
+    // block this same timer callback on an I2C timeout every tick.
+    if (instance_->imu_ready_) {
+        instance_->imu->getAGT();
+        instance_->measurement[2] = instance_->imu->gyrZ() * kDegToRad;
+        instance_->measurement[3] = instance_->imu->accX() * kGravityMss;
+        instance_->measurement[4] = instance_->imu->accY() * kGravityMss;
+    } else {
+        instance_->measurement[2] = 0.0f;
+        instance_->measurement[3] = 0.0f;
+        instance_->measurement[4] = 0.0f;
+    }
 
     // notify the EKF task that new measurements are available
     if (instance_->ekf_task_handle != nullptr)
@@ -1312,6 +1325,7 @@ bool ROBOT::init() {
     // reserved exactly for this pair of H-bridges.
     motor_left.emplace(cfg.ain1, cfg.ain2, CH0, CH1);
     motor_right.emplace(cfg.bin1, cfg.bin2, CH2, CH3);
+    imu.emplace(cfg.sda_pin, cfg.scl_pin, IMU_I2C_ADDRESS);
 
     if (!ota.begin(sd_card, leds)) {
         logger.insert_log(logType::ERRO, "Failed to initialize OTA updater");
@@ -1352,10 +1366,13 @@ bool ROBOT::init() {
         return false;
     }
 
-    //if (!imu.begin()) {
-    //    ROBOT::logger.insert_log(logType::ERRO, "Failed to initialize IMU");
-    //    return false;
-    //}
+    // Not fatal: the IMU is optional hardware. Missing/unpowered, EKF just
+    // keeps running on encoder-only measurements (see sampleEKF()).
+    imu_ready_ = imu->begin() > 0;
+    if (!imu_ready_) {
+        ROBOT::logger.insert_log(logType::WARN,
+                                 "IMU (ICM42688) not detected; EKF running on encoders only");
+    }
 
     setTimeLimit();
     startWrappers();
