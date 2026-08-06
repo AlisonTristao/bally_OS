@@ -1,12 +1,15 @@
 #include <OTAUpdater.h>
 
+#include <cstdarg>
 #include <cstdio>
 #include <cstring>
 
+#include "esp_log.h"
 #include "esp_now.h"
 #include "esp_ota_ops.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
+#include "mdns.h"
 
 #include <Flags.h>
 #include <SDCard.h>
@@ -21,12 +24,55 @@ void reboot_after_response(void*) {
     esp_restart();
 }
 
+// Short, human-readable hint for the common WIFI_EVENT_STA_DISCONNECTED
+// reasons; the numeric code is always logged alongside this, since not
+// every reason is worth naming here.
+const char* disconnect_reason_str(uint8_t reason) {
+    switch (reason) {
+        case WIFI_REASON_NO_AP_FOUND:
+        case WIFI_REASON_NO_AP_FOUND_W_COMPATIBLE_SECURITY:
+        case WIFI_REASON_NO_AP_FOUND_IN_AUTHMODE_THRESHOLD:
+        case WIFI_REASON_NO_AP_FOUND_IN_RSSI_THRESHOLD:
+            return "AP not found";
+        case WIFI_REASON_AUTH_FAIL:
+        case WIFI_REASON_AUTH_EXPIRE:
+        case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:
+        case WIFI_REASON_HANDSHAKE_TIMEOUT:
+            return "authentication failed, check the password";
+        case WIFI_REASON_ASSOC_FAIL:
+        case WIFI_REASON_ASSOC_LEAVE:
+        case WIFI_REASON_ASSOC_NOT_AUTHED:
+            return "association rejected by the AP";
+        case WIFI_REASON_BEACON_TIMEOUT:
+            return "beacon timeout, weak signal";
+        default:
+            return "unspecified";
+    }
+}
+
+const char* auth_mode_str(wifi_auth_mode_t mode) {
+    switch (mode) {
+        case WIFI_AUTH_OPEN:          return "OPEN";
+        case WIFI_AUTH_WEP:           return "WEP";
+        case WIFI_AUTH_WPA_PSK:       return "WPA-PSK";
+        case WIFI_AUTH_WPA2_PSK:      return "WPA2-PSK";
+        case WIFI_AUTH_WPA_WPA2_PSK:  return "WPA/WPA2-PSK";
+        case WIFI_AUTH_WPA3_PSK:      return "WPA3-PSK";
+        case WIFI_AUTH_WPA2_WPA3_PSK: return "WPA2/WPA3-PSK";
+        case WIFI_AUTH_OWE:           return "OWE";
+        default:                      return "other";
+    }
+}
+
 // Minimal upload page: a plain HTML form cannot POST raw bytes, so a small
 // inline script reads the picked file and posts its bytes directly to
 // /update, matching what handle_update_post expects (no multipart parsing).
-const char kUploadPage[] =
+// %s is the configured mDNS hostname (OtaTuning::hostname) — formatted into
+// a stack buffer per request in handle_root_get(), since it's a runtime
+// setting now and can no longer be pasted in at compile time.
+const char kUploadPageFmt[] =
     "<!DOCTYPE html><html><body>"
-    "<h3>BallyRobot OTA</h3>"
+    "<h3>BallyRobot OTA (%s.local)</h3>"
     "<input type='file' id='f'><button onclick='u()'>Upload</button>"
     "<pre id='s'></pre>"
     "<script>"
@@ -47,28 +93,89 @@ const char kUploadPage[] =
 // Lifecycle
 // ==============================================================================
 
-bool OTAUpdater::begin(SDCard& card, Flags_out& leds) {
+bool OTAUpdater::begin(SDCard& card, Flags_out& leds, OtaLogCallback log_cb) {
     card_ = &card;
     leds_ = &leds;
+    log_cb_ = log_cb;
 
     if (events_registered_) return true;
 
-    if (esp_netif_create_default_wifi_sta() == nullptr) return false;
-
+    // The STA netif itself is created earlier, in
+    // ROBOT::configureCommunication() — it has to exist before
+    // esp_wifi_start() for the DHCP client to ever run (see the comment
+    // there). Here we only add OTA's own event handlers on top of it.
     if (esp_event_handler_instance_register(
             WIFI_EVENT, ESP_EVENT_ANY_ID, &OTAUpdater::wifi_event_handler,
             this, &wifi_event_instance_) != ESP_OK) {
+        log(logType::ERRO, "OTA: failed to register the Wi-Fi event handler");
         return false;
     }
 
     if (esp_event_handler_instance_register(
             IP_EVENT, IP_EVENT_STA_GOT_IP, &OTAUpdater::ip_event_handler,
             this, &ip_event_instance_) != ESP_OK) {
+        log(logType::ERRO, "OTA: failed to register the IP event handler");
         return false;
     }
 
     events_registered_ = true;
+
+    // Best-effort: OTA still works by IP if mDNS never comes up (or was
+    // never configured with a hostname at all — see ensure_mdns()).
+    ensure_mdns();
+    if (hostname_[0] != '\0' && !mdns_ready_) {
+        log(logType::WARN,
+            "OTA: mDNS init failed; use 'ota status' for the IP instead of %s.local",
+            hostname_);
+    }
+
     return true;
+}
+
+void OTAUpdater::configure(const OtaTuning& tuning) {
+    tuning_ = tuning;
+
+    // A null pointer here just means "not given" — leave whatever name is
+    // already in place (e.g. from an earlier configure() call) rather than
+    // blanking it out.
+    if (tuning.hostname != nullptr) {
+        snprintf(hostname_, sizeof(hostname_), "%s", tuning.hostname);
+    }
+    if (tuning.instance_name != nullptr) {
+        snprintf(instance_name_, sizeof(instance_name_), "%s", tuning.instance_name);
+    }
+}
+
+void OTAUpdater::ensure_mdns() {
+    if (mdns_ready_ || hostname_[0] == '\0') return;
+    if (mdns_init() != ESP_OK) return;
+
+    mdns_hostname_set(hostname_);
+    mdns_instance_name_set(instance_name_[0] != '\0' ? instance_name_ : hostname_);
+    mdns_service_add(nullptr, "_http", "_tcp", 80, nullptr, 0);
+    mdns_ready_ = true;
+}
+
+void OTAUpdater::log(logType type, const char* fmt, ...) const {
+    char buffer[192];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(buffer, sizeof(buffer), fmt, args);
+    va_end(args);
+
+    // Mirrored straight to UART with the real wall-clock uptime at the
+    // instant this fired, independent of ESP-NOW/PSRAM retention — during
+    // OTA, insert_log()'d entries only leave the ring once cancel() gives
+    // the radio back to ESP-NOW, so their delivery order/spacing over the
+    // air reflects when the backlog got flushed, not when each one
+    // actually happened. `pio device monitor` shows the true timing.
+    switch (type) {
+        case logType::ERRO: ESP_LOGE("OTA", "%s", buffer); break;
+        case logType::WARN: ESP_LOGW("OTA", "%s", buffer); break;
+        default:            ESP_LOGI("OTA", "%s", buffer); break;
+    }
+
+    if (log_cb_ != nullptr) log_cb_(type, buffer);
 }
 
 // ==============================================================================
@@ -198,9 +305,14 @@ bool OTAUpdater::start() {
 
     wifi_scan_config_t scan_config{};
     scan_in_flight_ = esp_wifi_scan_start(&scan_config, false) == ESP_OK;
-    next_scan_ms_ = now_ms() + OTA_RETRY_SCAN_MS;
+    next_scan_ms_ = now_ms() + tuning_.retry_scan_ms;
 
     phase_.store(Phase::SCANNING, std::memory_order_release);
+
+    log(logType::INFO, "OTA: started, scanning for %u known network(s)%s",
+        static_cast<unsigned>(candidate_count_),
+        scan_in_flight_ ? "" : " (initial scan failed to start, retrying)");
+
     return scan_in_flight_;
 }
 
@@ -214,23 +326,31 @@ void OTAUpdater::handle_scan_done() {
     wifi_ap_record_t records[OTA_MAX_SCAN_RESULTS];
     if (ap_count > 0) esp_wifi_scan_get_ap_records(&ap_count, records);
 
+    // Keep the matching scan record, not just a visible/not-visible bit: its
+    // channel + BSSID let esp_wifi_connect() go straight to the right AP
+    // instead of re-sweeping every 2.4GHz channel to relocate it, which is
+    // what was turning a normal connect into a ~20s stall.
+    const wifi_ap_record_t* matched = nullptr;
     for (; candidate_index_ < candidate_count_; ++candidate_index_) {
-        bool visible = false;
         for (uint16_t i = 0; i < ap_count; ++i) {
             if (strncmp(reinterpret_cast<const char*>(records[i].ssid),
                         candidates_[candidate_index_].ssid,
                         sizeof(records[i].ssid)) == 0) {
-                visible = true;
+                matched = &records[i];
                 break;
             }
         }
-        if (visible) break;
+        if (matched != nullptr) break;
     }
 
-    if (candidate_index_ >= candidate_count_) {
+    if (matched == nullptr) {
         // None of the stored networks are visible right now; keep retrying.
+        log(logType::WARN,
+            "OTA: none of the %u known network(s) are visible, rescanning in %ums",
+            static_cast<unsigned>(candidate_count_),
+            static_cast<unsigned>(tuning_.retry_scan_ms));
         candidate_index_ = 0;
-        next_scan_ms_ = now_ms() + OTA_RETRY_SCAN_MS;
+        next_scan_ms_ = now_ms() + tuning_.retry_scan_ms;
         return;
     }
 
@@ -241,14 +361,22 @@ void OTAUpdater::handle_scan_done() {
     snprintf(reinterpret_cast<char*>(wifi_config.sta.password),
              sizeof(wifi_config.sta.password), "%s",
              candidates_[candidate_index_].password);
+    wifi_config.sta.channel = matched->primary;
+    memcpy(wifi_config.sta.bssid, matched->bssid, sizeof(wifi_config.sta.bssid));
+    wifi_config.sta.bssid_set = true;
 
     if (esp_wifi_set_config(WIFI_IF_STA, &wifi_config) != ESP_OK ||
         esp_wifi_connect() != ESP_OK) {
-        try_next_candidate();
+        log(logType::ERRO, "OTA: esp_wifi_connect() failed for '%s'",
+            candidates_[candidate_index_].ssid);
+        fail_candidate();
         return;
     }
 
-    connect_deadline_ms_ = now_ms() + OTA_CONNECT_TIMEOUT_MS;
+    log(logType::INFO, "OTA: '%s' is visible, connecting...",
+        candidates_[candidate_index_].ssid);
+
+    connect_deadline_ms_ = now_ms() + tuning_.connect_timeout_ms;
     phase_.store(Phase::CONNECTING, std::memory_order_release);
 }
 
@@ -258,13 +386,46 @@ void OTAUpdater::try_next_candidate() {
     phase_.store(Phase::SCANNING, std::memory_order_release);
 }
 
+void OTAUpdater::fail_candidate() {
+    // Every failure path lands here, including a plain deadline timeout,
+    // where the STA can still be associated (or mid-handshake) since we
+    // only gave up waiting for DHCP — never actually tore down the link.
+    // Without this, the next esp_wifi_connect() logs "sta is connected,
+    // disconnect before connecting to new ap" and the driver eats time
+    // disconnecting on its own before it can even start the new attempt.
+    esp_wifi_disconnect();
+    retry_at_ms_ = now_ms() + tuning_.led_fail_hold_ms;
+    phase_.store(Phase::CONNECT_FAILED, std::memory_order_release);
+}
+
 void OTAUpdater::advance_carousel() {
     const uint32_t now = now_ms();
     if (static_cast<int32_t>(now - carousel_next_ms_) < 0) return;
 
-    leds_->setFlag(carousel_index_, OTA_LED_STEP_MS);
+    leds_->setFlag(carousel_index_, tuning_.led_step_ms);
     carousel_index_ = static_cast<uint8_t>((carousel_index_ + 1) % 4);
-    carousel_next_ms_ = now + OTA_LED_STEP_MS;
+    carousel_next_ms_ = now + tuning_.led_step_ms;
+}
+
+void OTAUpdater::update_status_led(Phase phase) {
+    switch (phase) {
+        case Phase::SCANNING:
+            advance_carousel();
+            break;
+        case Phase::CONNECTING:
+            leds_->setFlag(LED_YELLOW, tuning_.led_hold_ms);
+            break;
+        case Phase::CONNECT_FAILED:
+            leds_->setFlag(LED_RED, tuning_.led_hold_ms);
+            break;
+        case Phase::SERVING:
+            leds_->setFlag(flashing_.load(std::memory_order_acquire)
+                               ? LED_BLUE : LED_GREEN,
+                           tuning_.led_hold_ms);
+            break;
+        case Phase::IDLE:
+            break;
+    }
 }
 
 void OTAUpdater::process(uint8_t button_flags) {
@@ -276,7 +437,7 @@ void OTAUpdater::process(uint8_t button_flags) {
         return;
     }
 
-    advance_carousel();
+    update_status_led(phase);
     const uint32_t now = now_ms();
 
     switch (phase) {
@@ -288,20 +449,38 @@ void OTAUpdater::process(uint8_t button_flags) {
                 wifi_scan_config_t scan_config{};
                 scan_in_flight_ =
                     esp_wifi_scan_start(&scan_config, false) == ESP_OK;
-                if (!scan_in_flight_) next_scan_ms_ = now + OTA_RETRY_SCAN_MS;
+                if (!scan_in_flight_) next_scan_ms_ = now + tuning_.retry_scan_ms;
             }
             break;
 
         case Phase::CONNECTING:
             if (got_ip_.exchange(false, std::memory_order_acq_rel)) {
                 if (start_http_server()) {
+                    log(logType::INFO, "OTA: connected to '%s' at %s, serving updates",
+                        connected_ssid_, connected_ip_);
                     phase_.store(Phase::SERVING, std::memory_order_release);
                 } else {
-                    esp_wifi_disconnect();
-                    try_next_candidate();
+                    log(logType::ERRO,
+                        "OTA: connected to '%s' but the HTTP server failed to start",
+                        connected_ssid_);
+                    fail_candidate();
                 }
-            } else if (disconnected_.exchange(false, std::memory_order_acq_rel) ||
-                      static_cast<int32_t>(now - connect_deadline_ms_) >= 0) {
+            } else if (disconnected_.exchange(false, std::memory_order_acq_rel)) {
+                const uint8_t reason =
+                    disconnect_reason_.load(std::memory_order_relaxed);
+                log(logType::ERRO, "OTA: '%s' disconnected (reason %u: %s)",
+                    candidates_[candidate_index_].ssid,
+                    static_cast<unsigned>(reason), disconnect_reason_str(reason));
+                fail_candidate();
+            } else if (static_cast<int32_t>(now - connect_deadline_ms_) >= 0) {
+                log(logType::ERRO, "OTA: timed out connecting to '%s'",
+                    candidates_[candidate_index_].ssid);
+                fail_candidate();
+            }
+            break;
+
+        case Phase::CONNECT_FAILED:
+            if (static_cast<int32_t>(now - retry_at_ms_) >= 0) {
                 try_next_candidate();
             }
             break;
@@ -316,9 +495,11 @@ void OTAUpdater::cancel() {
     if (flashing_.load(std::memory_order_acquire)) return;
     if (phase_.load(std::memory_order_acquire) == Phase::IDLE) return;
 
+    log(logType::INFO, "OTA: cancelled, restoring ESP-NOW");
+
     stop_http_server();
     esp_wifi_disconnect();
-    esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
+    esp_wifi_set_channel(tuning_.espnow_channel, WIFI_SECOND_CHAN_NONE);
 
     for (uint8_t i = 0; i < 4; ++i) leds_->setFlag(i, 1);
 
@@ -362,14 +543,20 @@ void OTAUpdater::stop_http_server() {
 }
 
 esp_err_t OTAUpdater::handle_root_get(httpd_req_t* req) {
+    auto* self = static_cast<OTAUpdater*>(req->user_ctx);
+
+    char page[sizeof(kUploadPageFmt) + sizeof(self->hostname_)];
+    snprintf(page, sizeof(page), kUploadPageFmt, self->hostname_);
+
     httpd_resp_set_type(req, "text/html");
-    return httpd_resp_send(req, kUploadPage, HTTPD_RESP_USE_STRLEN);
+    return httpd_resp_send(req, page, HTTPD_RESP_USE_STRLEN);
 }
 
 esp_err_t OTAUpdater::handle_update_post(httpd_req_t* req) {
     auto* self = static_cast<OTAUpdater*>(req->user_ctx);
 
     if (req->content_len == 0) {
+        self->log(logType::ERRO, "OTA: upload rejected, empty body");
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Empty body");
         return ESP_FAIL;
     }
@@ -377,6 +564,7 @@ esp_err_t OTAUpdater::handle_update_post(httpd_req_t* req) {
     const esp_partition_t* update_partition =
         esp_ota_get_next_update_partition(nullptr);
     if (update_partition == nullptr) {
+        self->log(logType::ERRO, "OTA: no free OTA partition available");
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
                             "No OTA partition available");
         return ESP_FAIL;
@@ -385,11 +573,14 @@ esp_err_t OTAUpdater::handle_update_post(httpd_req_t* req) {
     esp_ota_handle_t ota_handle = 0;
     if (esp_ota_begin(update_partition, OTA_SIZE_UNKNOWN, &ota_handle) !=
         ESP_OK) {
+        self->log(logType::ERRO, "OTA: esp_ota_begin() failed");
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
                             "esp_ota_begin failed");
         return ESP_FAIL;
     }
 
+    self->log(logType::INFO, "OTA: firmware upload started (%d bytes)",
+              static_cast<int>(req->content_len));
     self->flashing_.store(true, std::memory_order_release);
 
     char buffer[1024];
@@ -420,11 +611,14 @@ esp_err_t OTAUpdater::handle_update_post(httpd_req_t* req) {
 
     if (write_error || esp_ota_end(ota_handle) != ESP_OK ||
         esp_ota_set_boot_partition(update_partition) != ESP_OK) {
+        self->log(logType::ERRO, "OTA: firmware write failed%s",
+                  write_error ? " (transfer error)" : "");
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
                             "OTA write failed");
         return ESP_FAIL;
     }
 
+    self->log(logType::INFO, "OTA: firmware written OK, rebooting");
     httpd_resp_sendstr(req, "OK, rebooting...\n");
 
     // Let the HTTP response flush before resetting.
@@ -449,12 +643,26 @@ esp_err_t OTAUpdater::handle_update_post(httpd_req_t* req) {
 void OTAUpdater::wifi_event_handler(void* arg, esp_event_base_t base,
                                     int32_t id, void* data) {
     (void)base;
-    (void)data;
     auto* self = static_cast<OTAUpdater*>(arg);
 
     if (id == WIFI_EVENT_SCAN_DONE) {
         self->scan_done_.store(true, std::memory_order_release);
+    } else if (id == WIFI_EVENT_STA_CONNECTED) {
+        // L2 association succeeded; esp_netif now starts the DHCP client on
+        // its own. If GOT_IP never follows, the AP accepted the association
+        // but is not (or not yet) handing out a lease to this MAC — that
+        // points at the AP/router side (client cap, MAC approval, DHCP
+        // pool), not at the connect attempt itself.
+        auto* event = static_cast<wifi_event_sta_connected_t*>(data);
+        self->log(logType::INFO,
+                  "OTA: associated with '%.*s' on ch%u (%s), waiting for DHCP...",
+                  static_cast<int>(event->ssid_len),
+                  reinterpret_cast<const char*>(event->ssid),
+                  static_cast<unsigned>(event->channel),
+                  auth_mode_str(event->authmode));
     } else if (id == WIFI_EVENT_STA_DISCONNECTED) {
+        auto* event = static_cast<wifi_event_sta_disconnected_t*>(data);
+        self->disconnect_reason_.store(event->reason, std::memory_order_relaxed);
         self->disconnected_.store(true, std::memory_order_release);
     }
 }

@@ -100,21 +100,19 @@
 // -------------------- OTA over Wi-Fi (DEBUG state) --------------------
 // wifi.txt is already its own SD-backed, shell-editable config (see
 // OTAUpdater::add_network/remove_network/wifi_add/wifi_remove); left as-is.
-// OTA_MAX_NETWORKS/OTA_SSID_MAX_LEN/OTA_PASS_MAX_LEN/OTA_MAX_SCAN_RESULTS
-// size fixed member/stack arrays in OTAUpdater. The timing values and
-// ESPNOW_CHANNEL are read directly by OTAUpdater/ROBOT::configureCommunication
-// in several places; wiring them through settings needs a small
-// OTAUpdater::configure(...) API (deliberately left for a follow-up so
-// ESPNOW_CHANNEL can't end up read as two different values in two places).
+// OTA_MAX_NETWORKS/OTA_SSID_MAX_LEN/OTA_PASS_MAX_LEN/OTA_MAX_SCAN_RESULTS/
+// OTA_MDNS_NAME_MAX_LEN size fixed member/stack arrays in OTAUpdater, so
+// they stay compile-time. Every actual OTA value (timing, ESP-NOW home
+// channel, mDNS hostname/instance name) is a runtime setting now
+// (RobotSettings, module "ota") — see OTAUpdater::configure()/OtaTuning and
+// ROBOT::configureCommunication(), which both read settings.data() instead
+// of a macro so the channel can't end up read as two different values.
 #define OTA_WIFI_LIST_FILE      "wifi.txt" // ssid,password per line, SD card root
 #define OTA_MAX_NETWORKS        16     // max entries read from OTA_WIFI_LIST_FILE
 #define OTA_SSID_MAX_LEN        33     // 32 chars + null terminator (802.11 limit)
 #define OTA_PASS_MAX_LEN        65     // 64 chars + null terminator (WPA2 limit)
-#define OTA_LED_STEP_MS         150    // carousel step while OTA is active
-#define OTA_CONNECT_TIMEOUT_MS  8000   // per-network connect timeout
-#define OTA_RETRY_SCAN_MS       5000   // delay before re-scanning when nothing matched
 #define OTA_MAX_SCAN_RESULTS    20     // visible APs read back per scan
-#define ESPNOW_CHANNEL          1      // channel restored after leaving OTA
+#define OTA_MDNS_NAME_MAX_LEN   33     // 32 chars + null terminator; hostname and instance name share this cap
 
 // ============================================================
 // Pinout da ESP32-S3

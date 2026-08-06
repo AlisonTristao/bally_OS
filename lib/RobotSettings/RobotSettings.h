@@ -7,6 +7,11 @@
 #include <cstdint>
 #include <string>
 
+// For OtaTuning's default-constructed values, which back the ota_* field
+// defaults below — kept in one place (see OTAUpdater.h) instead of
+// repeating the literals here too.
+#include <OTAUpdater.h>
+
 class SDCard;
 
 // SD card root file where the runtime settings are persisted. Same
@@ -81,6 +86,23 @@ struct SettingsData {
 
     // -------- pins_i2c (IMU, ICM42688) --------
     int32_t sda_pin = 18, scl_pin = 17;
+
+    // -------- ota (Wi-Fi OTA sub-mode timing/identity; ESP-NOW home channel) --
+    // Applied via OTAUpdater::configure()/OtaTuning (lib/OTAUpdater) — see
+    // ROBOT::init(). Numeric defaults are pulled from a default-constructed
+    // OtaTuning (the canonical copy) instead of repeating the literals here.
+    // espnow_channel is also read directly by ROBOT::configureCommunication()
+    // to bring ESP-NOW up on the same channel OTA restores on cancel().
+    uint32_t ota_led_step_ms        = OtaTuning{}.led_step_ms;
+    uint32_t ota_led_hold_ms        = OtaTuning{}.led_hold_ms;
+    uint32_t ota_led_fail_hold_ms   = OtaTuning{}.led_fail_hold_ms;
+    uint32_t ota_connect_timeout_ms = OtaTuning{}.connect_timeout_ms;
+    uint32_t ota_retry_scan_ms      = OtaTuning{}.retry_scan_ms;
+    uint8_t  espnow_channel         = OtaTuning{}.espnow_channel;
+    // OtaTuning::hostname/instance_name default to nullptr (see its own
+    // comment) precisely so these two stay the one real literal home.
+    char ota_hostname[OTA_MDNS_NAME_MAX_LEN]      = "ballyrobot";
+    char ota_instance_name[OTA_MDNS_NAME_MAX_LEN] = "BallyRobot OTA";
 };
 
 enum class SettingType : uint8_t { U32, U8, FLOAT, PIN, STRING };

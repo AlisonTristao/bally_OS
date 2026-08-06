@@ -12,9 +12,44 @@
 #include "esp_http_server.h"
 
 #include <Settings.h>
+#include <SharedMessageTypes.h>
 
 class SDCard;
 class Flags_out;
+
+// Reports scan/connect/upload progress and failures (with reason, when
+// known) so they land in the retained log even though ESP-NOW is off the
+// air for the whole time OTA is active; see Logger::insert_log. A plain
+// function pointer, not std::function, so a captureless lambda at the call
+// site is enough.
+using OtaLogCallback = void (*)(logType type, const char* msg);
+
+/**
+ * @brief Runtime-tunable OTA settings (RobotSettings, module "ota"): timing,
+ * the ESP-NOW home channel restored on cancel(), and the mDNS identity.
+ * This struct is the single canonical home for the numeric defaults —
+ * SettingsData (lib/RobotSettings) derives its own field defaults from a
+ * default-constructed OtaTuning instead of repeating the literals, so a
+ * robot that never calls configure() still behaves the same either way.
+ *
+ * hostname/instance_name are borrowed pointers (e.g. into a SettingsData
+ * instance that outlives the OTAUpdater): configure() copies them into its
+ * own fixed buffers immediately, so nothing needs to stay valid afterwards.
+ * They default to nullptr, and configure() leaves its buffers untouched
+ * (mDNS just stays off, see ensure_mdns()) rather than substituting a
+ * second, driftable copy of RobotSettings' ota_hostname/ota_instance_name
+ * defaults — the only place those literals belong.
+ */
+struct OtaTuning {
+    uint32_t led_step_ms        = 150;    // carousel step while OTA is active
+    uint32_t led_hold_ms        = 200;    // refresh window for solid status LEDs
+    uint32_t led_fail_hold_ms   = 800;    // red "connect failed" hold before retrying
+    uint32_t connect_timeout_ms = 10000;  // per-network connect timeout
+    uint32_t retry_scan_ms      = 5000;   // delay before re-scanning when nothing matched
+    uint8_t  espnow_channel     = 1;      // channel restored after leaving OTA
+    const char* hostname        = nullptr;      // mDNS hostname: http://<name>.local/
+    const char* instance_name   = nullptr;      // mDNS human-readable instance name
+};
 
 /**
  * @brief Join a known Wi-Fi network and accept a firmware upload over HTTP,
@@ -23,9 +58,16 @@ class Flags_out;
  * Networks are read from a plain text file on the SD card
  * (OTA_WIFI_LIST_FILE, "ssid,password" per line, see Settings.h); only
  * networks that both appear in that file and are currently visible over the
- * air are attempted, in file order. While active, LEDs run a one-at-a-time
- * carousel; any button press cancels back to plain ESP-NOW, unless a
- * firmware upload is already in flight.
+ * air are attempted, in file order. Any button press cancels back to plain
+ * ESP-NOW, unless a firmware upload is already in flight.
+ *
+ * The LEDs report progress: a one-at-a-time carousel while scanning, solid
+ * yellow while connecting to a candidate, solid red (OtaTuning::led_fail_hold_ms)
+ * when a connect attempt fails before the next candidate is tried, solid
+ * green once connected and serving, and solid blue while a firmware upload
+ * is actually being written. Once connected, the device also answers to
+ * "<hostname>.local" over mDNS (see OtaTuning::hostname) so the upload URL
+ * does not depend on knowing its IP.
  */
 class OTAUpdater {
 public:
@@ -38,8 +80,23 @@ public:
     /**
      * @brief Register the SD card and LED outputs this manager will use and
      * install the Wi-Fi/IP event handlers. Call once during ROBOT::init().
+     * @param log_cb Optional; receives every OTA event from this point on
+     * (including failures inside begin() itself), so pass it here rather
+     * than a separate setter.
      */
-    bool begin(SDCard& card, Flags_out& leds);
+    bool begin(SDCard& card, Flags_out& leds, OtaLogCallback log_cb = nullptr);
+
+    /**
+     * @brief Apply runtime-tunable settings (see OtaTuning): copies the
+     * timing/channel fields and snprintf's hostname/instance_name into
+     * their own buffers. Safe to call before begin(), any time after, or
+     * not at all — a default-constructed OtaTuning is already in effect
+     * otherwise.
+     */
+    void configure(const OtaTuning& tuning);
+
+    /// mDNS hostname currently in effect (without ".local"); see OtaTuning.
+    const char* hostname() const { return hostname_; }
 
     /**
      * @brief Start scanning for a known network. Entry point for the
@@ -64,7 +121,7 @@ public:
      */
     void cancel();
 
-    enum class Phase : uint8_t { IDLE, SCANNING, CONNECTING, SERVING };
+    enum class Phase : uint8_t { IDLE, SCANNING, CONNECTING, CONNECT_FAILED, SERVING };
 
     Phase phase() const { return phase_.load(std::memory_order_acquire); }
     bool is_active() const { return phase() != Phase::IDLE; }
@@ -107,7 +164,14 @@ private:
 
     SDCard* card_ = nullptr;
     Flags_out* leds_ = nullptr;
+    OtaLogCallback log_cb_ = nullptr;
+    OtaTuning tuning_;
+    // Empty until configure() is given a real name (see OtaTuning); mDNS
+    // just stays off rather than substituting a literal here too.
+    char hostname_[OTA_MDNS_NAME_MAX_LEN] = {};
+    char instance_name_[OTA_MDNS_NAME_MAX_LEN] = {};
     bool events_registered_ = false;
+    bool mdns_ready_ = false;
 
     std::atomic<Phase> phase_{Phase::IDLE};
     std::atomic<bool> flashing_{false};
@@ -116,9 +180,11 @@ private:
     std::atomic<bool> scan_done_{false};
     std::atomic<bool> got_ip_{false};
     std::atomic<bool> disconnected_{false};
+    std::atomic<uint8_t> disconnect_reason_{0}; // WIFI_REASON_*, valid when disconnected_ is set
     bool scan_in_flight_ = false;
     uint32_t next_scan_ms_ = 0;
     uint32_t connect_deadline_ms_ = 0;
+    uint32_t retry_at_ms_ = 0; // Phase::CONNECT_FAILED: when to try the next candidate
 
     // Networks loaded from OTA_WIFI_LIST_FILE for the active connect attempt.
     Credential candidates_[OTA_MAX_NETWORKS];
@@ -144,9 +210,15 @@ private:
     bool load_candidates();
     void handle_scan_done();
     void try_next_candidate();
+    void fail_candidate();
     void advance_carousel();
+    void update_status_led(Phase phase);
     bool start_http_server();
     void stop_http_server();
+    void ensure_mdns();
+
+    void log(logType type, const char* fmt, ...) const
+        __attribute__((format(printf, 3, 4)));
 
     static void wifi_event_handler(void* arg, esp_event_base_t base,
                                    int32_t id, void* data);

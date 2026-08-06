@@ -258,19 +258,42 @@ bool ROBOT::configureCommunication() {
 
     esp_netif_init();
     esp_event_loop_create_default();
+
+    // Must exist before esp_wifi_start() below: it's what wires the STA
+    // netif to WIFI_EVENT_STA_START/CONNECTED/DISCONNECTED and IP_EVENT so
+    // the DHCP client actually runs after a connect. Creating it later (as
+    // OTAUpdater::begin() used to) missed the STA_START event that already
+    // fired here, leaving the netif never marked "up" — Wi-Fi would
+    // associate fine but esp_netif_dhcpc_start() never ran, so DHCP never
+    // even got attempted and the OTA connect just sat there until timeout.
+    if (esp_netif_create_default_wifi_sta() == nullptr) {
+        ROBOT::logger.insert_log(logType::ERRO, "Failed to create the Wi-Fi STA netif");
+        ESP_LOGE("ROBOT_INIT", "Failed to create the Wi-Fi STA netif");
+        return false;
+    }
+
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     esp_wifi_init(&cfg);
     esp_wifi_set_storage(WIFI_STORAGE_RAM);
-    
+
     if (esp_wifi_set_mode(WIFI_MODE_STA) != ESP_OK || esp_wifi_start() != ESP_OK) {
         ROBOT::logger.insert_log(logType::ERRO, "Failed to configure WiFi mode");
         ESP_LOGE("ROBOT_INIT", "Failed to configure WiFi mode");
         return false;
     }
 
+    // Default modem sleep (WIFI_PS_MIN_MODEM) lets the radio doze between
+    // beacons; both ESP-NOW latency and the OTA sub-mode's AP association
+    // need it awake — otherwise the DHCP offer/ACK after a successful
+    // connect can be missed, association stays up, and OTA just times out
+    // waiting for an IP that was already sent.
+    esp_wifi_set_ps(WIFI_PS_NONE);
+
     // Explicit channel so ESP-NOW has a known home to return to after the
     // OTA sub-mode (in DEBUG) associates with an access point and leaves.
-    esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
+    // Runtime setting (RobotSettings, module "ota") so this and
+    // OTAUpdater::cancel()'s restore can't drift into two different values.
+    esp_wifi_set_channel(settings.data().espnow_channel, WIFI_SECOND_CHAN_NONE);
 
     vTaskDelay(50 / portTICK_PERIOD_MS);
 
@@ -968,17 +991,19 @@ void ROBOT::startWrappers() {
     shell.add([]() -> uint8_t {
         const char* status = "idle";
         switch (instance_->ota.phase()) {
-            case OTAUpdater::Phase::SCANNING:   status = "scanning for a known network"; break;
-            case OTAUpdater::Phase::CONNECTING: status = "connecting"; break;
-            case OTAUpdater::Phase::SERVING:    status = "serving OTA updates"; break;
-            case OTAUpdater::Phase::IDLE:        status = "idle"; break;
+            case OTAUpdater::Phase::SCANNING:       status = "scanning for a known network"; break;
+            case OTAUpdater::Phase::CONNECTING:     status = "connecting"; break;
+            case OTAUpdater::Phase::CONNECT_FAILED: status = "connect failed, retrying"; break;
+            case OTAUpdater::Phase::SERVING:        status = "serving OTA updates"; break;
+            case OTAUpdater::Phase::IDLE:            status = "idle"; break;
         }
 
-        char text[128];
+        char text[160];
         if (instance_->ota.phase() == OTAUpdater::Phase::SERVING) {
-            snprintf(text, sizeof(text), "OTA: %s, ssid=%s ip=%s",
+            snprintf(text, sizeof(text),
+                     "OTA: %s, ssid=%s ip=%s (or http://%s.local/)",
                      status, instance_->ota.connected_ssid(),
-                     instance_->ota.connected_ip());
+                     instance_->ota.connected_ip(), instance_->ota.hostname());
         } else {
             snprintf(text, sizeof(text), "OTA: %s", status);
         }
@@ -1271,8 +1296,13 @@ void ROBOT::routine(void *param){
     #endif
 
     // excute the loop to menage the robot
-    while(true) {   
-        ROBOT::logger.flush_logs();                 // send the logger messagens to output
+    while(true) {
+        // OTA holds the radio on the target Wi-Fi's channel, so ESP-NOW
+        // frames sent while it's active never reach the peer; skip the
+        // flush and let logs pile up in PSRAM instead of retrying/losing
+        // them, then drain everything once cancel() gives the channel back.
+        if (!instance_->ota.is_active())
+            ROBOT::logger.flush_logs();              // send the logger messagens to output
         instance_->resetFlags();                    // reset the flags - buttons, side sensors, pwm...
         instance_->setOutputs();                    // set the output - leds, pwm...
         instance_->checkStateMachine();             // cheg the next state of the state machine
@@ -1356,12 +1386,25 @@ bool ROBOT::init() {
     }
 
     // Must run before ota.begin(): it creates the default event loop and
-    // netif that esp_netif_create_default_wifi_sta() (called from
-    // OTAUpdater::begin) requires, otherwise it aborts with ESP_ERR_INVALID_STATE.
+    // the Wi-Fi STA netif (needed for the DHCP client — see the comment on
+    // esp_netif_create_default_wifi_sta() inside configureCommunication())
+    // that ota.begin()'s own event handler registration builds on top of.
     if (!configureCommunication())
         return false;
 
-    if (!ota.begin(sd_card, leds)) {
+    ota.configure(OtaTuning{
+        .led_step_ms        = cfg.ota_led_step_ms,
+        .led_hold_ms        = cfg.ota_led_hold_ms,
+        .led_fail_hold_ms   = cfg.ota_led_fail_hold_ms,
+        .connect_timeout_ms = cfg.ota_connect_timeout_ms,
+        .retry_scan_ms      = cfg.ota_retry_scan_ms,
+        .espnow_channel     = cfg.espnow_channel,
+        .hostname           = cfg.ota_hostname,
+        .instance_name      = cfg.ota_instance_name,
+    });
+    if (!ota.begin(sd_card, leds, [](logType type, const char* msg) {
+            ROBOT::logger.insert_log(type, msg);
+        })) {
         logger.insert_log(logType::ERRO, "Failed to initialize OTA updater");
     }
 

@@ -78,6 +78,15 @@ const SettingEntry RobotSettings::kTable[] = {
 
     ENTRY("pins_i2c", sda_pin, PIN),
     ENTRY("pins_i2c", scl_pin, PIN),
+
+    ENTRY("ota", ota_led_step_ms,        U32),
+    ENTRY("ota", ota_led_hold_ms,        U32),
+    ENTRY("ota", ota_led_fail_hold_ms,   U32),
+    ENTRY("ota", ota_connect_timeout_ms, U32),
+    ENTRY("ota", ota_retry_scan_ms,      U32),
+    ENTRY("ota", espnow_channel,         U8),
+    ENTRY("ota", ota_hostname,           STRING),
+    ENTRY("ota", ota_instance_name,      STRING),
 };
 
 #undef ENTRY
