@@ -547,6 +547,18 @@ void ROBOT::runEKF(void *param) {
         // run the EKF prediction and update steps with the latest control input and measurement
         instance_->EKF->predict(instance_->control_input);
         instance_->EKF->update(instance_->control_input, instance_->measurement);
+
+        // Read back x[] right after writing it, in this same task — no
+        // cross-task race with whoever else might read the filter state.
+        if (instance_->kalman_log_test_.poll()) {
+            ROBOT::logger.insert_logf(
+                logType::INFO,
+                "KALMAN v=%.4f w=%.4f b=%.4f | meas enc_v=%.4f enc_w=%.4f gyro=%.4f accx=%.4f accy=%.4f | pwm R=%.0f L=%.0f",
+                instance_->EKF->get_state(0), instance_->EKF->get_state(1), instance_->EKF->get_state(2),
+                instance_->measurement[0], instance_->measurement[1], instance_->measurement[2],
+                instance_->measurement[3], instance_->measurement[4],
+                instance_->control_input[0], instance_->control_input[1]);
+        }
     }
 }
 
@@ -630,6 +642,38 @@ void ROBOT::startWrappers() {
             static_cast<long long>(instance_->encoder_right->getCount()));
         return RESULT_OK;
     }, "encoders", "Read the raw left/right encoder counts", "sensor");
+
+    // EKF (Kalman) state and periodic tuning log. Unlike the "debug" module
+    // below, this is available in any state (including RUN) since tuning
+    // the filter means watching it while the robot is actually driving.
+    shell.create_module("kalman", "EKF state and periodic tuning log");
+
+    shell.add([]() -> uint8_t {
+        ROBOT::logger.insert_logf(logType::INFO, "EKF state: v=%.4f w=%.4f b=%.4f",
+                                  instance_->EKF->get_state(0),
+                                  instance_->EKF->get_state(1),
+                                  instance_->EKF->get_state(2));
+        return RESULT_OK;
+    }, "state", "Read the current EKF state (v, w, gyro bias)", "kalman");
+
+    shell.add([](uint32_t interval_ms) -> uint8_t {
+        if (interval_ms == 0 ||
+            !instance_->kalman_log_test_.schedule(UINT32_MAX, interval_ms)) {
+            ROBOT::logger.insert_log(logType::ERRO,
+                                     "Invalid interval; kalman log not started");
+            return RESULT_ERROR;
+        }
+
+        ROBOT::logger.insert_logf(logType::INFO,
+                                  "Kalman log started: every %u ms", interval_ms);
+        return RESULT_OK;
+    }, "start_log", "Start periodic EKF state + measurement logging: interval_ms", "kalman");
+
+    shell.add([]() -> uint8_t {
+        instance_->kalman_log_test_.cancel();
+        ROBOT::logger.insert_log(logType::INFO, "Kalman log stopped");
+        return RESULT_OK;
+    }, "stop_log", "Stop periodic EKF logging", "kalman");
 
     // DEBUG sensor tests: each schedules periodic, non-blocking sampling
     // (see ScheduledDebugTest/processDebug). Add one command per sensor

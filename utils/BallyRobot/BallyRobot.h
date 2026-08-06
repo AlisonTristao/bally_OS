@@ -35,13 +35,15 @@
 #endif
 
 /**
- * @brief Non-blocking, periodic sample scheduler backing the "debug" shell
- * module's per-sensor tests (test_arr_sensor, test_encoder, and future ones
- * such as IMU/H-bridge current).
+ * @brief Non-blocking, periodic sample scheduler. Originally built for the
+ * "debug" shell module's per-sensor tests (test_arr_sensor, test_encoder,
+ * and future ones such as IMU/H-bridge current); also reused by the
+ * "kalman" module to throttle start_log/stop_log.
  *
  * schedule()/cancel()/active() are called from the shell task; poll() is
- * called once per pass from ROBOT::processDebug() on the state-machine task.
- * Every field is atomic for that reason.
+ * called once per pass from the consuming task — ROBOT::processDebug() on
+ * the state-machine task for debug tests, ROBOT::runEKF() for the kalman
+ * log. Every field is atomic for that reason.
  */
 class ScheduledDebugTest {
 public:
@@ -214,6 +216,15 @@ private:
     // matriz of data to kalman filter
     float control_input[EKF_CONTROL_DIM] = {0, 0}; // left and right motor pwm
     float measurement[EKF_MEASURE_DIM] = {0, 0, 0, 0, 0};
+
+    // Periodic EKF state + measurement logging for offline tuning, started
+    // by "kalman start_log" / stopped by "kalman stop_log". Reuses
+    // ScheduledDebugTest's interval/counter machinery but is polled from
+    // runEKF() every cycle (not processDebug()) and deliberately left out of
+    // canScheduleDebugTest()/anyDebugTestActive()/cancelDebugTests(): unlike
+    // the DEBUG-only sensor tests, it must keep logging across state changes
+    // (e.g. during RUN, where the filter is actually being tuned).
+    ScheduledDebugTest kalman_log_test_;
 
     void initEKF();
 
