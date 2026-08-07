@@ -17,6 +17,7 @@
 #include <ArraySensor.h>
 #include <Encoder.h>
 #include <HBridge.h>
+#include <Junkebox.h>
 
 #include <TinyShell.h>
 #include <TinyEKF.h>
@@ -146,6 +147,11 @@ public:
     // cannot run at static-init time like the other members below.
     std::optional<ArraySensor> array_sensor;
     SDCard sd_card;
+    // Constructed in init() once cfg.bzr (settings) is known — same reason
+    // as array_sensor above. Public (not alongside motor_left/imu below)
+    // because state functions in src/robot/ call junkebox->play() directly,
+    // the same way 03_Calibrate.cpp calls array_sensor->calibrate().
+    std::optional<Junkebox> junkebox;
     USBMassStorage usb_storage;
     OTAUpdater ota;
 #ifdef ENABLE_SYSTEM_MONITOR
@@ -253,6 +259,37 @@ private:
     // configure the remaining pins, sourced from settings.data(), once
     // settings.load() has run
     bool configurePinsFromSettings();
+
+    // One-shot I2C bus scan, logged at boot right before imu.emplace()
+    // claims sda_pin/scl_pin. Must run before the IMU's own bus is created:
+    // ICM42688::begin() keeps its i2c_master_bus_handle_t for the object's
+    // whole lifetime (freed only in its destructor, which optional<ICM42688>
+    // never triggers), even when the WHO_AM_I check fails — so the GPIOs are
+    // permanently claimed the moment begin() runs, and any later scan on the
+    // same pins would fail to create its own bus.
+    // @return true if any address ACKed.
+    bool scanI2CBus(uint8_t sda_pin, uint8_t scl_pin);
+
+    // Manual, bit-banged I2C scan run right before scanI2CBus() (same
+    // pin-ownership constraint applies — see its comment above). Purely
+    // diagnostic: drives START/address/ACK/STOP by hand with generous,
+    // way-below-spec timing (hundreds of microseconds per half-bit, vs. the
+    // few microseconds a real 100/400kHz bus allows), so it can still get an
+    // ACK out of a bus too electrically weak (missing external pull-ups,
+    // long wires) for the hardware I2C peripheral's stricter timing, which
+    // just times out instead of ever reporting NACK.
+    // @return true if any address ACKed.
+    bool bitbangI2CScan(uint8_t sda_pin, uint8_t scl_pin);
+
+    // Hand-solder short check: drives one line low (open-drain) while
+    // leaving the other released, then reads the released one. If the
+    // "released" line follows the driven one down, the two nets are
+    // electrically the same wire somewhere (solder bridge between the SDA
+    // and SCL pads/pins) — an idle-level read alone can't tell this apart
+    // from "nothing connected", since a genuinely shorted pair still floats
+    // HIGH together at rest once both are released.
+    // @return true if a short is detected either direction.
+    bool checkSdaSclShort(uint8_t sda_pin, uint8_t scl_pin);
 
     // configure the wifi and the esp-now settings for the robot
     bool configureCommunication();

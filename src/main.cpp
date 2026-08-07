@@ -47,6 +47,8 @@ static StackType_t xEKFStack[M2KB];
 static StaticTask_t xEKFBuffer;
 static StackType_t xInterruptsStack[M2KB];
 static StaticTask_t xInterruptsBuffer;
+static StackType_t xJunkeboxStack[M2KB];
+static StaticTask_t xJunkeboxBuffer;
 
 static void setup_system_callbacks();
 static void start_freertos_tasks();
@@ -125,11 +127,18 @@ static void setup_system_callbacks() {
 }
 
 static void start_freertos_tasks() {
+    // Priority order on PRO_CPU_NUM (core 0 — core 1/APP_CPU_NUM is reserved
+    // for state_machine alone, see CONTRIBUTING.md): EKF (4) > routine (3) >
+    // shell (2) > junkebox (1) > interrupts (0). junkebox sits just above
+    // interrupts because note timing only needs to be roughly on-beat, not
+    // exact — it should never delay EKF sampling, motor routine upkeep or
+    // shell command handling.
     xTaskCreateStaticPinnedToCore(robot.routine,           "routine",       M8KB, NULL, 3,  xRoutineStack,      &xRoutineBuffer,      PRO_CPU_NUM);
     xTaskCreateStaticPinnedToCore(robot.initInterruptions, "interrupts",    M2KB, NULL, 0,  xInterruptsStack,   &xInterruptsBuffer,   PRO_CPU_NUM);
     xTaskCreateStaticPinnedToCore(robot.runStateMachine,   "state_machine", M8KB, NULL, 10, xStateMachineStack, &xStateMachineBuffer, APP_CPU_NUM);
     xTaskCreateStaticPinnedToCore(robot.runShell,          "shell_task",    M8KB, NULL, 2,  xShellStack,        &xShellBuffer,        PRO_CPU_NUM);
     xTaskCreateStaticPinnedToCore(robot.runEKF,            "EKF_task",      M2KB, NULL, 4,  xEKFStack,          &xEKFBuffer,          PRO_CPU_NUM);
+    xTaskCreateStaticPinnedToCore(Junkebox::task,          "junkebox_task", M2KB, &(*robot.junkebox), 1, xJunkeboxStack, &xJunkeboxBuffer, PRO_CPU_NUM);
     ESP_LOGI("ROBOT_MAIN", "All FreeRTOS tasks started successfully");
 }
 

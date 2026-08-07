@@ -13,6 +13,8 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "driver/gpio.h"
+#include "driver/i2c_master.h"
+#include "esp_rom_sys.h"
 #include "esp_wifi.h"
 #include "esp_now.h"
 #include "esp_netif.h"
@@ -558,6 +560,7 @@ void ROBOT::startWrappers() {
     // the same TinyShell module name, which TinyShell allows.
     array_sensor->register_shell_commands(shell, logger, settings);
     Encoder::register_shell_commands(shell, logger, *encoder_left, *encoder_right);
+    junkebox->register_shell_commands(shell, logger);
 
     usb_storage.register_shell_commands(
         shell, logger, sd_card,
@@ -822,6 +825,268 @@ void ROBOT::routine(void *param){
     }
 }
 
+// SDA/SCL short check — see the declaration comment in BallyRobot.h.
+bool ROBOT::checkSdaSclShort(uint8_t sda_pin, uint8_t scl_pin) {
+    const gpio_num_t sda = static_cast<gpio_num_t>(sda_pin);
+    const gpio_num_t scl = static_cast<gpio_num_t>(scl_pin);
+
+    gpio_config_t io_conf = {};
+    io_conf.pin_bit_mask = (1ULL << sda) | (1ULL << scl);
+    io_conf.mode         = GPIO_MODE_INPUT_OUTPUT_OD;
+    io_conf.pull_up_en   = GPIO_PULLUP_ENABLE;
+    io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    io_conf.intr_type    = GPIO_INTR_DISABLE;
+    if (gpio_config(&io_conf) != ESP_OK) {
+        ESP_LOGW("I2C_SCAN", "short check: failed to configure SDA=%u SCL=%u", sda_pin, scl_pin);
+        return false;
+    }
+
+    gpio_set_level(sda, 1);
+    gpio_set_level(scl, 1);
+    esp_rom_delay_us(200);  // let both settle HIGH before probing
+
+    // Drive SDA low, leave SCL released: if shorted, SCL gets dragged down too.
+    gpio_set_level(sda, 0);
+    esp_rom_delay_us(200);
+    const bool scl_follows_sda = (gpio_get_level(scl) == 0);
+    gpio_set_level(sda, 1);
+    esp_rom_delay_us(200);
+
+    // Drive SCL low, leave SDA released: if shorted, SDA gets dragged down too.
+    gpio_set_level(scl, 0);
+    esp_rom_delay_us(200);
+    const bool sda_follows_scl = (gpio_get_level(sda) == 0);
+    gpio_set_level(scl, 1);
+    esp_rom_delay_us(200);
+
+    gpio_reset_pin(sda);
+    gpio_reset_pin(scl);
+
+    const bool shorted = scl_follows_sda || sda_follows_scl;
+    if (shorted) {
+        ESP_LOGW("I2C_SCAN",
+                "SDA(%u)/SCL(%u) SHORT DETECTED: driving SDA low pulls SCL %s; driving SCL low pulls SDA %s",
+                sda_pin, scl_pin,
+                scl_follows_sda ? "LOW too" : "stays HIGH",
+                sda_follows_scl ? "LOW too" : "stays HIGH");
+        logger.insert_logf(logType::WARN,
+                           "I2C short check: SDA(%u)/SCL(%u) appear shorted together",
+                           sda_pin, scl_pin);
+    } else {
+        ESP_LOGI("I2C_SCAN", "short check: no short between SDA=%u SCL=%u", sda_pin, scl_pin);
+    }
+    return shorted;
+}
+
+// Manual, bit-banged I2C scan — see the declaration comment in BallyRobot.h
+// for why this exists alongside the hardware-peripheral scanI2CBus().
+bool ROBOT::bitbangI2CScan(uint8_t sda_pin, uint8_t scl_pin) {
+    const gpio_num_t   sda          = static_cast<gpio_num_t>(sda_pin);
+    const gpio_num_t   scl          = static_cast<gpio_num_t>(scl_pin);
+    const uint32_t      half_bit_us = 300;   // ~1.6kHz — deliberately far below the 100/400kHz a real bus targets
+    const uint32_t      rise_wait_us = 5000; // how long to tolerate a slow/clock-stretched rising edge before giving up
+
+    gpio_config_t io_conf = {};
+    io_conf.pin_bit_mask = (1ULL << sda) | (1ULL << scl);
+    io_conf.mode         = GPIO_MODE_INPUT_OUTPUT_OD;  // open-drain: writing 1 releases the line to the pull-up, 0 drives it low
+    io_conf.pull_up_en   = GPIO_PULLUP_ENABLE;
+    io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    io_conf.intr_type    = GPIO_INTR_DISABLE;
+    if (gpio_config(&io_conf) != ESP_OK) {
+        ESP_LOGW("I2C_SCAN", "bitbang: failed to configure SDA=%u SCL=%u as open-drain", sda_pin, scl_pin);
+        return false;
+    }
+
+    // Releases a line and waits for it to actually read HIGH (clock
+    // stretching / slow-pullup tolerant), instead of assuming it rose the
+    // instant we stopped driving it low.
+    auto release_and_wait_high = [&](gpio_num_t pin) -> bool {
+        gpio_set_level(pin, 1);
+        uint32_t waited = 0;
+        while (gpio_get_level(pin) == 0 && waited < rise_wait_us) {
+            esp_rom_delay_us(10);
+            waited += 10;
+        }
+        return gpio_get_level(pin) == 1;
+    };
+
+    // Idle both lines before starting.
+    if (!release_and_wait_high(sda) || !release_and_wait_high(scl)) {
+        ESP_LOGW("I2C_SCAN", "bitbang: SDA/SCL never settled HIGH before starting — bus genuinely stuck low");
+        logger.insert_log(logType::WARN, "I2C bitbang: SDA/SCL stuck low, aborting");
+        gpio_reset_pin(sda);
+        gpio_reset_pin(scl);
+        return false;
+    }
+    esp_rom_delay_us(half_bit_us);
+
+    std::string found;
+    char        addr_str[8];
+    bool        scl_ever_stuck = false;
+
+    for (uint8_t addr7 = 0x08; addr7 <= 0x77; ++addr7) {
+        // START: SDA high->low while SCL is high.
+        gpio_set_level(sda, 1);
+        gpio_set_level(scl, 1);
+        esp_rom_delay_us(half_bit_us);
+        gpio_set_level(sda, 0);
+        esp_rom_delay_us(half_bit_us);
+        gpio_set_level(scl, 0);
+        esp_rom_delay_us(half_bit_us);
+
+        // 7-bit address + write bit, MSB first.
+        const uint8_t byte = static_cast<uint8_t>(addr7 << 1);
+        for (int8_t bit = 7; bit >= 0; --bit) {
+            gpio_set_level(sda, (byte >> bit) & 0x01);
+            esp_rom_delay_us(half_bit_us);
+            if (!release_and_wait_high(scl)) scl_ever_stuck = true;
+            esp_rom_delay_us(half_bit_us);
+            gpio_set_level(scl, 0);
+            esp_rom_delay_us(half_bit_us);
+        }
+
+        // ACK bit: release SDA, pulse SCL high, sample SDA while it's high.
+        gpio_set_level(sda, 1);
+        esp_rom_delay_us(half_bit_us);
+        if (!release_and_wait_high(scl)) scl_ever_stuck = true;
+        esp_rom_delay_us(half_bit_us);
+        const bool acked = (gpio_get_level(sda) == 0);
+        gpio_set_level(scl, 0);
+        esp_rom_delay_us(half_bit_us);
+
+        // STOP: SDA low->high while SCL is high.
+        gpio_set_level(sda, 0);
+        esp_rom_delay_us(half_bit_us);
+        if (!release_and_wait_high(scl)) scl_ever_stuck = true;
+        esp_rom_delay_us(half_bit_us);
+        gpio_set_level(sda, 1);
+        esp_rom_delay_us(half_bit_us);
+
+        if (acked) {
+            snprintf(addr_str, sizeof(addr_str), " 0x%02X", addr7);
+            found += addr_str;
+        }
+    }
+
+    gpio_reset_pin(sda);
+    gpio_reset_pin(scl);
+
+    if (scl_ever_stuck) {
+        ESP_LOGW("I2C_SCAN", "bitbang: SCL failed to rise within %u us at least once during the sweep",
+                (unsigned)rise_wait_us);
+    }
+
+    if (found.empty()) {
+        ESP_LOGW("I2C_SCAN", "bitbang SDA=%u SCL=%u: no devices found", sda_pin, scl_pin);
+        logger.insert_logf(logType::WARN, "I2C bitbang (SDA=%u SCL=%u): no devices found", sda_pin, scl_pin);
+        return false;
+    }
+
+    ESP_LOGI("I2C_SCAN", "bitbang SDA=%u SCL=%u: found%s", sda_pin, scl_pin, found.c_str());
+    logger.insert_logf(logType::INFO, "I2C bitbang (SDA=%u SCL=%u): found%s", sda_pin, scl_pin, found.c_str());
+    return true;
+}
+
+// Probes every valid 7-bit address on sda_pin/scl_pin and logs which ones
+// ACK. Must be called before anything else creates an I2C bus on those
+// pins — see the declaration comment in BallyRobot.h.
+bool ROBOT::scanI2CBus(uint8_t sda_pin, uint8_t scl_pin) {
+    // Plain digital-input check, no I2C protocol involved: with only the
+    // ESP32's own weak (~45kOhm) internal pull-up active, does each line
+    // even settle HIGH at DC? If a line still reads LOW here, no amount of
+    // I2C driver tuning fixes that — the internal pull-up isn't strong
+    // enough to overcome whatever is holding that net down (missing
+    // external pull-up on a board that needs one, a short, a miswired
+    // ground, ...). This is exactly the "probe device timeout" symptom
+    // (ESP_ERR_TIMEOUT, not ESP_ERR_NOT_FOUND) seen on every address: the
+    // bus never reaches idle-high in the first place.
+    {
+        gpio_num_t sda_gpio = static_cast<gpio_num_t>(sda_pin);
+        gpio_num_t scl_gpio = static_cast<gpio_num_t>(scl_pin);
+        gpio_reset_pin(sda_gpio);
+        gpio_reset_pin(scl_gpio);
+        gpio_set_direction(sda_gpio, GPIO_MODE_INPUT);
+        gpio_set_direction(scl_gpio, GPIO_MODE_INPUT);
+        gpio_set_pull_mode(sda_gpio, GPIO_PULLUP_ONLY);
+        gpio_set_pull_mode(scl_gpio, GPIO_PULLUP_ONLY);
+        vTaskDelay(pdMS_TO_TICKS(2));  // let the weak pull-up settle
+
+        int sda_level = gpio_get_level(sda_gpio);
+        int scl_level = gpio_get_level(scl_gpio);
+        ESP_LOGI("I2C_SCAN", "idle level (internal pull-up only): SDA(%u)=%s SCL(%u)=%s",
+                sda_pin, sda_level ? "HIGH" : "LOW", scl_pin, scl_level ? "HIGH" : "LOW");
+        logger.insert_logf(logType::INFO,
+                           "I2C idle check: SDA(%u)=%s SCL(%u)=%s",
+                           sda_pin, sda_level ? "HIGH" : "LOW", scl_pin, scl_level ? "HIGH" : "LOW");
+
+        if (sda_level == 0 || scl_level == 0) {
+            ESP_LOGW("I2C_SCAN",
+                    "line reads LOW at idle even with the internal pull-up -- "
+                    "this is a wiring/power problem (missing external pull-up, "
+                    "short, bad ground, or unpowered/faulty IMU sinking the "
+                    "line), not something firmware can fix");
+        }
+
+        // Hand the pins back undecorated; i2c_new_master_bus() below
+        // configures them itself (including its own pull-up flag).
+        gpio_reset_pin(sda_gpio);
+        gpio_reset_pin(scl_gpio);
+    }
+
+    i2c_master_bus_config_t bus_config = {};
+    bus_config.i2c_port                     = -1;  // let the driver pick a free port
+    bus_config.sda_io_num                   = static_cast<gpio_num_t>(sda_pin);
+    bus_config.scl_io_num                   = static_cast<gpio_num_t>(scl_pin);
+    bus_config.clk_source                   = I2C_CLK_SRC_DEFAULT;
+    bus_config.glitch_ignore_cnt            = 7;
+    bus_config.flags.enable_internal_pullup = true;
+
+    i2c_master_bus_handle_t bus_handle = nullptr;
+    if (i2c_new_master_bus(&bus_config, &bus_handle) != ESP_OK) {
+        ESP_LOGW("I2C_SCAN", "failed to open bus on SDA=%u SCL=%u", sda_pin, scl_pin);
+        logger.insert_logf(logType::WARN,
+                           "I2C scan: failed to open bus on SDA=%u SCL=%u",
+                           sda_pin, scl_pin);
+        return false;
+    }
+
+    // Every unanswered address makes i2c_master_probe() itself log an
+    // ESP_LOGE "probe device timeout" line — silence that component for the
+    // duration of the sweep so an (expected, common) empty/near-empty bus
+    // doesn't spam the console with dozens of misleading error lines.
+    esp_log_level_t prev_i2c_log_level = esp_log_level_get("i2c.master");
+    esp_log_level_set("i2c.master", ESP_LOG_NONE);
+
+    std::string found;
+    char        addr_str[8];
+    for (uint8_t addr = 0x08; addr <= 0x77; ++addr) {
+        if (i2c_master_probe(bus_handle, addr, 30) == ESP_OK) {
+            snprintf(addr_str, sizeof(addr_str), " 0x%02X", addr);
+            found += addr_str;
+        }
+    }
+
+    esp_log_level_set("i2c.master", prev_i2c_log_level);
+    i2c_del_master_bus(bus_handle);
+
+    // Sent both ways: ESP_LOG so it shows up immediately on a serial
+    // monitor, and through the logger (ESP-NOW to the ground station, see
+    // main.cpp's set_send_callback) so it's also visible there.
+    if (found.empty()) {
+        ESP_LOGW("I2C_SCAN", "SDA=%u SCL=%u: no devices found", sda_pin, scl_pin);
+        logger.insert_logf(logType::WARN,
+                           "I2C scan (SDA=%u SCL=%u): no devices found",
+                           sda_pin, scl_pin);
+        return false;
+    }
+
+    ESP_LOGI("I2C_SCAN", "SDA=%u SCL=%u: found%s", sda_pin, scl_pin, found.c_str());
+    logger.insert_logf(logType::INFO,
+                       "I2C scan (SDA=%u SCL=%u): found%s",
+                       sda_pin, scl_pin, found.c_str());
+    return true;
+}
+
 bool ROBOT::init() {
     if (initialized)
         return true;
@@ -881,6 +1146,57 @@ bool ROBOT::init() {
     // reserved exactly for this pair of H-bridges.
     motor_left.emplace(cfg.ain1, cfg.ain2, CH0, CH1);
     motor_right.emplace(cfg.bin1, cfg.bin2, CH2, CH3);
+    junkebox.emplace(cfg.bzr, CH4);
+    // ===================== TEMPORARY: IMU wiring test loop =====================
+    // Provisional — remove this block (and un-comment the two lines below
+    // it) once the IMU's physical wiring is confirmed. Blocks here forever,
+    // before the rest of the robot boots, re-scanning the I2C bus on a loop
+    // so wiring can be probed live without needing to watch the serial
+    // monitor:
+    //   LED_GREEN  solid -> scanI2CBus   (hardware driver) found a device
+    //   LED_BLUE   solid -> bitbangI2CScan (manual, relaxed timing) found one
+    //   LED_RED    solid -> neither scan found anything on this pass
+    //   LED_YELLOW toggles every pass, as a "still running" heartbeat
+    //   ALL FOUR blinking together -> checkSdaSclShort detected SDA/SCL
+    //     shorted together (e.g. a hand-soldering bridge); overrides the
+    //     pattern above for that pass since it means the scans above are
+    //     moot until the short is fixed
+    {
+        const gpio_num_t led_blue   = static_cast<gpio_num_t>(cfg.led0);
+        const gpio_num_t led_green  = static_cast<gpio_num_t>(cfg.led1);
+        const gpio_num_t led_yellow = static_cast<gpio_num_t>(cfg.led2);
+        const gpio_num_t led_red    = static_cast<gpio_num_t>(cfg.led3);
+        bool heartbeat = false;
+
+        while (true) {
+            const bool shorted        = checkSdaSclShort(cfg.sda_pin, cfg.scl_pin);
+            const bool bitbang_found  = bitbangI2CScan(cfg.sda_pin, cfg.scl_pin);
+            const bool hardware_found = scanI2CBus(cfg.sda_pin, cfg.scl_pin);
+
+            heartbeat = !heartbeat;
+
+            if (shorted) {
+                gpio_set_level(led_blue,   heartbeat);
+                gpio_set_level(led_green,  heartbeat);
+                gpio_set_level(led_red,    heartbeat);
+                gpio_set_level(led_yellow, heartbeat);
+            } else {
+                gpio_set_level(led_blue,  bitbang_found);
+                gpio_set_level(led_green, hardware_found);
+                gpio_set_level(led_red,   !(bitbang_found || hardware_found));
+                gpio_set_level(led_yellow, heartbeat);
+            }
+
+            vTaskDelay(pdMS_TO_TICKS(500));
+        }
+    }
+    // ===================== end temporary block =====================
+
+    // Must run before imu.emplace()/imu->begin() permanently claim these
+    // pins for the IMU's own I2C bus (see scanI2CBus()'s comment in the
+    // header).
+    // bitbangI2CScan(cfg.sda_pin, cfg.scl_pin);
+    // scanI2CBus(cfg.sda_pin, cfg.scl_pin);
     imu.emplace(cfg.sda_pin, cfg.scl_pin, IMU_I2C_ADDRESS);
 
 #ifdef ENABLE_SYSTEM_MONITOR
@@ -949,6 +1265,13 @@ bool ROBOT::init() {
     if (!imu_ready_) {
         ROBOT::logger.insert_log(logType::WARN,
                                  "IMU (ICM42688) not detected; EKF running on encoders only");
+    }
+
+    // Not fatal: a buzzer that fails to configure just means no music, not
+    // a robot that can't drive.
+    if (junkebox->begin(sd_card) != ESP_OK) {
+        ROBOT::logger.insert_log(logType::WARN,
+                                 "Failed to initialize buzzer (Junkebox); music disabled");
     }
 
     setTimeLimit();

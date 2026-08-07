@@ -96,6 +96,10 @@
 #define CH1             1
 #define CH2             2
 #define CH3             3
+// Dedicated to Junkebox's buzzer. Deliberately its own LEDC channel/timer,
+// never shared with CH0..CH3: Junkebox changes its timer's frequency per
+// note, which would detune the H-bridges' fixed 5kHz PWM if they shared it.
+#define CH4             4
 
 // -------------------- OTA over Wi-Fi (DEBUG state) --------------------
 // wifi.txt is already its own SD-backed, shell-editable config (see
