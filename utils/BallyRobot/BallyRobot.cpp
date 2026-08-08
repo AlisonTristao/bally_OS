@@ -405,8 +405,72 @@ bool ROBOT::consumeDirectShellOutputRequest() {
 void ROBOT::checkStateMachine() {
     if ((uint32_t)(esp_timer_get_time() / 1000ULL) - instance_->stateMachineTimer > instance_->settings.data().delay_flags) {
         ROBOT::machine.next(ROBOT::buttons.getFlags());
-        instance_->stateMachineTimer = (uint32_t)(esp_timer_get_time() / 1000ULL);  
-    }   
+        instance_->stateMachineTimer = (uint32_t)(esp_timer_get_time() / 1000ULL);
+    }
+}
+
+namespace {
+struct SoundTrigger {
+    stateName from_state; // NONE means "from any state" — never a live state
+                          // past boot (see StateMachine::current_state.store(SETUP, ...)
+                          // in main.cpp), so it's safe to reuse as a wildcard.
+    stateName to_state;
+    BuiltinSound sound;
+};
+
+// FROM STATE (NONE = any) | TO STATE | SOUND
+constexpr SoundTrigger kSoundTriggerTable[] = {
+{ NONE, ERROR, BuiltinSound::Error },
+};
+} // namespace
+
+// Diffs buttons/sideSensors/state against the previous routine() pass and
+// triggers the matching Junkebox::BuiltinSound — see kSoundTriggerTable
+// above for state transitions. previous_buttons_/previous_side_sensors_/
+// previous_state_ (BallyRobot.h) are plain copies, not references: updating
+// them here never touches buttons/sideSensors/StateMachine, they only exist
+// to be diffed against on the next pass.
+//
+// Junkebox::play() always interrupts whatever is currently queued/playing,
+// so if more than one of these fires in the same pass, only the last
+// play() call below is actually heard — the order here (button, then side
+// sensor, then state) is a deliberate priority, state being the most
+// significant event.
+void ROBOT::updateSoundFeedback() {
+    const uint8_t current_buttons = buttons.getFlags();
+    const uint8_t current_side_sensors = sideSensors.getFlags();
+    const stateName current_state =
+        static_cast<stateName>(StateMachine::current_state.load(std::memory_order_acquire));
+
+    // Button press edge: any bit that just turned on since the last pass —
+    // buttons already self-clears each flag after settings.delay_flags (see
+    // resetFlags()/Flags_in::checkFlagsDuration), so a held button only
+    // edges once.
+    if ((current_buttons & ~previous_buttons_) != 0) {
+        junkebox->play(BuiltinSound::Click);
+    }
+
+    // Side-sensor edge: same rising-edge logic as buttons, own sound —
+    // side sensors can trigger a lot faster/more often on a line-following
+    // pass, so Ping is deliberately shorter than Click.
+    if ((current_side_sensors & ~previous_side_sensors_) != 0) {
+        junkebox->play(BuiltinSound::Ping);
+    }
+
+    // State transition: first table row matching (from, to) wins.
+    if (current_state != previous_state_) {
+        for (const SoundTrigger& trigger : kSoundTriggerTable) {
+            if (trigger.to_state == current_state &&
+                (trigger.from_state == NONE || trigger.from_state == previous_state_)) {
+                junkebox->play(trigger.sound);
+                break;
+            }
+        }
+    }
+
+    previous_buttons_ = current_buttons;
+    previous_side_sensors_ = current_side_sensors;
+    previous_state_ = current_state;
 }
 
 // ==============================================================================
@@ -821,6 +885,7 @@ void ROBOT::routine(void *param){
         instance_->resetFlags();                    // reset the flags - buttons, side sensors, pwm...
         instance_->setOutputs();                    // set the output - leds, pwm...
         instance_->checkStateMachine();             // cheg the next state of the state machine
+        instance_->updateSoundFeedback();           // react to the changes above with a Junkebox sound
         vTaskDelay(WDOG_TIMEOUT_TK); // delay for wathdog timer and to allow other tasks to run
     }
 }

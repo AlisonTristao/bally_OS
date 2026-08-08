@@ -209,6 +209,17 @@ private:
     Flags_out leds;
     Flags_pwm motors;
 
+    // Reacts to a button/side-sensor flag edge or a state transition (see
+    // kSoundTriggerTable in BallyRobot.cpp) by triggering the matching
+    // Junkebox::BuiltinSound. Lives here, not in Junkebox: it combines
+    // buttons/sideSensors + StateMachine + junkebox with no single natural
+    // owner — exactly the case CONTRIBUTING.md's decision rule puts on
+    // ROBOT. Called once per routine() pass, after checkStateMachine().
+    void updateSoundFeedback();
+    uint8_t   previous_buttons_ = 0;      // buttons.getFlags() as of the last call
+    uint8_t   previous_side_sensors_ = 0; // sideSensors.getFlags() as of the last call
+    stateName previous_state_ = NONE;     // StateMachine::current_state as of the last call
+
     // save a instance of the ROBOT class to be used in the static functions
     static ROBOT* instance_;
     bool initialized = false;
