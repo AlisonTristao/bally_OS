@@ -691,6 +691,18 @@ void ROBOT::registerRobotIOCommands() {
         instance_->leds.setFlag(pin, time);
         return RESULT_OK;
     }, "set_led", "turn on a LED", "robot");
+
+    // Not a Flags_pwm command like the ones above: the buzzer needs a
+    // frequency in Hz, not a -100..100 duty percentage, so it doesn't fit
+    // that struct's semantics. Junkebox::play_tone() gives the same
+    // "one-shot, auto-stops after `time`" safety directly instead.
+    shell.add([](uint32_t freq_hz, uint32_t time) -> uint8_t {
+        if (!instance_->junkebox->play_tone(static_cast<uint16_t>(freq_hz), time)) {
+            ROBOT::logger.insert_log(logType::ERRO, "Junkebox is not initialized yet");
+            return RESULT_ERROR;
+        }
+        return RESULT_OK;
+    }, "test_buzzer", "Play a raw tone on the buzzer, bypassing note parsing: freq_hz,duration_ms", "robot");
 }
 
 void ROBOT::registerKalmanCommands() {
@@ -1212,56 +1224,12 @@ bool ROBOT::init() {
     motor_left.emplace(cfg.ain1, cfg.ain2, CH0, CH1);
     motor_right.emplace(cfg.bin1, cfg.bin2, CH2, CH3);
     junkebox.emplace(cfg.bzr, CH4);
-    // ===================== TEMPORARY: IMU wiring test loop =====================
-    // Provisional — remove this block (and un-comment the two lines below
-    // it) once the IMU's physical wiring is confirmed. Blocks here forever,
-    // before the rest of the robot boots, re-scanning the I2C bus on a loop
-    // so wiring can be probed live without needing to watch the serial
-    // monitor:
-    //   LED_GREEN  solid -> scanI2CBus   (hardware driver) found a device
-    //   LED_BLUE   solid -> bitbangI2CScan (manual, relaxed timing) found one
-    //   LED_RED    solid -> neither scan found anything on this pass
-    //   LED_YELLOW toggles every pass, as a "still running" heartbeat
-    //   ALL FOUR blinking together -> checkSdaSclShort detected SDA/SCL
-    //     shorted together (e.g. a hand-soldering bridge); overrides the
-    //     pattern above for that pass since it means the scans above are
-    //     moot until the short is fixed
-    {
-        const gpio_num_t led_blue   = static_cast<gpio_num_t>(cfg.led0);
-        const gpio_num_t led_green  = static_cast<gpio_num_t>(cfg.led1);
-        const gpio_num_t led_yellow = static_cast<gpio_num_t>(cfg.led2);
-        const gpio_num_t led_red    = static_cast<gpio_num_t>(cfg.led3);
-        bool heartbeat = false;
-
-        while (true) {
-            const bool shorted        = checkSdaSclShort(cfg.sda_pin, cfg.scl_pin);
-            const bool bitbang_found  = bitbangI2CScan(cfg.sda_pin, cfg.scl_pin);
-            const bool hardware_found = scanI2CBus(cfg.sda_pin, cfg.scl_pin);
-
-            heartbeat = !heartbeat;
-
-            if (shorted) {
-                gpio_set_level(led_blue,   heartbeat);
-                gpio_set_level(led_green,  heartbeat);
-                gpio_set_level(led_red,    heartbeat);
-                gpio_set_level(led_yellow, heartbeat);
-            } else {
-                gpio_set_level(led_blue,  bitbang_found);
-                gpio_set_level(led_green, hardware_found);
-                gpio_set_level(led_red,   !(bitbang_found || hardware_found));
-                gpio_set_level(led_yellow, heartbeat);
-            }
-
-            vTaskDelay(pdMS_TO_TICKS(500));
-        }
-    }
-    // ===================== end temporary block =====================
 
     // Must run before imu.emplace()/imu->begin() permanently claim these
     // pins for the IMU's own I2C bus (see scanI2CBus()'s comment in the
     // header).
-    // bitbangI2CScan(cfg.sda_pin, cfg.scl_pin);
-    // scanI2CBus(cfg.sda_pin, cfg.scl_pin);
+    bitbangI2CScan(cfg.sda_pin, cfg.scl_pin);
+    scanI2CBus(cfg.sda_pin, cfg.scl_pin);
     imu.emplace(cfg.sda_pin, cfg.scl_pin, IMU_I2C_ADDRESS);
 
 #ifdef ENABLE_SYSTEM_MONITOR
@@ -1334,9 +1302,13 @@ bool ROBOT::init() {
 
     // Not fatal: a buzzer that fails to configure just means no music, not
     // a robot that can't drive.
-    if (junkebox->begin(sd_card) != ESP_OK) {
-        ROBOT::logger.insert_log(logType::WARN,
-                                 "Failed to initialize buzzer (Junkebox); music disabled");
+    const esp_err_t junkebox_err = junkebox->begin(sd_card);
+    if (junkebox_err != ESP_OK) {
+        ESP_LOGW("ROBOT_INIT", "Failed to initialize buzzer (Junkebox): 0x%x (pin=%u)",
+                junkebox_err, cfg.bzr);
+        ROBOT::logger.insert_logf(logType::WARN,
+                                  "Failed to initialize buzzer (Junkebox): 0x%x; music disabled",
+                                  junkebox_err);
     }
 
     setTimeLimit();

@@ -100,11 +100,21 @@ esp_err_t Junkebox::begin(SDCard& card) {
     err = ledc_channel_config(&ch_cfg);
     if (err != ESP_OK) return err;
 
+    // Max GPIO drive strength (default is GPIO_DRIVE_CAP_2, ~20mA) — lets
+    // the pin charge/discharge the piezo element faster, which is the
+    // software-only lever for louder output on a passive buzzer driven
+    // straight off a GPIO. Set after ledc_channel_config() so it's not the
+    // one getting reset by the pin's function/mux setup. Not fatal if the
+    // pin doesn't support it — worst case the buzzer is just as quiet as
+    // before, not worth failing begin() over.
+    gpio_set_drive_capability(gpio, GPIO_DRIVE_CAP_3);
+
     request_queue_ = xQueueCreate(1, sizeof(PlayRequest));
     if (request_queue_ == nullptr) {
         return ESP_ERR_NO_MEM;
     }
 
+    hw_configured_ = true;
     return ESP_OK;
 }
 
@@ -125,6 +135,7 @@ bool Junkebox::play(const char* path) {
     }
 
     PlayRequest req{};
+    req.kind = PlayRequest::Kind::SdFile;
     strncpy(req.path, path, sizeof(req.path) - 1);
 
     // Overwrite rather than send: a song already queued but not yet
@@ -140,7 +151,23 @@ bool Junkebox::play(BuiltinSound sound) {
     }
 
     PlayRequest req{};
+    req.kind = PlayRequest::Kind::Builtin;
     req.builtin_notes = JunkeboxBuiltinSongs::text_for(sound);
+
+    xQueueOverwrite(request_queue_, &req);
+    xTaskNotifyGive(task_handle_);
+    return true;
+}
+
+bool Junkebox::play_tone(uint16_t freq_hz, uint32_t duration_ms) {
+    if (!ready_.load(std::memory_order_acquire)) {
+        return false;
+    }
+
+    PlayRequest req{};
+    req.kind = PlayRequest::Kind::RawTone;
+    req.raw_freq_hz = freq_hz;
+    req.raw_duration_ms = duration_ms;
 
     xQueueOverwrite(request_queue_, &req);
     xTaskNotifyGive(task_handle_);
@@ -163,6 +190,18 @@ void Junkebox::task(void* param) {
 
 void Junkebox::run_loop() {
     task_handle_ = xTaskGetCurrentTaskHandle();
+
+    if (!hw_configured_) {
+        // begin() failed (bad pin, LEDC channel/timer already claimed,
+        // ...) — ROBOT::init() already logged why. Never publish ready_:
+        // staying idle here is what makes play()/stop() correctly report
+        // "not initialized" instead of silently accepting a request that
+        // set_tone() could only fail on a channel that was never configured.
+        ESP_LOGE(TAG, "begin() never configured the buzzer hardware; Junkebox staying idle");
+        vTaskSuspend(nullptr);
+        return;
+    }
+
     ready_.store(true, std::memory_order_release);
 
     while (true) {
@@ -174,10 +213,17 @@ void Junkebox::run_loop() {
         ulTaskNotifyTake(pdTRUE, 0);
 
         playing_.store(true, std::memory_order_release);
-        if (req.builtin_notes != nullptr) {
-            play_builtin_notes(req.builtin_notes);
-        } else {
-            play_file(req.path);
+        switch (req.kind) {
+            case PlayRequest::Kind::Builtin:
+                play_builtin_notes(req.builtin_notes);
+                break;
+            case PlayRequest::Kind::RawTone:
+                play_raw_tone(req.raw_freq_hz, req.raw_duration_ms);
+                break;
+            case PlayRequest::Kind::SdFile:
+            default:
+                play_file(req.path);
+                break;
         }
         set_tone(0);
         playing_.store(false, std::memory_order_release);
@@ -220,6 +266,19 @@ void Junkebox::play_builtin_notes(const char* notes) {
     play_buffer(len);
 }
 
+// Single note, no parsing: set_tone() straight from the raw (freq_hz,
+// duration_ms) play_tone() queued — same interruptible wait as a note
+// inside play_buffer(), just without a file_buffer_ line to read it from.
+void Junkebox::play_raw_tone(uint16_t freq_hz, uint32_t duration_ms) {
+    const esp_err_t err = set_tone(freq_hz);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "set_tone(%u) failed: 0x%x", freq_hz, err);
+        return;
+    }
+
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(duration_ms));
+}
+
 // Parses and plays the note lines already sitting in file_buffer_[0..length)
 // — shared by play_file() (SD-read bytes) and play_builtin_notes() (a
 // compiled-in string copied in first, since it lives in read-only rodata
@@ -242,7 +301,10 @@ void Junkebox::play_buffer(size_t length) {
         uint32_t duration_ms = 0;
         if (!parse_note_line(line, freq_hz, duration_ms)) continue;
 
-        set_tone(freq_hz);
+        const esp_err_t tone_err = set_tone(freq_hz);
+        if (tone_err != ESP_OK) {
+            ESP_LOGW(TAG, "set_tone(%u) failed: 0x%x", freq_hz, tone_err);
+        }
 
         // Waits for the note's duration, but returns immediately (>0) if
         // play()/stop() signals the task in the meantime — that's how

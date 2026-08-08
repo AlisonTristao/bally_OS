@@ -80,6 +80,17 @@ public:
      */
     bool play(BuiltinSound sound);
 
+    /**
+     * @brief Queue a single raw tone for playback and return immediately —
+     * bypasses note-name parsing entirely, straight to set_tone(). Meant
+     * for hardware bring-up/testing (the "robot test_buzzer" shell command),
+     * not regular playback. Same interrupt-and-switch semantics as the
+     * other play() overloads.
+     * @param freq_hz 0 plays silence (still useful to test "buzzer off").
+     * @return false when Junkebox has not finished begin()/task() startup.
+     */
+    bool play_tone(uint16_t freq_hz, uint32_t duration_ms);
+
     /// Silence the buzzer immediately, mid-note if necessary, and go idle.
     void stop();
 
@@ -114,16 +125,22 @@ private:
     static constexpr uint32_t PWM_DUTY_50_PCT = 128; // ~50% of an 8-bit (255) duty range
 
     struct PlayRequest {
-        char path[MAX_PATH_LENGTH];
+        enum class Kind : uint8_t { SdFile, Builtin, RawTone };
+        Kind kind = Kind::SdFile;
+
+        char path[MAX_PATH_LENGTH];  // Kind::SdFile
         // Non-null => a compiled-in sound: play this note text (BuiltinSongs.h
         // static rodata, so it's safe to keep just the pointer) instead of
         // reading `path` from the SD card. Set by play(BuiltinSound).
-        const char* builtin_notes = nullptr;
+        const char* builtin_notes = nullptr;  // Kind::Builtin
+        uint16_t raw_freq_hz = 0;             // Kind::RawTone
+        uint32_t raw_duration_ms = 0;         // Kind::RawTone
     };
 
     void run_loop();
     void play_file(const char* path);
     void play_builtin_notes(const char* notes);
+    void play_raw_tone(uint16_t freq_hz, uint32_t duration_ms);
     void play_buffer(size_t length);
     bool parse_note_line(char* line, uint16_t& freq_hz, uint32_t& duration_ms) const;
     esp_err_t set_tone(uint16_t freq_hz);
@@ -132,9 +149,17 @@ private:
     const uint8_t channel_;
     SDCard* card_ = nullptr;
 
-    // Written once by begin() before the task is ever created; read by
-    // play()/stop() (any task) to reject calls made before startup, and by
-    // run_loop() itself (its own task) to publish task_handle_.
+    // Set by begin() only once every hardware step (LEDC timer/channel,
+    // request queue) actually succeeds. task()/run_loop() is still created
+    // unconditionally in main.cpp regardless of begin()'s result — this is
+    // what stops it from publishing ready_ (and silently accepting play()
+    // calls it could never act on: set_tone() on a channel begin() never
+    // configured) when the hardware setup failed.
+    bool hw_configured_ = false;
+
+    // Set true by run_loop() only after confirming hw_configured_; read by
+    // play()/stop() (any task) to reject calls made before startup or after
+    // a failed begin().
     std::atomic<bool> ready_{false};
     // Written only by run_loop() at task entry (before ready_ is set, so no
     // reader races it); read by play()/stop() to target the notification.
