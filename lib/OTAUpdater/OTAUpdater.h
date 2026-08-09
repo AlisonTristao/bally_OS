@@ -77,6 +77,11 @@ struct OtaTuning {
  * "<hostname>.local" over mDNS (see OtaTuning::hostname) so the upload URL
  * does not depend on knowing its IP.
  *
+ * While serving, GET /status answers with a small JSON body (device,
+ * online, firmware, ota_ready) so an external tool can poll
+ * "http://<hostname>.local/status" and know it is safe to POST /update
+ * before actually starting an upload.
+ *
  * A write that finishes successfully does not reboot on its own: it just
  * sets the new image as the active boot partition, then leaves OTA the same
  * way a button press does (Wi-Fi down, ESP-NOW channel restored). The new
@@ -259,6 +264,7 @@ private:
 
     static esp_err_t handle_root_get(httpd_req_t* req);
     static esp_err_t handle_update_post(httpd_req_t* req);
+    static esp_err_t handle_status_get(httpd_req_t* req);
 
     /**
      * @brief esp_timer callback (ESP_TIMER_TASK), scheduled from

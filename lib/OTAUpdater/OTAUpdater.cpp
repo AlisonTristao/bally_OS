@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include "esp_app_desc.h"
 #include "esp_log.h"
 #include "esp_now.h"
 #include "esp_ota_ops.h"
@@ -535,9 +536,14 @@ bool OTAUpdater::start_http_server() {
         .uri = "/update", .method = HTTP_POST,
         .handler = &OTAUpdater::handle_update_post, .user_ctx = this,
     };
+    const httpd_uri_t status_uri = {
+        .uri = "/status", .method = HTTP_GET,
+        .handler = &OTAUpdater::handle_status_get, .user_ctx = this,
+    };
 
     httpd_register_uri_handler(server_, &root_uri);
     httpd_register_uri_handler(server_, &update_uri);
+    httpd_register_uri_handler(server_, &status_uri);
     return true;
 }
 
@@ -555,6 +561,26 @@ esp_err_t OTAUpdater::handle_root_get(httpd_req_t* req) {
 
     httpd_resp_set_type(req, "text/html");
     return httpd_resp_send(req, page, HTTPD_RESP_USE_STRLEN);
+}
+
+// Polled by an external tool (e.g. the upload script behind
+// platformio.ini's upload_command) against http://<hostname>.local/status
+// to find out it is safe to POST /update, without having to guess at
+// timeouts around when OTA actually finished connecting. Reachable at all
+// only while phase() == SERVING, so "online" is always true here; ota_ready
+// goes false while a firmware write is already in progress (is_flashing()).
+esp_err_t OTAUpdater::handle_status_get(httpd_req_t* req) {
+    auto* self = static_cast<OTAUpdater*>(req->user_ctx);
+    const esp_app_desc_t* app_desc = esp_app_get_description();
+
+    char body[256];
+    snprintf(body, sizeof(body),
+             "{\"device\":\"BallyRobot\",\"online\":true,\"firmware\":\"%s\",\"ota_ready\":%s}",
+             app_desc->version,
+             self->is_flashing() ? "false" : "true");
+
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
 }
 
 esp_err_t OTAUpdater::handle_update_post(httpd_req_t* req) {

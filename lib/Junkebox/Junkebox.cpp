@@ -331,7 +331,7 @@ void Junkebox::register_shell_commands(TinyShell& shell, Logger& logger) {
         BuiltinSound sound;
         if (!JunkeboxBuiltinSongs::from_name(name, sound)) {
             logger.insert_logf(logType::ERRO,
-                               "Junkebox: unknown builtin sound '%s' (click/success/error/warning/boot)",
+                               "Junkebox: unknown builtin sound '%s' (click/success/error/warning/boot/elevator)",
                                name.c_str());
             return RESULT_ERROR;
         }
@@ -341,7 +341,7 @@ void Junkebox::register_shell_commands(TinyShell& shell, Logger& logger) {
         }
         logger.insert_logf(logType::INFO, "Junkebox: playing builtin '%s'", name.c_str());
         return RESULT_OK;
-    }, "play_builtin", "Play a compiled-in sound: click/success/error/warning/boot", "junkebox");
+    }, "play_builtin", "Play a compiled-in sound: click/success/error/warning/boot/elevator", "junkebox");
 
     shell.add([this, &logger]() -> uint8_t {
         stop();
