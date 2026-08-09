@@ -240,6 +240,13 @@ private:
     ScheduledDebugTest array_sensor_test_;
     ScheduledDebugTest encoder_test_;
     ScheduledDebugTest imu_test_;
+    // Repeatedly re-checks WHO_AM_I on the already-open IMU bus and tallies
+    // pass/fail, so intermittent I2C flakiness (bad pull-ups, noise, a loose
+    // wire) shows up as a hit rate over time instead of one-off scan_i2c
+    // samples. Counters reset each time "test_i2c" (re)starts the test.
+    ScheduledDebugTest imu_i2c_test_;
+    uint32_t           imu_i2c_ok_count_    = 0;
+    uint32_t           imu_i2c_fail_count_  = 0;
     std::atomic<bool> direct_next_shell_output{false};
 
     // matriz of data to kalman filter

@@ -29,6 +29,14 @@
 
 // IMU I2C address (AD0 strapped low); gyro/accel unit conversions for the EKF.
 static constexpr uint8_t IMU_I2C_ADDRESS = 0x68;
+// Dropped from the ICM42688 driver's 400kHz default: this bus currently has
+// no external pull-ups (relies on the ESP32's own weak ~45kOhm ones), which
+// shows up as intermittent NACKs/garbled reads at 400kHz (scan_i2c: address
+// ACKs but WHO_AM_I reads back 0xFF, or the whole bus goes briefly silent).
+// 100kHz gives the lines more time to slew and tolerates noise better.
+// This is a mitigation, not a fix -- add real pull-ups (2.2-4.7kOhm to
+// 3.3V on SDA and SCL) and this can go back to the default.
+static constexpr uint32_t IMU_I2C_CLOCK_HZ = 100'000;
 static constexpr float   kDegToRad       = static_cast<float>(PI) / 180.0f;
 static constexpr float   kGravityMss     = 9.81f;
 
@@ -343,7 +351,7 @@ bool ROBOT::scheduleDebugTest(ScheduledDebugTest& test, uint32_t samples,
 
 bool ROBOT::anyDebugTestActive() const {
     return array_sensor_test_.active() || encoder_test_.active() ||
-           imu_test_.active();
+           imu_test_.active() || imu_i2c_test_.active();
 }
 
 void ROBOT::stopMotors() {
@@ -395,12 +403,25 @@ void ROBOT::processDebug() {
             imu->accX(), imu->accY(), imu->accZ(),
             imu->gyrX(), imu->gyrY(), imu->gyrZ(), imu->temp());
     }
+
+    if (imu_i2c_test_.poll()) {
+        const uint8_t who = imu->whoAmI();
+        const bool    ok  = (who == 0x47);
+        ok ? ++imu_i2c_ok_count_ : ++imu_i2c_fail_count_;
+        const uint32_t total   = imu_i2c_ok_count_ + imu_i2c_fail_count_;
+        const float    ok_pct  = total ? (100.0f * imu_i2c_ok_count_) / total : 0.0f;
+        logger.insert_logf(
+            logType::INFO,
+            "IMU I2C check: %s (WHO_AM_I=0x%02X) | %u ok / %u fail (%.1f%% ok)",
+            ok ? "OK" : "FAIL", who, imu_i2c_ok_count_, imu_i2c_fail_count_, ok_pct);
+    }
 }
 
 void ROBOT::cancelDebugTests() {
     array_sensor_test_.cancel();
     encoder_test_.cancel();
     imu_test_.cancel();
+    imu_i2c_test_.cancel();
     ota.cancel();
 }
 
@@ -812,6 +833,57 @@ void ROBOT::registerDebugCommands() {
             samples, interval_ms);
         return RESULT_OK;
     }, "test_imu", "Print IMU accel/gyro/temp readings: samples,interval_ms", "debug");
+
+    shell.add([]() -> uint8_t {
+        // Reuses the bus imu->begin() already opened on cfg.sda_pin/scl_pin
+        // instead of opening a second i2c_master_bus on the same pins (see
+        // ICM42688::scanBus()'s comment) -- so this works on demand, without
+        // a reboot, even when imu_ready_ is false.
+        if (!instance_->imu->busOpen()) {
+            ROBOT::logger.insert_log(
+                logType::ERRO,
+                "IMU I2C bus never opened (begin() failed before that point); nothing to scan");
+            return RESULT_ERROR;
+        }
+
+        std::string found;
+        const bool  any_found = instance_->imu->scanBus(found);
+        ROBOT::logger.insert_logf(
+            logType::INFO,
+            "I2C scan (IMU bus): %s | WHO_AM_I=0x%02X (expect 0x47)",
+            any_found ? found.c_str() : "no devices found",
+            instance_->imu->whoAmI());
+        return RESULT_OK;
+    }, "scan_i2c", "Probe the IMU I2C bus and read WHO_AM_I; works even if the IMU wasn't detected at boot", "debug");
+
+    shell.add([](uint32_t samples, uint32_t interval_ms) -> uint8_t {
+        // Same reuse-the-existing-bus reasoning as scan_i2c: no imu_ready_
+        // gate here on purpose -- the whole point is to keep re-checking
+        // even after a failed boot detection, since the bus can (and does,
+        // on a noisy/pull-up-less setup) recover a moment later.
+        if (!instance_->imu->busOpen()) {
+            ROBOT::logger.insert_log(
+                logType::ERRO,
+                "IMU I2C bus never opened (begin() failed before that point); nothing to check");
+            return RESULT_ERROR;
+        }
+
+        instance_->imu_i2c_ok_count_   = 0;
+        instance_->imu_i2c_fail_count_ = 0;
+        if (!instance_->scheduleDebugTest(instance_->imu_i2c_test_,
+                                          samples, interval_ms)) {
+            ROBOT::logger.insert_log(
+                logType::ERRO,
+                "I2C stability test requires DEBUG state, USB inactive and samples > 0");
+            return RESULT_ERROR;
+        }
+
+        ROBOT::logger.insert_logf(
+            logType::INFO,
+            "I2C stability test scheduled: %u checks every %u ms",
+            samples, interval_ms);
+        return RESULT_OK;
+    }, "test_i2c", "Re-check WHO_AM_I on a timer and tally ok/fail, to watch bus stability live: samples,interval_ms", "debug");
 }
 
 // ==============================================================================
@@ -1260,7 +1332,13 @@ bool ROBOT::init() {
     motor_left.emplace(cfg.ain1, cfg.ain2, CH0, CH1);
     motor_right.emplace(cfg.bin1, cfg.bin2, CH2, CH3);
     junkebox.emplace(cfg.bzr, CH4);
-    imu.emplace(cfg.sda_pin, cfg.scl_pin, IMU_I2C_ADDRESS);
+
+    // Boot-time bitbangI2CScan()/scanI2CBus() disabled for now (noisy IMU
+    // bus under active hardware debugging -- see "debug scan_i2c"/"test_i2c"
+    // for the on-demand equivalents, which reuse imu's own bus instead of
+    // opening a second one on these pins). Re-enable once the wiring is
+    // sorted out if the one-shot boot log is still wanted.
+    imu.emplace(cfg.sda_pin, cfg.scl_pin, IMU_I2C_ADDRESS, IMU_I2C_CLOCK_HZ);
 
 #ifdef ENABLE_SYSTEM_MONITOR
     sysmon.begin();
@@ -1324,10 +1402,16 @@ bool ROBOT::init() {
 
     // Not fatal: the IMU is optional hardware. Missing/unpowered, EKF just
     // keeps running on encoder-only measurements (see sampleEKF()).
-    imu_ready_ = imu->begin() > 0;
+    const int imu_begin_ret = imu->begin();
+    imu_ready_              = imu_begin_ret > 0;
     if (!imu_ready_) {
-        ROBOT::logger.insert_log(logType::WARN,
-                                 "IMU (ICM42688) not detected; EKF running on encoders only");
+        // begin()'s return codes (see ICM42688::begin()): -2 bus/device open
+        // failed, -3 WHO_AM_I mismatch (something else is answering at this
+        // address, or the chip isn't responding correctly), -4/-7/-8 a later
+        // config/calibration step failed.
+        ROBOT::logger.insert_logf(logType::WARN,
+                                  "IMU (ICM42688) not detected (begin()=%d); EKF running on encoders only",
+                                  imu_begin_ret);
     }
 
     // Not fatal: a buzzer that fails to configure just means no music, not
