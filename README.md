@@ -25,7 +25,11 @@ Este projeto implementa o controle de um robô baseado em ESP32-S3, utilizando a
 - **Encoder**: Gerencia a leitura dos encoders usando periféricos de hardware do ESP32.
 - **Format**: Header-only, sem dependências — formatação de tamanhos em bytes (`"12.34 MB"`) reaproveitada por SDCard, USBMassStorage e Logger.
 - **HBridge**: Controle dos motores via ponte H, incluindo direção e PWM.
-- **Logger**: Sistema de logs e comandos, com envio via ESP-NOW ou porta serial.
+- **BtpTransport**: Endpoint BTP v1 com identidade de boot, sequência atômica, codec, CRC e fragmentação comuns.
+- **CommandProcessor**: Valida `COMMAND_REQUEST`, reserva uma chave de deduplicação por boot, executa cada intenção uma vez e reproduz o mesmo `COMMAND_RESULT` correlacionado nos retries.
+- **TxScheduler**: Filas estáticas separadas e FIFO por classe; transmite `COMMAND_RESULT > STATUS > LOG` crítico `> TELEMETRY > DEBUG`, com um único envio ESP-NOW pendente e contadores de aceite, entrega, timeout e drop.
+- **Logger**: Ring de eventos em PSRAM; emite exclusivamente frames `LOG` BTP de tamanho real via ESP-NOW.
+- **TelemetryPublisher**: Fila SPSC estática e não bloqueante para amostras `PACKED_LE`; publica `protocol.test` a 50 Hz e `robot.state` nas transições, preservando o timestamp da coleta.
 - **OTAUpdater**: Atualização de firmware sem fio a partir do estado DEBUG — conecta a uma rede Wi-Fi cadastrada no cartão SD, anuncia `<hostname>.local` via mDNS e recebe o novo binário via HTTP (`POST /update`). `GET /status` (JSON: `device`, `online`, `firmware`, `ota_ready`) deixa uma ferramenta externa checar se o robô está pronto para receber o upload antes de mandá-lo.
 - **RobotSettings**: Armazena e persiste (`settings.conf` no SD) todos os parâmetros configuráveis em runtime.
 - **SDCard** / **USBMassStorage**: Acesso ao cartão SD e transferência de propriedade exclusiva do FAT entre o robô e um host USB.
@@ -66,25 +70,35 @@ O `void loop` roda exclusivamente no núcleo 1, especializado em executar a fun�
 No segundo núcleo, é executada a rotina paralela do robô, responsável por:
 - Verificar as *flags* dos botões, sensores laterais, sinais PWM e LEDs.
 - Gerir as transições da máquina de estados, de acordo com as *flags*.
-- Gerenciar a fila de comandos recebidos por ESP-NOW.
-- Quando um pacote é recebido por ESP-NOW, ele é adicionado a uma fila; o processamento paralelo identifica o recebimento e repassa o conteúdo ao **TinyShell**, que realiza o *parse*, processa caracteres de escape, valida os argumentos necessários, executa a função C/C++ vinculada e formata a resposta de sucesso ou o código de erro.
+- Gerenciar a fila estática de comandos recebidos por ESP-NOW.
+- Antes da fila, validar o frame BTP (magic, versão, tamanhos, CRC e fragmentação), o MAC/source da origem, o alvo do boot e o payload `COMMAND_REQUEST`. Somente a ação de shell `0x0001`, versão 1, chega ao **TinyShell**; `TELEMETRY`, `LOG`, `TERMINAL`, `CONTROL` e demais objetos são rejeitados.
+- Reservar a identidade `(source_id, boot_id, sequence)` antes de executar; retries idênticos reutilizam o resultado armazenado, conflitos são rejeitados e fila cheia gera `BUSY/CAPACITY_EXHAUSTED` estruturado.
+- Drenar o scheduler de transmissão sem deixar telemetria ou debug atrasarem resultados de comando; o callback ESP-NOW apenas confirma ou falha o único frame pendente.
 - Gerenciar o Filtro de Kalman Estendido, fazendo a amostragem, o cálculo de predição e a atualização do estado. 
 
 ---
 
 ### Comunicação
-- **ESP-NOW:** Utilizado para comunicação sem fio entre robôs/controladores, envio de logs e comandos.
+- **ESP-NOW/BTP v1:** Utilizado para comunicação sem fio. `bally_protocol` 0.1.0 é integrado por dependência local identificável; nenhum `struct` C/C++ é transmitido.
+- **Identidade:** `source_id` deriva do MAC de fábrica; `boot_id` é aleatório, não nulo e persistido em NVS para impedir repetição imediata. A sequência é única por mensagem lógica e compartilhada com segurança entre tasks.
+- **Comandos:** o peer autorizado é o `MAC_ADDR` do build e seu `source_id` precisa corresponder ao MAC recebido. O payload da ação de shell é uma única linha de até 512 bytes, sem NUL, CR ou LF. O resultado BTP repete a tripla da requisição, `action_id/version`, status e erro; o cache estático de 16 entradas permanece durante todo o boot, portanto retry nunca repete o efeito.
+- **Scheduler TX:** cada produtor entrega frames completos a uma fila bounded da sua classe. Há capacidade exclusiva para resultados de comando mesmo com 16 telemetrias pendentes. Telemetria e logs espontâneos não são retransmitidos; perda de resultado é recuperada pelo retry da requisição e replay do cache.
 
-#### Logger (Telemetria e Debug)
-Para criar uma maneira robusta de *debug* e envio de mensagens de telemetria usando ESP-NOW, o projeto utiliza uma biblioteca própria de logger:
+#### Logger (eventos e debug)
+O Logger preserva o ring de PSRAM, mas o armazenamento interno não é formato de wire. Na inserção, cada evento recebe `timestamp_us` e uma sequência BTP. No `flush`, o payload é lido em blocos de até 210 bytes, codificado com CRC-32 pelo codec canônico e enviado em frames de tamanho exato. Arquivos `.blog` também contêm frames BTP concatenados e são validados antes do replay. Telemetria de alta frequência permanece fora do Logger e é publicada por `TelemetryPublisher`.
 
-- As mensagens de log são salvas na PSRAM (que disponibiliza 8 MB octal no chip utilizado), em um array cíclico.
-- Cada log é uma *struct* que contém:
-  - O tempo em milissegundos em que a mensagem foi adicionada.
-  - O tipo da mensagem (INFO, ERROR, CMD, TELEMETRY, etc.), permitindo filtragem e priorização (por exemplo, utilizando a macro `#ifndef`, podemos desativar os logs e melhorar a eficiência do código).
-  - O número do pacote, caso o conteúdo da mensagem ultrapasse o limite de 250 bytes do ESP-NOW (mensagens grandes são fragmentadas).
-- Ao utilizar o método `flush`, os logs são enviados em tempo real para o endereço MAC definido, via ESP-NOW.
-- Caso o ESP-NOW não consiga inicializar, ou para *debug* local, é possível redirecionar os logs para a porta serial, alterando a função de *callback* no `setup`.
+#### TelemetryPublisher (amostras binárias)
+
+O publisher possui 16 slots pré-alocados e política explícita de `drop-newest`:
+se a fila estiver cheia, a task de controle contabiliza e descarta a nova
+amostra sem esperar. A sequência BTP e o `timestamp_us` são reservados na
+coleta; a task `routine` apenas codifica e envia depois. Falhas imediatas de
+rádio também são contabilizadas e removidas para não travar a fila.
+
+Os schemas estáticos iniciais são `protocol.test` (`topic_id=0x0001`,
+`counter:uint32`, `value:float32`) e `robot.state` (`topic_id=0x0002`,
+`state:uint8`), ambos `PACKED_LE`, versão 1. Não há CSV, formatação textual,
+terminador nem passagem pelo `Logger`.
 
 ### Flags (Eventos Temporizados e Segurança)
 O projeto utiliza uma biblioteca de *flags* para facilitar a gestão de eventos temporizados e garantir segurança no controle dos atuadores:

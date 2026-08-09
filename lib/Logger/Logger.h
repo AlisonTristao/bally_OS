@@ -9,20 +9,16 @@
 #include <functional>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
-#include <SharedMessageTypes.h>
-
-#ifndef SHARED_MESSAGE_TYPES_H
-#error "This library depends on SharedMessageTypes.h, to use the data structures and definitions for the log messages. "
-#endif
+#include <LogTypes.h>
+#include <Settings.h>
 
 class SDCard;
 class TinyShell;
 class RobotSettings;
+class BtpEndpoint;
 
 class Logger {
 public:
-    // Define a type for the send callback function
-    using SendCallback = bool (*)(const uint8_t *data, size_t len);
     using StorageCallback = bool (*)(const uint8_t *data, size_t len, void *context);
 
     // initialize metods
@@ -34,13 +30,10 @@ public:
 
     // acess methods for the logger
     /*
-    * @brief Set the callback function that will be called to send the log messages. 
-    * This allows the logger to be flexible and adaptable to different output methods (e.g., serial, 
-    * network, etc.). If a null pointer is passed, the logger will use a default callback that does nothing.
-    *
-    * @param callback A function pointer to the callback function that will be called to send the log messages.
+    * @brief Attach the process-wide BTP endpoint used to allocate sequences,
+    * encode LOG frames and hand exact wire bytes to the selected transport.
     */
-    void set_send_callback(SendCallback callback);
+    void configure_btp(BtpEndpoint& endpoint);
 
     /**
      * @brief Configure how many packets flush_logs() sends per call
@@ -79,12 +72,6 @@ public:
      * their PSRAM only after each complete message is stored.
      */
     bool flush_logs_to(StorageCallback callback, void* context);
-
-    /**
-     * @brief Send an already formatted message without storing it in PSRAM.
-     * Used to replay log files without creating duplicated retained logs.
-     */
-    bool send_message(const message& msg);
 
     /**
      * @brief Set the system clock used to name new SD log files, validating
@@ -138,14 +125,14 @@ public:
 private:
     // private members for the logger
     struct StoredLogHeader {
-        uint32_t timer;
+        uint64_t timestamp_us;
+        uint32_t sequence;
         uint16_t length;
         logType type;
         uint8_t reserved;
     };
 
-    static_assert(sizeof(StoredLogHeader) == 8, "Unexpected stored log header size");
-    static_assert(sizeof(message) <= MAX_PACKET_SIZE, "ESP-NOW message exceeds packet limit");
+    static_assert(sizeof(StoredLogHeader) == 16, "Unexpected stored log header size");
 
     uint8_t* storage_ = nullptr; // variable-length byte ring in external PSRAM
     const uint32_t storage_capacity_ = LOGGER_PSRAM_CAPACITY_BYTES;
@@ -160,13 +147,13 @@ private:
     uint32_t pending_send_bytes_ = 0;
     bool send_record_active_ = false;
     StoredLogHeader send_header_{};
-    uint16_t send_packet_index_ = 0;
+    uint8_t send_packet_index_ = 0;
 
     // Only one consumer (ESP-NOW or SD) may walk the ring at a time.
     bool consumer_busy_ = false;
 
     SemaphoreHandle_t mutex_ = NULL;
-    SendCallback send_callback_;
+    BtpEndpoint* endpoint_ = nullptr;
     bool initialized_ = false;
 
     // SD log file naming/appending state (flush_to_sd/set_datetime).
@@ -181,15 +168,6 @@ private:
 
     // private methods for the logger
     /*
-    * @brief Calculate the checksum for a log message.
-    * This is used to ensure the integrity of the log messages.
-    *
-    * @param msg The log message for which to calculate the checksum.
-    * @return The calculated checksum.
-    */
-    uint8_t calculate_checksum(const message &msg);
-
-    /*
     * @brief Reset the loop counter, which is used to keep track of the number of messages in the buffer. 
     * This method is called when inserting a new log message to ensure that the buffer does not overflow.
     */
@@ -203,10 +181,10 @@ private:
     * @param data Pointer to payload bytes
     * @param len Payload length in bytes
     * @param type The type of the log message, using the logType enum to categorize
-    * @param ts The timestamp in milliseconds when the log message was created. This is used for tracking the age of the log messages and for debugging purposes.
-    * @param null_terminate Whether to add a null terminator for text payloads
+    * @param timestamp_us Monotonic microseconds at logical-message creation.
     */
-    void insert_log_impl(const uint8_t* data, size_t len, logType type, uint32_t ts);
+    void insert_log_impl(const uint8_t* data, size_t len, logType type,
+                         uint64_t timestamp_us);
 
     // byte-ring helpers; caller must hold mutex_
     void write_to_ring(const void* source, size_t len);
@@ -222,8 +200,6 @@ private:
     bool check_mutex();     // check if the mutex is available without waiting
     void free_mutex();      // release the mutex
 
-    static bool defaultSendCallback(const uint8_t *data, size_t len);
-    static void defaultCommandCallback(const char* cmd);
 };
 
 #endif // LOGGER_H

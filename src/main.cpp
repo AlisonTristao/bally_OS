@@ -82,13 +82,14 @@ extern "C" void app_main(void) {
 }
 
 static void setup_system_callbacks() {
-    // configure the logger to send log messages via ESP-NOW using a callback function
-    // if you want to change the output method of the logger, 
-    // you can change this callback to use a different method (e.g., serial, network, etc.)
-    robot.logger.set_send_callback([](const uint8_t *data, size_t len) {
+    // Every BTP producer enqueues through the priority scheduler. The radio
+    // callback below is the only place that starts an ESP-NOW transmission.
+    robot.tx_scheduler.configure([](void*, const uint8_t *data, size_t len) {
         static const uint8_t peer_mac[6] = {MAC_ADDR};
         return (esp_now_send(peer_mac, data, len)) == ESP_OK;
-    });
+    }, nullptr);
+    robot.protocol.set_send_callback(TxScheduler::enqueue_callback,
+                                     &robot.tx_scheduler);
 
     // configure the state machine to log errors using the logger's insert_log method
     // if an error occurs in the state machine, it will call the error callback function, 

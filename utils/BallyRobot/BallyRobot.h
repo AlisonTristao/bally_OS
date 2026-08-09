@@ -25,11 +25,16 @@
 
 #include <Flags.h>
 #include <Logger.h>
+#include <BtpTransport.h>
+#include <CommandProcessor.h>
+#include <TelemetryPublisher.h>
+#include <TxScheduler.h>
 #include <OTAUpdater.h>
 #include <RobotSettings.h>
 #include <SDCard.h>
 #include <StateMachine.h>
 #include <USBMassStorage.h>
+#include <btp/fragmentation.hpp>
 
 #ifdef ENABLE_SYSTEM_MONITOR
 #include <SystemMonitor.h>
@@ -106,13 +111,7 @@ public:
     }
 
     // destructor, copy etc
-    virtual ~ROBOT() {
-        // delete the queue
-        if (receivedDataQueue == nullptr)
-            return;
-        vQueueDelete(receivedDataQueue);
-        receivedDataQueue = nullptr;
-    };
+    virtual ~ROBOT() = default;
     ROBOT(const ROBOT&) = delete;
     ROBOT& operator=(const ROBOT&) = delete;
 
@@ -139,6 +138,10 @@ public:
 
     // core utility objects
     static Logger logger;
+    BtpEndpoint protocol;
+    TxScheduler tx_scheduler;
+    CommandProcessor command_processor;
+    TelemetryPublisher telemetry;
     StateMachine machine;
     TinyShell shell;
     RobotSettings settings;
@@ -312,6 +315,10 @@ private:
 
     // configure the wifi and the esp-now settings for the robot
     bool configureCommunication();
+    bool configureProtocolIdentity();
+    void processCommandRequest(const btp::Header& header,
+                               btp::ByteView payload);
+    void sampleTelemetry();
 
     // Register every shell module. Most modules are owned by the subsystem
     // they operate on (see each lib's own register_shell_commands); this
@@ -362,8 +369,30 @@ private:
     uint32_t stateMachineTimer = 0;
     void checkStateMachine();
 
-    // queue for the logs to be sent in the parallel processing
-    QueueHandle_t receivedDataQueue;
+    struct QueuedCommand {
+        uint8_t cache_slot;
+        char text[btp_command::kMaxShellCommandSize + 1U];
+    };
+
+    static constexpr size_t kCommandQueueLength = 10U;
+    QueueHandle_t receivedDataQueue = nullptr;
+    StaticQueue_t received_data_queue_control_{};
+    uint8_t received_data_queue_storage_[
+        kCommandQueueLength * sizeof(QueuedCommand)]{};
+
+    static constexpr size_t kCommandReassemblySlots = 2U;
+    btp::ReassemblySlot command_reassembly_slots_[kCommandReassemblySlots];
+    uint8_t command_reassembly_buffers_[kCommandReassemblySlots]
+                                       [btp_command::kMaxLogicalRequestSize]{};
+    btp::ReassemblyStorage command_reassembly_storage_[kCommandReassemblySlots]{};
+    std::optional<btp::Reassembler> command_reassembler_;
+
+    // The state-machine task is the sole telemetry producer. The routine task
+    // only consumes the publisher's bounded SPSC queue.
+    static constexpr uint64_t kProtocolTestPeriodUs = 20000U;
+    uint64_t next_protocol_test_us_ = 0U;
+    uint32_t protocol_test_counter_ = 0U;
+    stateName last_telemetry_state_ = NONE;
 };
 
 #endif

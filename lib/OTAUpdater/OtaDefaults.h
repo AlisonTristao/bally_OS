@@ -5,7 +5,7 @@
 
 // Canonical numeric defaults for OTAUpdater's runtime-tunable settings (see
 // OtaTuning in OTAUpdater.h). Split out from OTAUpdater.h itself — which
-// pulls esp_event.h/esp_http_server.h/SharedMessageTypes.h — so that
+// pulls esp_event.h/esp_http_server.h/LogTypes.h — so that
 // RobotSettings.h can read these same values for SettingsData's field
 // defaults without dragging OTAUpdater's full public interface into a
 // generic settings-storage module. Both headers include this one instead of

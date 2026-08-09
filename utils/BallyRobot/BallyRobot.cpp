@@ -10,6 +10,7 @@
 #include "freertos/task.h"
 #include "freertos/queue.h"
 #include "esp_log.h"
+#include "esp_random.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "driver/gpio.h"
@@ -20,6 +21,7 @@
 #include "esp_netif.h"
 #include "esp_event.h"
 #include "esp_mac.h"
+#include "nvs.h"
 #include "nvs_flash.h"
 #include <cmath>
 #include <sys/time.h>
@@ -214,14 +216,55 @@ bool ROBOT::configurePinsFromSettings()
     return true;
 }
 
-bool ROBOT::configureCommunication() {
-    if (communication_configured_) return true;
+bool ROBOT::configureProtocolIdentity() {
+    if (protocol.source_id() != 0U && protocol.boot_id() != 0U) return true;
 
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        nvs_flash_erase();
-        nvs_flash_init();
+        ret = nvs_flash_erase();
+        if (ret == ESP_OK) ret = nvs_flash_init();
     }
+    if (ret != ESP_OK) return false;
+
+    uint8_t base_mac[6]{};
+    if (esp_efuse_mac_get_default(base_mac) != ESP_OK) return false;
+    const uint32_t source_id = btp_command::source_id_from_mac(base_mac);
+
+    nvs_handle_t handle = 0;
+    ret = nvs_open("btp", NVS_READWRITE, &handle);
+    if (ret != ESP_OK) return false;
+
+    uint32_t previous_boot_id = 0U;
+    ret = nvs_get_u32(handle, "last_boot", &previous_boot_id);
+    if (ret != ESP_OK && ret != ESP_ERR_NVS_NOT_FOUND) {
+        nvs_close(handle);
+        return false;
+    }
+
+    uint32_t boot_id = 0U;
+    do {
+        boot_id = esp_random();
+    } while (boot_id == 0U || boot_id == previous_boot_id);
+
+    ret = nvs_set_u32(handle, "last_boot", boot_id);
+    if (ret == ESP_OK) ret = nvs_commit(handle);
+    nvs_close(handle);
+    if (ret != ESP_OK || !protocol.configure(source_id, boot_id)) return false;
+
+    logger.configure_btp(protocol);
+    command_processor.configure(protocol);
+    telemetry.configure(protocol);
+    logger.insert_logf(
+        logType::INFO,
+        "BTP v%u, bally_protocol %u.%u.%u, source=%08lx boot=%08lx",
+        btp::kV1Version, btp::kLibraryVersionMajor, btp::kLibraryVersionMinor,
+        btp::kLibraryVersionPatch, static_cast<unsigned long>(source_id),
+        static_cast<unsigned long>(boot_id));
+    return true;
+}
+
+bool ROBOT::configureCommunication() {
+    if (communication_configured_) return true;
 
     esp_netif_init();
     esp_event_loop_create_default();
@@ -510,36 +553,95 @@ void ROBOT::updateSoundFeedback() {
 // ==============================================================================
 
 void ROBOT::handleReceiveStatic(const esp_now_recv_info_t *recv_info, const uint8_t *incomingData, int len) {
-    const uint8_t* mac = recv_info->src_addr;
-    (void)mac;
+    // Partial or malformed radio payloads are rejected by btp::decode before
+    // any field is read. Only the authorized COMMAND_REQUEST route below can
+    // enqueue work for TinyShell.
+    if (instance_ == nullptr || recv_info == nullptr || incomingData == nullptr ||
+        len <= 0 || instance_->receivedDataQueue == nullptr) return;
 
-    if (instance_->receivedDataQueue == nullptr) {
-        ROBOT::logger.insert_log(logType::ERRO, "Receive callback called but queue is not initialized");
+    btp::DecodedFrame decoded{};
+    if (btp::decode(incomingData, static_cast<size_t>(len),
+                    btp::TransportProfile::EspNow,
+                    &decoded) != btp::Error::Ok) return;
+
+#ifdef MAC_ADDR
+    static constexpr uint8_t expected_peer[6] = {MAC_ADDR};
+    if (!btp_command::authorized_source(expected_peer, recv_info->src_addr,
+                                        decoded.header.source_id)) {
+        instance_->command_processor.note_unauthorized();
+        return;
+    }
+#else
+    instance_->command_processor.note_unauthorized();
+    return;
+#endif
+
+    // Explicit MessageType router. No other channel can fall through to the
+    // shell path, even if its payload happens to look like text.
+    switch (decoded.header.type) {
+        case btp::MessageType::Command:
+            if (decoded.header.object_id !=
+                btp_command::kCommandRequestObjectId) {
+                instance_->command_processor.note_drop();
+                return;
+            }
+            break;
+        case btp::MessageType::Telemetry:
+        case btp::MessageType::Log:
+        case btp::MessageType::Control:
+        case btp::MessageType::Terminal:
+        case btp::MessageType::Invalid:
+            instance_->command_processor.note_drop();
+            return;
+    }
+
+    if ((decoded.header.flags & btp::kFlagFragmented) == 0U) {
+        instance_->processCommandRequest(decoded.header, decoded.payload);
         return;
     }
 
-    // Only a full `message` struct is safe to read below; anything else
-    // (partial/garbage frame) is dropped instead of read out of bounds —
-    // incomingData is only `len` bytes long, not necessarily sizeof(message).
-    if (len != static_cast<int>(sizeof(message))) return;
+    if (!instance_->command_reassembler_.has_value()) return;
+    btp::ReassembledMessage completed{};
+    const auto event = instance_->command_reassembler_->push(
+        decoded, static_cast<uint64_t>(esp_timer_get_time() / 1000ULL),
+        &completed);
+    if (event == btp::ReassemblyEvent::Complete) {
+        instance_->processCommandRequest(completed.header, completed.payload);
+        instance_->command_reassembler_->release(completed.slot_index);
+    } else if (event != btp::ReassemblyEvent::Accepted &&
+               event != btp::ReassemblyEvent::Duplicate) {
+        instance_->command_processor.note_drop();
+    }
+}
 
-    // Heartbeat probe from the T-Dongle (see SharedMessageTypes.h): the
-    // ESP-NOW driver already sent the low-level delivery ACK back to it on
-    // the radio itself, which is all "we're connected" needs. Drop it here,
-    // before the queue, so it never reaches the shell (as an empty command
-    // line) or the retained PSRAM log.
-    if (reinterpret_cast<const message*>(incomingData)->type == logType::PING) return;
+void ROBOT::processCommandRequest(const btp::Header& header,
+                                  btp::ByteView payload) {
+    const uint64_t now_us = static_cast<uint64_t>(esp_timer_get_time());
+    const CommandProcessor::Intake intake =
+        command_processor.intake(header, payload, now_us);
+    if (intake.kind == CommandProcessor::IntakeKind::ResultReady) {
+        command_processor.send_result(intake.result);
+        return;
+    }
+    if (intake.kind != CommandProcessor::IntakeKind::Ready) return;
 
-    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-    xQueueSendFromISR(instance_->receivedDataQueue, incomingData, &xHigherPriorityTaskWoken);
-    if (xHigherPriorityTaskWoken == pdTRUE) {
-        portYIELD_FROM_ISR();
+    QueuedCommand command{};
+    command.cache_slot = intake.work.cache_slot;
+    std::memcpy(command.text, intake.work.command, sizeof(command.text));
+    if (xQueueSend(receivedDataQueue, &command, 0) != pdTRUE) {
+        CommandProcessor::ResultView result{};
+        if (command_processor.reject_busy(command.cache_slot, now_us,
+                                          &result)) {
+            command_processor.send_result(result);
+        }
     }
 }
 
 void ROBOT::handleSendStatic(const wifi_tx_info_t *tx_info, esp_now_send_status_t status) {
     (void)tx_info;
-    (void)status;
+    if (instance_ != nullptr) {
+        instance_->tx_scheduler.on_delivery(status == ESP_NOW_SEND_SUCCESS);
+    }
 }
 
 // ==============================================================================
@@ -961,12 +1063,21 @@ void ROBOT::runShell(void *param) {
         // in the begin of the loop to wait when no one command is received
         vTaskDelay(WDOG_TIMEOUT_TK);
 
-        message receivedMessage;
-        if (xQueueReceive(instance_->receivedDataQueue, &receivedMessage, 0) != pdTRUE)
+        QueuedCommand received_command{};
+        if (xQueueReceive(instance_->receivedDataQueue, &received_command, 0) != pdTRUE)
             continue;
         
-        // execute the command
-        instance_->shell.run_command_line(receivedMessage.content.text);
+        // Execute exactly once, then publish the final correlated result. A
+        // repeated request is answered from CommandProcessor's boot-lifetime
+        // cache and never reaches TinyShell again.
+        const uint8_t shell_status =
+            instance_->shell.run_command_line(received_command.text);
+        CommandProcessor::ResultView result{};
+        if (instance_->command_processor.complete(
+                received_command.cache_slot, shell_status,
+                static_cast<uint64_t>(esp_timer_get_time()), &result)) {
+            instance_->command_processor.send_result(result);
+        }
     }
 }
 
@@ -979,6 +1090,10 @@ void ROBOT::runStateMachine(void *param) {
     while (true) {
         // run state machine
         instance_->machine.run();
+
+        // Sampling only copies a compact payload into a pre-allocated queue;
+        // radio I/O happens later in routine().
+        instance_->sampleTelemetry();
 		// need to add a small delay to avoid blocking the CPU and allow other tasks to run
         vTaskDelay(WDOG_TIMEOUT_TK);
     }
@@ -1000,13 +1115,43 @@ void ROBOT::routine(void *param){
         // frames sent while it's active never reach the peer; skip the
         // flush and let logs pile up in PSRAM instead of retrying/losing
         // them, then drain everything once cancel() gives the channel back.
-        if (!instance_->ota.is_active())
+        if (!instance_->ota.is_active()) {
+            // Producers only enqueue encoded frames. The scheduler drains one
+            // callback-correlated ESP-NOW attempt at a time, always selecting
+            // COMMAND_RESULT before status, critical logs, telemetry and debug.
+            instance_->telemetry.flush(4U);
             ROBOT::logger.flush_logs();              // send the logger messagens to output
+            instance_->tx_scheduler.pump(
+                static_cast<uint64_t>(esp_timer_get_time() / 1000ULL));
+        }
         instance_->resetFlags();                    // reset the flags - buttons, side sensors, pwm...
         instance_->setOutputs();                    // set the output - leds, pwm...
         instance_->checkStateMachine();             // cheg the next state of the state machine
         instance_->updateSoundFeedback();           // react to the changes above with a Junkebox sound
         vTaskDelay(WDOG_TIMEOUT_TK); // delay for wathdog timer and to allow other tasks to run
+    }
+}
+
+void ROBOT::sampleTelemetry() {
+    const uint64_t now_us = static_cast<uint64_t>(esp_timer_get_time());
+
+    if (now_us >= next_protocol_test_us_) {
+        // IEEE-754 bits 3f 0d 0a 00 become PACKED_LE bytes 00 0a 0d 3f.
+        // Every test sample therefore proves that NUL, LF and CR are data.
+        constexpr uint32_t kEdgeFloatBits = 0x3F0D0A00U;
+        float edge_value = 0.0f;
+        std::memcpy(&edge_value, &kEdgeFloatBits, sizeof(edge_value));
+        telemetry.publish_protocol_test(protocol_test_counter_++, edge_value,
+                                        now_us);
+        next_protocol_test_us_ = now_us + kProtocolTestPeriodUs;
+    }
+
+    const stateName current_state = static_cast<stateName>(
+        machine.current_state.load(std::memory_order_acquire));
+    if (current_state != last_telemetry_state_) {
+        telemetry.publish_robot_state(static_cast<uint8_t>(current_state),
+                                      now_us);
+        last_telemetry_state_ = current_state;
     }
 }
 
@@ -1289,6 +1434,11 @@ bool ROBOT::init() {
     logger.begin();
     shell.begin();
 
+    if (!configureProtocolIdentity()) {
+        ESP_LOGE("ROBOT_INIT", "Failed to configure BTP identity");
+        return false;
+    }
+
     // Initialize the card and give FAT ownership to the USB storage manager.
     // It starts mounted for the robot and only exposes it on a DEBUG command.
     if (!sd_card.begin()) {
@@ -1348,9 +1498,26 @@ bool ROBOT::init() {
     sysmon.setLoggerCallback([]() { return ROBOT::logger.get_write_pct(); });
 #endif
 
-    receivedDataQueue = xQueueCreate(10, sizeof(message));
+    receivedDataQueue = xQueueCreateStatic(
+        kCommandQueueLength, sizeof(QueuedCommand),
+        received_data_queue_storage_, &received_data_queue_control_);
     if (receivedDataQueue == nullptr) {
         ROBOT::logger.insert_log(logType::ERRO, "Failed to create receive queue");
+        return false;
+    }
+
+    for (size_t index = 0U; index < kCommandReassemblySlots; ++index) {
+        command_reassembly_storage_[index] = {
+            command_reassembly_buffers_[index],
+            sizeof(command_reassembly_buffers_[index]),
+        };
+    }
+    command_reassembler_.emplace(
+        command_reassembly_slots_, command_reassembly_storage_,
+        kCommandReassemblySlots, 2000U);
+    if (!command_reassembler_->valid()) {
+        ROBOT::logger.insert_log(logType::ERRO,
+                                 "Failed to initialize BTP reassembly");
         return false;
     }
 

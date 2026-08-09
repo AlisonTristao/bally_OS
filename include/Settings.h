@@ -50,34 +50,8 @@
 #define EKF_IMU_RY      0.1f
 
 // -------------------- logger configuration --------------------
-// here we define the data structures and definitions for the log messages,
-// that will be shared between the logger and the transport protocol (e.g., esp-now)
-
-// max espnow packet size -> 250bytes
-
-// protocol overhead:
-//   4 bytes for timestamp
-// + 1 byte for type
-// + 2 byte for packet number
-// + 2 byte for total packets
-// + 1 byte for checksum
-// + 4 byte para o length
-// = 14 bytes
-
-// therefore, max message size is 250 - 14 = 236 bytes
-// but, to use a size that is a multiple of 4 for better memory alignment, we will use 230 bytes for the content
-// The logger uses a byte ring buffer in PSRAM. Records occupy only their header
-// plus the actual payload length; the fixed ESP-NOW frame is created at flush time.
-// Keep roughly the same memory budget as the previous 30,000 x 248-byte array.
-
-// These three define the exact byte layout of `message`/`messageContent_t`
-// (lib/Logger/SharedMessageTypes.h), sent over ESP-NOW to the separate
-// T-Dongle receiver firmware (github.com/AlisonTristao/t_dongle_develop).
-// Changing them on the robot side only would break telemetry decoding there.
-#define MAX_PACKET_SIZE         250   // if we change the transport protocol, we can increase this value
-#define PROTOCOL_OVERHEAD_SIZE  20    // overhead for the protocol, including timestamp, type, packet number, total packets and checksum
-#define MAX_CONTENT_SIZE        229   // -1 to ensure we have space for the null terminator
-
+// Wire limits, fragmentation and CRC are owned by bally_protocol. The ring
+// stores compact logical records and creates exact-size BTP frames on flush.
 // Sized once, at static-init time: `Logger ROBOT::logger` is a namespace-
 // scope static (utils/BallyRobot/BallyRobot.h/.cpp), constructed before
 // app_main() runs and before the SD card can possibly be mounted — its

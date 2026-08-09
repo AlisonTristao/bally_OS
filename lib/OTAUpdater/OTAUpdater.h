@@ -13,7 +13,7 @@
 #include "esp_http_server.h"
 
 #include <Settings.h>
-#include <SharedMessageTypes.h>
+#include <LogTypes.h>
 #include <OtaDefaults.h>
 
 class SDCard;

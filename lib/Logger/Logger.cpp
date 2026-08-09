@@ -3,6 +3,9 @@
 #include <TinyShell.h>
 #include <RobotSettings.h>
 #include <Format.h>
+#include <BtpTransport.h>
+
+#include <btp/codec.hpp>
 
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
@@ -15,8 +18,7 @@
 #include <ctime>
 #include <sys/time.h>
 
-Logger::Logger()
-    : send_callback_(defaultSendCallback) {
+Logger::Logger() {
     storage_ = static_cast<uint8_t*>(heap_caps_malloc(
         storage_capacity_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
 
@@ -63,11 +65,9 @@ void Logger::free_mutex() {
     if (mutex_ != nullptr) xSemaphoreGive(mutex_);
 }
 
-void Logger::set_send_callback(SendCallback callback) {
+void Logger::configure_btp(BtpEndpoint& endpoint) {
     if (!wait_for_mutex()) return;
-
-    send_callback_ = (callback != nullptr) ? callback : defaultSendCallback;
-
+    endpoint_ = &endpoint;
     free_mutex();
 }
 
@@ -78,13 +78,6 @@ void Logger::set_flush_limits(uint32_t max_chunks_per_flush, uint32_t block_size
     block_size_ = block_size;
 
     free_mutex();
-}
-
-bool Logger::defaultSendCallback(const uint8_t *data, size_t len) {
-    (void)data;
-    (void)len;
-
-    return false;
 }
 
 void Logger::insert_logf(logType type, const char* format, ...) {
@@ -103,7 +96,7 @@ void Logger::insert_logf(logType type, const char* format, ...) {
                                      : sizeof(buffer) - 1;
 
         insert_log_impl(reinterpret_cast<const uint8_t*>(buffer), final_len, type,
-                        static_cast<uint32_t>(esp_timer_get_time() / 1000ULL));
+                        static_cast<uint64_t>(esp_timer_get_time()));
     }
 
     free_mutex();
@@ -115,64 +108,37 @@ void Logger::insert_log(logType type, const char* msg) {
     if (!wait_for_mutex()) return;
 
     insert_log_impl(reinterpret_cast<const uint8_t*>(msg), strlen(msg), type,
-                    static_cast<uint32_t>(esp_timer_get_time() / 1000ULL));
+                    static_cast<uint64_t>(esp_timer_get_time()));
 
     free_mutex();
 }
 
 bool Logger::send_log_direct(logType type, const char* msg) {
     if (msg == nullptr || msg[0] == '\0') return false;
+    BtpEndpoint* endpoint = nullptr;
+    if (!wait_for_mutex()) return false;
+    endpoint = endpoint_;
+    free_mutex();
+    if (endpoint == nullptr) return false;
 
-    const size_t length = strlen(msg);
-    const uint16_t total_packets = static_cast<uint16_t>(
-        (length + MAX_CONTENT_SIZE - 1) / MAX_CONTENT_SIZE);
-    const uint32_t timestamp = static_cast<uint32_t>(
-        esp_timer_get_time() / 1000ULL);
-
-    for (uint16_t packet = 0; packet < total_packets; ++packet) {
-        message direct_message{};
-        const size_t offset = packet * MAX_CONTENT_SIZE;
-        const size_t remaining = length - offset;
-        const size_t fragment_length =
-            remaining < MAX_CONTENT_SIZE ? remaining : MAX_CONTENT_SIZE;
-
-        direct_message.timer = timestamp;
-        direct_message.type = type;
-        direct_message.packet_number = packet + 1;
-        direct_message.total_packets = total_packets;
-        direct_message.content.size = fragment_length;
-        memcpy(direct_message.content.byte, msg + offset, fragment_length);
-        direct_message.checksum = calculate_checksum(direct_message);
-
-        if (!send_message(direct_message)) return false;
-    }
-
-    return true;
+    return endpoint->send_logical(
+        btp::MessageType::Log, static_cast<uint16_t>(type),
+        reinterpret_cast<const uint8_t*>(msg), strlen(msg),
+        static_cast<uint64_t>(esp_timer_get_time()));
 }
 
-uint8_t Logger::calculate_checksum(const message& msg) {
-    uint32_t sum = 0;
-    const size_t len = msg.content.size;
-
-    for (size_t i = 0; i < len; ++i) {
-        sum += static_cast<uint8_t>(msg.content.byte[i]);
-    }
-
-    sum += static_cast<uint8_t>(msg.type);
-    sum += static_cast<uint16_t>(msg.packet_number);
-    sum += static_cast<uint16_t>(msg.total_packets);
-
-    return static_cast<uint8_t>(sum % 256);
-}
-
-void Logger::insert_log_impl(const uint8_t* data, size_t len, logType type, uint32_t ts) {
-    if (data == nullptr || len == 0 || storage_ == nullptr) return;
+void Logger::insert_log_impl(const uint8_t* data, size_t len, logType type,
+                             uint64_t timestamp_us) {
+    if (data == nullptr || len == 0 || storage_ == nullptr ||
+        endpoint_ == nullptr) return;
 
     // The compact record uses 16 bits for its payload length. This is much larger
     // than insert_logf's formatted buffer and avoids one accidental huge string
     // monopolizing the complete log buffer.
+    constexpr size_t kMaxLogicalLogSize =
+        btp::kEspNowMaxPayloadSize * 255U;
     const uint16_t stored_length = static_cast<uint16_t>(
-        len > 0xFFFFU ? 0xFFFFU : len);
+        len > kMaxLogicalLogSize ? kMaxLogicalLogSize : len);
     const uint32_t required = sizeof(StoredLogHeader) + stored_length;
 
     if (required > storage_capacity_) return;
@@ -181,8 +147,12 @@ void Logger::insert_log_impl(const uint8_t* data, size_t len, logType type, uint
     // full, reject the new log instead of deleting an older unsaved record.
     if ((storage_capacity_ - used_bytes_) < required) return;
 
+    uint32_t sequence = 0U;
+    if (!endpoint_->reserve_sequence(&sequence)) return;
+
     const StoredLogHeader header{
-        .timer = ts,
+        .timestamp_us = timestamp_us,
+        .sequence = sequence,
         .length = stored_length,
         .type = type,
         .reserved = 0,
@@ -276,14 +246,18 @@ void Logger::flush_logs() {
     const uint32_t max_packets = max_chunks_per_flush_ * block_size_;
 
     for (uint32_t sent_packets = 0; sent_packets < max_packets; ++sent_packets) {
-        message tx{};
-        SendCallback callback = defaultSendCallback;
-        uint16_t total_packets = 0;
+        uint8_t payload[btp::kEspNowMaxPayloadSize];
+        uint8_t fragment_index = 0U;
+        uint8_t fragment_count = 0U;
+        uint16_t fragment_length = 0U;
+        StoredLogHeader header{};
+        BtpEndpoint* endpoint = nullptr;
 
-        // Copy just the next fixed-size transport frame.
+        // Copy only the next fragment from PSRAM. The frame itself is encoded
+        // into a 250-byte stack buffer by BtpEndpoint and sent at its real size.
         if (!wait_for_mutex()) break;
 
-        if (storage_ == nullptr || pending_send_bytes_ == 0) {
+        if (storage_ == nullptr || pending_send_bytes_ == 0 || endpoint_ == nullptr) {
             free_mutex();
             break;
         }
@@ -298,29 +272,33 @@ void Logger::flush_logs() {
             send_packet_index_ = 0;
         }
 
-        total_packets = static_cast<uint16_t>(
-            (send_header_.length + MAX_CONTENT_SIZE - 1) / MAX_CONTENT_SIZE);
-        const uint32_t payload_offset = send_packet_index_ * MAX_CONTENT_SIZE;
+        fragment_count = static_cast<uint8_t>(
+            (send_header_.length + btp::kEspNowMaxPayloadSize - 1U) /
+            btp::kEspNowMaxPayloadSize);
+        const uint32_t payload_offset =
+            send_packet_index_ * btp::kEspNowMaxPayloadSize;
         const uint32_t remaining = send_header_.length - payload_offset;
-        const uint16_t fragment_length = static_cast<uint16_t>(
-            remaining < MAX_CONTENT_SIZE ? remaining : MAX_CONTENT_SIZE);
+        fragment_length = static_cast<uint16_t>(
+            remaining < btp::kEspNowMaxPayloadSize
+                ? remaining
+                : btp::kEspNowMaxPayloadSize);
         const uint32_t ring_payload_offset =
             (send_offset_ + sizeof(StoredLogHeader) + payload_offset) % storage_capacity_;
 
-        tx.timer = send_header_.timer;
-        tx.type = send_header_.type;
-        tx.packet_number = send_packet_index_ + 1;
-        tx.total_packets = total_packets;
-        tx.content.size = fragment_length;
-        memset(tx.content.byte, 0, sizeof(tx.content.byte));
-        read_from_ring(ring_payload_offset, tx.content.byte, fragment_length);
-        tx.checksum = calculate_checksum(tx);
-        callback = send_callback_;
+        header = send_header_;
+        fragment_index = send_packet_index_;
+        endpoint = endpoint_;
+        read_from_ring(ring_payload_offset, payload, fragment_length);
 
         free_mutex();
 
         // A rejected frame keeps the packet cursor unchanged for the next call.
-        if (!callback(reinterpret_cast<const uint8_t*>(&tx), sizeof(tx))) break;
+        if (!endpoint->send_fragment(
+                btp::MessageType::Log, static_cast<uint16_t>(header.type),
+                header.sequence, header.timestamp_us, payload, fragment_length,
+                fragment_index, fragment_count)) {
+            break;
+        }
 
         if (xSemaphoreTake(mutex_, portMAX_DELAY) != pdTRUE) break;
 
@@ -330,7 +308,7 @@ void Logger::flush_logs() {
         }
 
         ++send_packet_index_;
-        if (send_packet_index_ >= total_packets) {
+        if (send_packet_index_ >= fragment_count) {
             const uint32_t record_size = sizeof(StoredLogHeader) + send_header_.length;
             send_offset_ = (send_offset_ + record_size) % storage_capacity_;
             pending_send_bytes_ -= record_size;
@@ -378,38 +356,40 @@ bool Logger::flush_logs_to(StorageCallback callback, void* context) {
         const uint32_t record_offset = read_offset_;
         free_mutex();
 
-        const uint16_t total_packets = static_cast<uint16_t>(
-            (header.length + MAX_CONTENT_SIZE - 1) / MAX_CONTENT_SIZE);
+        const uint8_t fragment_count = static_cast<uint8_t>(
+            (header.length + btp::kEspNowMaxPayloadSize - 1U) /
+            btp::kEspNowMaxPayloadSize);
 
-        for (uint16_t packet = 0; packet < total_packets; ++packet) {
-            message stored_message{};
-            const uint32_t payload_offset = packet * MAX_CONTENT_SIZE;
+        for (uint8_t packet = 0; packet < fragment_count; ++packet) {
+            uint8_t payload[btp::kEspNowMaxPayloadSize];
+            uint8_t frame[btp::kEspNowMaxFrameSize];
+            size_t frame_size = 0U;
+            const uint32_t payload_offset =
+                packet * btp::kEspNowMaxPayloadSize;
             const uint32_t remaining = header.length - payload_offset;
             const uint16_t fragment_length = static_cast<uint16_t>(
-                remaining < MAX_CONTENT_SIZE ? remaining : MAX_CONTENT_SIZE);
+                remaining < btp::kEspNowMaxPayloadSize
+                    ? remaining
+                    : btp::kEspNowMaxPayloadSize);
             const uint32_t ring_payload_offset =
                 (record_offset + sizeof(StoredLogHeader) + payload_offset) %
                 storage_capacity_;
-
-            stored_message.timer = header.timer;
-            stored_message.type = header.type;
-            stored_message.packet_number = packet + 1;
-            stored_message.total_packets = total_packets;
-            stored_message.content.size = fragment_length;
-            memset(stored_message.content.byte, 0,
-                   sizeof(stored_message.content.byte));
 
             if (xSemaphoreTake(mutex_, portMAX_DELAY) != pdTRUE) {
                 success = false;
                 break;
             }
-            read_from_ring(ring_payload_offset, stored_message.content.byte,
-                           fragment_length);
+            read_from_ring(ring_payload_offset, payload, fragment_length);
+            BtpEndpoint* endpoint = endpoint_;
             free_mutex();
 
-            stored_message.checksum = calculate_checksum(stored_message);
-            if (!callback(reinterpret_cast<const uint8_t*>(&stored_message),
-                          sizeof(stored_message), context)) {
+            if (endpoint == nullptr ||
+                !endpoint->encode_fragment(
+                    btp::MessageType::Log, static_cast<uint16_t>(header.type),
+                    header.sequence, header.timestamp_us, payload,
+                    fragment_length, packet, fragment_count, frame,
+                    sizeof(frame), &frame_size) ||
+                !callback(frame, frame_size, context)) {
                 success = false;
                 break;
             }
@@ -439,15 +419,6 @@ bool Logger::flush_logs_to(StorageCallback callback, void* context) {
 
     end_consumer();
     return success;
-}
-
-bool Logger::send_message(const message& msg) {
-    if (msg.content.size > MAX_CONTENT_SIZE || !wait_for_mutex()) return false;
-
-    const SendCallback callback = send_callback_;
-    free_mutex();
-
-    return callback(reinterpret_cast<const uint8_t*>(&msg), sizeof(msg));
 }
 
 bool Logger::set_datetime(uint16_t year, uint8_t month, uint8_t day,
@@ -698,7 +669,6 @@ void Logger::register_shell_commands(TinyShell& shell, SDCard& sd_card, RobotSet
     shell.add([this, &sd_card](uint16_t file_index, uint32_t delay_msg_ms) -> uint8_t {
         SDFileInfo info{};
         if (!sd_card.get_file_info(file_index, info) ||
-            info.size % sizeof(message) != 0 ||
             !sd_card.open_read_stream(info.name)) {
             insert_log(logType::ERRO,
                        "Invalid log index or file format");
@@ -709,16 +679,43 @@ void Logger::register_shell_commands(TinyShell& shell, SDCard& sd_card, RobotSet
         uint32_t sent_messages = 0;
 
         while (true) {
-            message stored_message{};
-            const size_t read = sd_card.read_stream(
-                &stored_message, sizeof(stored_message));
+            uint8_t frame[btp::kEspNowMaxFrameSize];
+            const size_t header_read =
+                sd_card.read_stream(frame, btp::kV1HeaderSize);
 
-            if (read == 0) break;
-            if (read != sizeof(stored_message) ||
-                stored_message.content.size > MAX_CONTENT_SIZE ||
-                stored_message.packet_number == 0 ||
-                stored_message.total_packets == 0 ||
-                !send_message(stored_message)) {
+            if (header_read == 0) break;
+            if (header_read != btp::kV1HeaderSize) {
+                success = false;
+                break;
+            }
+
+            const size_t payload_size =
+                static_cast<size_t>(frame[10]) |
+                (static_cast<size_t>(frame[11]) << 8U);
+            const size_t tail_size = payload_size + btp::kV1CrcSize;
+            const size_t frame_size = btp::kV1HeaderSize + tail_size;
+            if (frame_size > sizeof(frame) ||
+                sd_card.read_stream(frame + btp::kV1HeaderSize, tail_size) !=
+                    tail_size) {
+                success = false;
+                break;
+            }
+
+            btp::DecodedFrame decoded{};
+            if (btp::decode(frame, frame_size,
+                            btp::TransportProfile::EspNow,
+                            &decoded) != btp::Error::Ok ||
+                decoded.header.type != btp::MessageType::Log) {
+                success = false;
+                break;
+            }
+
+            BtpEndpoint* endpoint = nullptr;
+            if (wait_for_mutex()) {
+                endpoint = endpoint_;
+                free_mutex();
+            }
+            if (endpoint == nullptr || !endpoint->send_encoded(frame, frame_size)) {
                 success = false;
                 break;
             }
