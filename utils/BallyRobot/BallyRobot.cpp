@@ -342,7 +342,8 @@ bool ROBOT::scheduleDebugTest(ScheduledDebugTest& test, uint32_t samples,
 }
 
 bool ROBOT::anyDebugTestActive() const {
-    return array_sensor_test_.active() || encoder_test_.active();
+    return array_sensor_test_.active() || encoder_test_.active() ||
+           imu_test_.active();
 }
 
 void ROBOT::stopMotors() {
@@ -367,14 +368,14 @@ void ROBOT::processDebug() {
     // pass, while the normal outer task delay continues yielding the CPU.
     stopMotors();
 
-    usb_storage.process();
+    usb_storage.process(buttons.getFlags());
     if (usb_storage.is_active()) return;
 
     ota.process(buttons.getFlags());
     if (ota.is_active()) return;
 
     // Add one `if (test.poll()) { ... }` block per ScheduledDebugTest member
-    // (IMU, H-bridge current, ...).
+    // (H-bridge current, ...).
     if (array_sensor_test_.poll()) {
         logger.insert_log(logType::INFO, array_sensor->debug().c_str());
     }
@@ -385,11 +386,21 @@ void ROBOT::processDebug() {
             static_cast<long long>(encoder_left->getCount()),
             static_cast<long long>(encoder_right->getCount()));
     }
+
+    if (imu_test_.poll()) {
+        imu->getAGT();
+        logger.insert_logf(
+            logType::INFO,
+            "IMU: ax=%.4f ay=%.4f az=%.4f gx=%.4f gy=%.4f gz=%.4f t=%.2f",
+            imu->accX(), imu->accY(), imu->accZ(),
+            imu->gyrX(), imu->gyrY(), imu->gyrZ(), imu->temp());
+    }
 }
 
 void ROBOT::cancelDebugTests() {
     array_sensor_test_.cancel();
     encoder_test_.cancel();
+    imu_test_.cancel();
     ota.cancel();
 }
 
@@ -776,6 +787,31 @@ void ROBOT::registerDebugCommands() {
             samples, interval_ms);
         return RESULT_OK;
     }, "test_encoder", "Print left/right encoder counts: samples,interval_ms", "debug");
+
+    shell.add([](uint32_t samples, uint32_t interval_ms) -> uint8_t {
+        // Same reasoning as sampleEKF()'s imu_ready_ guard: without it, a
+        // sensor that never answered at boot would retry (and block on) an
+        // I2C timeout every sample instead of failing once, up front.
+        if (!instance_->imu_ready_) {
+            ROBOT::logger.insert_log(logType::ERRO,
+                                     "IMU not ready; nothing was detected at boot");
+            return RESULT_ERROR;
+        }
+
+        if (!instance_->scheduleDebugTest(instance_->imu_test_,
+                                          samples, interval_ms)) {
+            ROBOT::logger.insert_log(
+                logType::ERRO,
+                "IMU test requires DEBUG state, USB inactive and samples > 0");
+            return RESULT_ERROR;
+        }
+
+        ROBOT::logger.insert_logf(
+            logType::INFO,
+            "IMU test scheduled: %u samples every %u ms",
+            samples, interval_ms);
+        return RESULT_OK;
+    }, "test_imu", "Print IMU accel/gyro/temp readings: samples,interval_ms", "debug");
 }
 
 // ==============================================================================
@@ -1224,12 +1260,6 @@ bool ROBOT::init() {
     motor_left.emplace(cfg.ain1, cfg.ain2, CH0, CH1);
     motor_right.emplace(cfg.bin1, cfg.bin2, CH2, CH3);
     junkebox.emplace(cfg.bzr, CH4);
-
-    // Must run before imu.emplace()/imu->begin() permanently claim these
-    // pins for the IMU's own I2C bus (see scanI2CBus()'s comment in the
-    // header).
-    bitbangI2CScan(cfg.sda_pin, cfg.scl_pin);
-    scanI2CBus(cfg.sda_pin, cfg.scl_pin);
     imu.emplace(cfg.sda_pin, cfg.scl_pin, IMU_I2C_ADDRESS);
 
 #ifdef ENABLE_SYSTEM_MONITOR

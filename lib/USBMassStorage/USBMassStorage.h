@@ -39,9 +39,26 @@ public:
     bool expose();
 
     /**
-     * @brief Process USB eject/disconnect without blocking the state task.
+     * @brief Hand the SD card back to the robot: return the FAT mount point
+     * to the app side and tear down the native USB peripheral driver that
+     * expose() installed. Mirrors OTAUpdater::cancel() — a firmware-side
+     * "give it back" the operator triggers directly, since Windows' safe
+     * eject no longer reclaims it on its own (auto_mount_off in begin()
+     * disables the automatic mount-point handback tud_umount_cb() used to
+     * do, which is also what was silently corrupting the volume mid-read —
+     * see the class comment).
+     * @return true once the card is confirmed back on the app side.
      */
-    void process();
+    bool reclaim();
+
+    /**
+     * @brief Process USB eject/disconnect without blocking the state task.
+     * @param button_flags Current button flags; BIT_2 reclaims the SD card
+     * back to the robot (same physical button used to enter DEBUG in the
+     * first place — see BIT_2 -> DEBUG in StatesManager.h), the same
+     * button-driven exit gesture OTAUpdater::process() uses to cancel.
+     */
+    void process(uint8_t button_flags);
 
     bool is_ready() const { return initialized_.load(); }
     bool is_exposed() const {

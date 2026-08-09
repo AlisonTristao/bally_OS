@@ -236,9 +236,10 @@ private:
     bool imu_ready_ = false;
 
     // Non-blocking per-sensor tests controlled by the "debug" shell module.
-    // Add one ScheduledDebugTest member per sensor (IMU, H-bridge current, ...).
+    // Add one ScheduledDebugTest member per sensor (H-bridge current, ...).
     ScheduledDebugTest array_sensor_test_;
     ScheduledDebugTest encoder_test_;
+    ScheduledDebugTest imu_test_;
     std::atomic<bool> direct_next_shell_output{false};
 
     // matriz of data to kalman filter

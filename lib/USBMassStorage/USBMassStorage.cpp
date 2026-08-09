@@ -7,6 +7,7 @@
 #include "tinyusb_msc.h"
 
 #include <cstdio>
+#include <Flags.h>
 #include <TinyShell.h>
 #include <Logger.h>
 #include <Format.h>
@@ -96,7 +97,12 @@ bool USBMassStorage::begin(SDCard& card) {
     config.fat_fs.base_path = const_cast<char*>(card.mount_point());
     config.fat_fs.config.format_if_mount_failed = false;
     config.fat_fs.config.max_files = 5;
-    config.fat_fs.config.allocation_unit_size = 16 * 1024;
+    // esp_tinyusb's tinyusb_msc_new_storage_sdmmc() never copies
+    // config.fat_fs.config.allocation_unit_size into its internal state, and
+    // its own format path (vfs_fat_format() in tinyusb_msc.c) derives the
+    // cluster size from CONFIG_WL_SECTOR_SIZE instead, so this field has no
+    // effect on a blank card's actual cluster size (~4 KB here) -- left unset
+    // rather than implying a size we don't actually control.
     config.fat_fs.do_not_format = false;
     // FM_ANY | FM_SFD (0x07 | 0x08): format as a superfloppy (FAT32 boot
     // sector directly at LBA0, no MBR/partition table) instead of FatFs's
@@ -175,12 +181,34 @@ bool USBMassStorage::expose() {
     return true;
 }
 
-void USBMassStorage::process() {
+bool USBMassStorage::reclaim() {
+    if (!session_active_.load() || storage_handle_ == nullptr) return false;
+
+    auto handle = static_cast<tinyusb_msc_storage_handle_t>(storage_handle_);
+
+    tinyusb_msc_set_storage_mount_point(handle, TINYUSB_MSC_STORAGE_MOUNT_APP);
+    sync_mount_state();
+
+    if (usb_driver_installed_.load()) {
+        tinyusb_driver_uninstall();
+        usb_driver_installed_.store(false);
+    }
+
+    host_attached_.store(false);
+    session_active_.store(false);
+    return app_has_access_.load();
+}
+
+void USBMassStorage::process(uint8_t button_flags) {
     if (!session_active_.load() || storage_handle_ == nullptr) return;
 
     // Do not auto-uninstall the native USB driver here: a DETACHED event can
     // also be raised by SetConfiguration(0) without the cable being removed.
     sync_mount_state();
+
+    if ((button_flags & (1 << BIT_2)) != 0) {
+        reclaim();
+    }
 }
 
 void USBMassStorage::handle_host_connection(bool attached) {
@@ -315,7 +343,8 @@ void USBMassStorage::register_shell_commands(TinyShell& shell, Logger& logger, S
 
         logger.send_log_direct(
             logType::INFO,
-            "USB storage enabled; safely eject the drive on the PC before leaving DEBUG");
+            "USB storage enabled; press button 2 on the robot to give the SD card back "
+            "(the PC's own safe-eject no longer reclaims it automatically)");
         mark_direct_output();
         return RESULT_OK;
     }, "expose", "Expose the SD card through native USB MSC (DEBUG state)", "storage");
