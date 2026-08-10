@@ -265,6 +265,7 @@ bool ROBOT::configureProtocolIdentity() {
     command_processor.configure(protocol);
     manifest_responder.configure(protocol, protocol_uuid_);
     telemetry.configure(protocol);
+    subscription_responder.configure(protocol, telemetry);
     logger.insert_logf(
         logType::INFO,
         "BTP v%u, bally_protocol %u.%u.%u, source=%08lx boot=%08lx",
@@ -598,8 +599,9 @@ void ROBOT::handleReceiveStatic(const esp_now_recv_info_t *recv_info, const uint
             }
             break;
         case btp::MessageType::Control:
-            if (decoded.header.object_id !=
-                ManifestResponder::kManifestRequestObjectId) {
+            if (decoded.header.object_id != ManifestResponder::kManifestRequestObjectId &&
+                decoded.header.object_id != SubscriptionResponder::kSubscribeObjectId &&
+                decoded.header.object_id != SubscriptionResponder::kUnsubscribeObjectId) {
                 instance_->command_processor.note_drop();
                 return;
             }
@@ -613,11 +615,7 @@ void ROBOT::handleReceiveStatic(const esp_now_recv_info_t *recv_info, const uint
     }
 
     if ((decoded.header.flags & btp::kFlagFragmented) == 0U) {
-        if (decoded.header.type == btp::MessageType::Control) {
-            instance_->processManifestRequest(decoded.header, decoded.payload);
-        } else {
-            instance_->processCommandRequest(decoded.header, decoded.payload);
-        }
+        instance_->dispatchDecoded(decoded.header, decoded.payload);
         return;
     }
 
@@ -627,15 +625,30 @@ void ROBOT::handleReceiveStatic(const esp_now_recv_info_t *recv_info, const uint
         decoded, static_cast<uint64_t>(esp_timer_get_time() / 1000ULL),
         &completed);
     if (event == btp::ReassemblyEvent::Complete) {
-        if (completed.header.type == btp::MessageType::Control) {
-            instance_->processManifestRequest(completed.header, completed.payload);
-        } else {
-            instance_->processCommandRequest(completed.header, completed.payload);
-        }
+        instance_->dispatchDecoded(completed.header, completed.payload);
         instance_->command_reassembler_->release(completed.slot_index);
     } else if (event != btp::ReassemblyEvent::Accepted &&
                event != btp::ReassemblyEvent::Duplicate) {
         instance_->command_processor.note_drop();
+    }
+}
+
+// Shared by the unfragmented and reassembled paths above: routes a fully
+// decoded Command/Control frame to the matching handler by object_id.
+// handleReceiveStatic's switch already rejected any object_id not listed
+// here, so the final else is unreachable in practice but kept as a safe
+// no-op rather than an assert.
+void ROBOT::dispatchDecoded(const btp::Header& header, btp::ByteView payload) {
+    if (header.type == btp::MessageType::Control) {
+        if (header.object_id == ManifestResponder::kManifestRequestObjectId) {
+            processManifestRequest(header, payload);
+        } else if (header.object_id == SubscriptionResponder::kSubscribeObjectId) {
+            processSubscribeRequest(header, payload);
+        } else if (header.object_id == SubscriptionResponder::kUnsubscribeObjectId) {
+            processUnsubscribeRequest(header, payload);
+        }
+    } else {
+        processCommandRequest(header, payload);
     }
 }
 
@@ -666,6 +679,18 @@ void ROBOT::processManifestRequest(const btp::Header& header,
                                    btp::ByteView payload) {
     const uint64_t now_us = static_cast<uint64_t>(esp_timer_get_time());
     manifest_responder.handle_request(header, payload, now_us);
+}
+
+void ROBOT::processSubscribeRequest(const btp::Header& header,
+                                    btp::ByteView payload) {
+    const uint64_t now_us = static_cast<uint64_t>(esp_timer_get_time());
+    subscription_responder.handle_subscribe(header, payload, now_us);
+}
+
+void ROBOT::processUnsubscribeRequest(const btp::Header& header,
+                                      btp::ByteView payload) {
+    const uint64_t now_us = static_cast<uint64_t>(esp_timer_get_time());
+    subscription_responder.handle_unsubscribe(header, payload, now_us);
 }
 
 void ROBOT::handleSendStatic(const wifi_tx_info_t *tx_info, esp_now_send_status_t status) {
@@ -1166,7 +1191,22 @@ void ROBOT::routine(void *param){
 void ROBOT::sampleTelemetry() {
     const uint64_t now_us = static_cast<uint64_t>(esp_timer_get_time());
 
-    if (now_us >= next_protocol_test_us_) {
+    // Topico 17 (assinaturas e controle de taxa): a lease that nobody
+    // renewed falls back to "not publishing" here, before the gate below is
+    // even checked -- this is the robot-side half of PASSO 6's disconnect
+    // behavior (the dongle-side half clears its own aggregate and stops
+    // sending SUBSCRIBE upstream; either one alone is enough to eventually
+    // stop this topic).
+    telemetry.expire_subscriptions(now_us);
+
+    // protocol.test is periodic and now gated by an active subscription
+    // (topic_period_us() returns 0 -- "don't publish" -- until the dongle
+    // has forwarded at least one SUBSCRIBE for it). robot.state below stays
+    // ungated: it is event-driven, not periodic, and section 6.2 of
+    // COMMANDS_AND_ACTIONS.md defines max_rate_millihz=0 to mean exactly
+    // that ("nao periodico").
+    const uint64_t period_us = telemetry.topic_period_us(TelemetryPublisher::kProtocolTestTopicId);
+    if (period_us != 0U && now_us >= next_protocol_test_us_) {
         // IEEE-754 bits 3f 0d 0a 00 become PACKED_LE bytes 00 0a 0d 3f.
         // Every test sample therefore proves that NUL, LF and CR are data.
         constexpr uint32_t kEdgeFloatBits = 0x3F0D0A00U;
@@ -1174,7 +1214,13 @@ void ROBOT::sampleTelemetry() {
         std::memcpy(&edge_value, &kEdgeFloatBits, sizeof(edge_value));
         telemetry.publish_protocol_test(protocol_test_counter_++, edge_value,
                                         now_us);
-        next_protocol_test_us_ = now_us + kProtocolTestPeriodUs;
+        next_protocol_test_us_ = now_us + period_us;
+    } else if (period_us == 0U) {
+        // No active subscriber: keep the schedule pinned to "now" so the
+        // first sample after a fresh SUBSCRIBE is emitted promptly (within
+        // one sampleTelemetry() tick) instead of waiting out whatever
+        // interval was in flight before the last subscriber went away.
+        next_protocol_test_us_ = now_us;
     }
 
     const stateName current_state = static_cast<stateName>(

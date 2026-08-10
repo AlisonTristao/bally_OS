@@ -28,6 +28,7 @@
 #include <BtpTransport.h>
 #include <CommandProcessor.h>
 #include <ManifestResponder.h>
+#include <SubscriptionResponder.h>
 #include <TelemetryPublisher.h>
 #include <TxScheduler.h>
 #include <OTAUpdater.h>
@@ -144,6 +145,7 @@ public:
     CommandProcessor command_processor;
     ManifestResponder manifest_responder;
     TelemetryPublisher telemetry;
+    SubscriptionResponder subscription_responder;
     StateMachine machine;
     TinyShell shell;
     RobotSettings settings;
@@ -328,6 +330,14 @@ private:
                                btp::ByteView payload);
     void processManifestRequest(const btp::Header& header,
                                 btp::ByteView payload);
+    // Topico 17: CONTROL/SUBSCRIBE and CONTROL/UNSUBSCRIBE, routed the same
+    // way processManifestRequest already is (see handleReceiveStatic's
+    // object_id switch).
+    void processSubscribeRequest(const btp::Header& header,
+                                 btp::ByteView payload);
+    void processUnsubscribeRequest(const btp::Header& header,
+                                   btp::ByteView payload);
+    void dispatchDecoded(const btp::Header& header, btp::ByteView payload);
     void sampleTelemetry();
 
     // Register every shell module. Most modules are owned by the subsystem
@@ -398,8 +408,11 @@ private:
     std::optional<btp::Reassembler> command_reassembler_;
 
     // The state-machine task is the sole telemetry producer. The routine task
-    // only consumes the publisher's bounded SPSC queue.
-    static constexpr uint64_t kProtocolTestPeriodUs = 20000U;
+    // only consumes the publisher's bounded SPSC queue. The publish period is
+    // no longer a fixed constant (topico 17): it comes from
+    // TelemetryPublisher::topic_period_us(), which reflects whatever rate the
+    // dongle's SUBSCRIBE actually granted (protocol.test's schema max is
+    // still 50000 millihz = 20000us, see TelemetryPublisher.cpp's kSchemas).
     uint64_t next_protocol_test_us_ = 0U;
     uint32_t protocol_test_counter_ = 0U;
     stateName last_telemetry_state_ = NONE;
