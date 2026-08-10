@@ -251,8 +251,19 @@ bool ROBOT::configureProtocolIdentity() {
     nvs_close(handle);
     if (ret != ESP_OK || !protocol.configure(source_id, boot_id)) return false;
 
+    // Stable, opaque 16-byte identity for MANIFEST_DATA's source_uuid: the
+    // MAC (6 bytes, already used for source_id) plus a fixed non-zero
+    // suffix, same construction t_dongle_develop's SerialSession uses for
+    // its own peer_uuid (topico 13 RESULTADO) since neither side has a
+    // persisted UUID store yet.
+    std::memcpy(protocol_uuid_, base_mac, 6U);
+    static constexpr uint8_t kUuidSuffix[10] = {0xB0, 0xB1, 0xB2, 0xB3, 0xB4,
+                                                0xB5, 0xB6, 0xB7, 0xB8, 0xB9};
+    std::memcpy(protocol_uuid_ + 6U, kUuidSuffix, sizeof(kUuidSuffix));
+
     logger.configure_btp(protocol);
     command_processor.configure(protocol);
+    manifest_responder.configure(protocol, protocol_uuid_);
     telemetry.configure(protocol);
     logger.insert_logf(
         logType::INFO,
@@ -586,9 +597,15 @@ void ROBOT::handleReceiveStatic(const esp_now_recv_info_t *recv_info, const uint
                 return;
             }
             break;
+        case btp::MessageType::Control:
+            if (decoded.header.object_id !=
+                ManifestResponder::kManifestRequestObjectId) {
+                instance_->command_processor.note_drop();
+                return;
+            }
+            break;
         case btp::MessageType::Telemetry:
         case btp::MessageType::Log:
-        case btp::MessageType::Control:
         case btp::MessageType::Terminal:
         case btp::MessageType::Invalid:
             instance_->command_processor.note_drop();
@@ -596,7 +613,11 @@ void ROBOT::handleReceiveStatic(const esp_now_recv_info_t *recv_info, const uint
     }
 
     if ((decoded.header.flags & btp::kFlagFragmented) == 0U) {
-        instance_->processCommandRequest(decoded.header, decoded.payload);
+        if (decoded.header.type == btp::MessageType::Control) {
+            instance_->processManifestRequest(decoded.header, decoded.payload);
+        } else {
+            instance_->processCommandRequest(decoded.header, decoded.payload);
+        }
         return;
     }
 
@@ -606,7 +627,11 @@ void ROBOT::handleReceiveStatic(const esp_now_recv_info_t *recv_info, const uint
         decoded, static_cast<uint64_t>(esp_timer_get_time() / 1000ULL),
         &completed);
     if (event == btp::ReassemblyEvent::Complete) {
-        instance_->processCommandRequest(completed.header, completed.payload);
+        if (completed.header.type == btp::MessageType::Control) {
+            instance_->processManifestRequest(completed.header, completed.payload);
+        } else {
+            instance_->processCommandRequest(completed.header, completed.payload);
+        }
         instance_->command_reassembler_->release(completed.slot_index);
     } else if (event != btp::ReassemblyEvent::Accepted &&
                event != btp::ReassemblyEvent::Duplicate) {
@@ -635,6 +660,12 @@ void ROBOT::processCommandRequest(const btp::Header& header,
             command_processor.send_result(result);
         }
     }
+}
+
+void ROBOT::processManifestRequest(const btp::Header& header,
+                                   btp::ByteView payload) {
+    const uint64_t now_us = static_cast<uint64_t>(esp_timer_get_time());
+    manifest_responder.handle_request(header, payload, now_us);
 }
 
 void ROBOT::handleSendStatic(const wifi_tx_info_t *tx_info, esp_now_send_status_t status) {

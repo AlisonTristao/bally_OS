@@ -27,6 +27,7 @@ Este projeto implementa o controle de um robô baseado em ESP32-S3, utilizando a
 - **HBridge**: Controle dos motores via ponte H, incluindo direção e PWM.
 - **BtpTransport**: Endpoint BTP v1 com identidade de boot, sequência atômica, codec, CRC e fragmentação comuns.
 - **CommandProcessor**: Valida `COMMAND_REQUEST`, reserva uma chave de deduplicação por boot, executa cada intenção uma vez e reproduz o mesmo `COMMAND_RESULT` correlacionado nos retries.
+- **ManifestResponder**: Responde `CONTROL/MANIFEST_REQUEST` descrevendo os dois schemas estáticos de `TelemetryPublisher` (`protocol.test`, `robot.state`) como `MANIFEST_DATA`; `config_revision` é uma constante (1), já que o catálogo deste firmware não muda em tempo de execução.
 - **TxScheduler**: Filas estáticas separadas e FIFO por classe; transmite `COMMAND_RESULT > STATUS > LOG` crítico `> TELEMETRY > DEBUG`, com um único envio ESP-NOW pendente e contadores de aceite, entrega, timeout e drop.
 - **Logger**: Ring de eventos em PSRAM; emite exclusivamente frames `LOG` BTP de tamanho real via ESP-NOW.
 - **TelemetryPublisher**: Fila SPSC estática e não bloqueante para amostras `PACKED_LE`; publica `protocol.test` a 50 Hz e `robot.state` nas transições, preservando o timestamp da coleta.

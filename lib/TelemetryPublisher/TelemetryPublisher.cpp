@@ -27,14 +27,16 @@ constexpr TelemetryPublisher::TopicSchema kSchemas[] = {
      TelemetryPublisher::Encoding::PackedLe,
      kProtocolTestFields,
      sizeof(kProtocolTestFields) / sizeof(kProtocolTestFields[0]),
-     TelemetryPublisher::kProtocolTestPayloadSize},
+     TelemetryPublisher::kProtocolTestPayloadSize,
+     50000U},  // 50 Hz (topico 10/15)
     {TelemetryPublisher::kRobotStateTopicId,
      TelemetryPublisher::kSchemaVersion,
      "robot.state",
      TelemetryPublisher::Encoding::PackedLe,
      kRobotStateFields,
      sizeof(kRobotStateFields) / sizeof(kRobotStateFields[0]),
-     TelemetryPublisher::kRobotStatePayloadSize},
+     TelemetryPublisher::kRobotStatePayloadSize,
+     0U},  // published on state transitions, not periodic
 };
 
 void write_u16_le(std::uint8_t* output, std::uint16_t value) noexcept {

@@ -27,6 +27,7 @@
 #include <Logger.h>
 #include <BtpTransport.h>
 #include <CommandProcessor.h>
+#include <ManifestResponder.h>
 #include <TelemetryPublisher.h>
 #include <TxScheduler.h>
 #include <OTAUpdater.h>
@@ -141,6 +142,7 @@ public:
     BtpEndpoint protocol;
     TxScheduler tx_scheduler;
     CommandProcessor command_processor;
+    ManifestResponder manifest_responder;
     TelemetryPublisher telemetry;
     StateMachine machine;
     TinyShell shell;
@@ -233,6 +235,12 @@ private:
     // esp_now_init(), esp_now_add_peer()... all error/warn on a second call).
     bool communication_configured_ = false;
 
+    // 16-byte opaque identity handed to ManifestResponder (topico 16),
+    // derived from base_mac in configureProtocolIdentity() -- this robot has
+    // no HELLO/session concept over ESP-NOW, so there is no other source for
+    // a stable "source_uuid" to put in MANIFEST_DATA.
+    std::uint8_t protocol_uuid_[16]{};
+
     // Set once in init() from imu->begin()'s result. Gates the IMU read in
     // sampleEKF() — skipping it when the sensor never answered avoids
     // retrying (and blocking on) an I2C timeout on every EKF tick.
@@ -318,6 +326,8 @@ private:
     bool configureProtocolIdentity();
     void processCommandRequest(const btp::Header& header,
                                btp::ByteView payload);
+    void processManifestRequest(const btp::Header& header,
+                                btp::ByteView payload);
     void sampleTelemetry();
 
     // Register every shell module. Most modules are owned by the subsystem

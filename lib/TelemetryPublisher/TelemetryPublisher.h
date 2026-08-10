@@ -41,6 +41,10 @@ public:
         const FieldSchema* fields;
         std::size_t field_count;
         std::size_t payload_size;
+        // Declared publish rate for the manifest (COMMANDS_AND_ACTIONS.md
+        // section 6.2's max_rate_millihz); zero means "not periodic" (e.g.
+        // robot.state, published on transitions only).
+        std::uint32_t max_rate_millihz;
     };
 
     enum class PublishResult : std::uint8_t {
