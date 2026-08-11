@@ -454,7 +454,7 @@ void ROBOT::processDebug() {
         imu->getAGT();
         logger.insert_logf(
             logType::INFO,
-            "IMU: ax=%.4f ay=%.4f az=%.4f gx=%.4f gy=%.4f gz=%.4f t=%.2f",
+            "IMU: ax=%.2f\tay=%.2f\taz=%.2f\tgx=%.2f\tgy=%.2f\tgz=%.2f\tt=%.2f",
             imu->accX(), imu->accY(), imu->accZ(),
             imu->gyrX(), imu->gyrY(), imu->gyrZ(), imu->temp());
     }
@@ -540,9 +540,9 @@ void ROBOT::updateSoundFeedback() {
     // Side-sensor edge: same rising-edge logic as buttons, own sound —
     // side sensors can trigger a lot faster/more often on a line-following
     // pass, so Ping is deliberately shorter than Click.
-    if ((current_side_sensors & ~previous_side_sensors_) != 0) {
-        junkebox->play(BuiltinSound::Ping);
-    }
+    //if ((current_side_sensors & ~previous_side_sensors_) != 0) {
+    //    junkebox->play(BuiltinSound::Ping);
+    //}
 
     // State transition: first table row matching (from, to) wins.
     if (current_state != previous_state_) {
