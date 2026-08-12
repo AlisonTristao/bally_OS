@@ -2,6 +2,8 @@
 
 #include <BtpTransport.h>
 #include <CommandProcessor.h>
+#include <StatusReporter.h>
+#include <SubscriptionResponder.h>
 #include <TelemetryPublisher.h>
 #include <TxScheduler.h>
 #include <btp/codec.hpp>
@@ -483,6 +485,414 @@ void test_scheduler_counts_delivery_timeout_and_link_delivery() {
     TEST_ASSERT_EQUAL_UINT32(1U, scheduler.stats().delivered);
 }
 
+// ---------------------------------------------------------------------------
+// Topico 17: assinaturas e controle de taxa.
+// ---------------------------------------------------------------------------
+
+std::uint16_t read_u16(const std::uint8_t* data) {
+    return static_cast<std::uint16_t>(static_cast<std::uint16_t>(data[0]) |
+                                      (static_cast<std::uint16_t>(data[1]) << 8U));
+}
+
+std::uint32_t read_u32(const std::uint8_t* data) {
+    return static_cast<std::uint32_t>(data[0]) |
+           (static_cast<std::uint32_t>(data[1]) << 8U) |
+           (static_cast<std::uint32_t>(data[2]) << 16U) |
+           (static_cast<std::uint32_t>(data[3]) << 24U);
+}
+
+std::uint64_t read_u64(const std::uint8_t* data) {
+    std::uint64_t value = 0U;
+    for (std::size_t i = 0U; i < 8U; ++i) {
+        value |= static_cast<std::uint64_t>(data[i]) << (8U * i);
+    }
+    return value;
+}
+
+constexpr std::uint32_t kLocalSource = 0x11223344U;
+constexpr std::uint32_t kLocalBoot = 0xA1B2C3D4U;
+
+btp::Header control_header(std::uint16_t object_id, std::uint32_t source_id,
+                           std::uint32_t boot_id, std::uint32_t sequence) {
+    return {
+        .type = btp::MessageType::Control,
+        .flags = 0U,
+        .source_id = source_id,
+        .boot_id = boot_id,
+        .sequence = sequence,
+        .timestamp_us = 1000U,
+        .object_id = object_id,
+        .fragment_index = 0U,
+        .fragment_count = 1U,
+    };
+}
+
+std::vector<std::uint8_t> subscribe_payload(std::uint16_t topic_id,
+                                            std::uint32_t rate_millihz,
+                                            std::uint32_t lease_ms) {
+    std::vector<std::uint8_t> payload(20U, 0U);
+    write_u32(payload.data(), kLocalSource);
+    write_u32(payload.data() + 4U, kLocalBoot);
+    write_u16(payload.data() + 8U, topic_id);
+    write_u16(payload.data() + 10U, 0U);  // flags: zero in v1
+    write_u32(payload.data() + 12U, rate_millihz);
+    write_u32(payload.data() + 16U, lease_ms);
+    return payload;
+}
+
+// Decodes the single frame captured by capture_send and returns its logical
+// payload, which for every *_RESULT here fits in one unfragmented frame.
+btp::DecodedFrame decode_only_frame() {
+    btp::DecodedFrame decoded{};
+    TEST_ASSERT_EQUAL_UINT32(1U, sent_count);
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<std::uint8_t>(btp::Error::Ok),
+        static_cast<std::uint8_t>(btp::decode(sent_frames[0], sent_sizes[0],
+                                              btp::TransportProfile::EspNow,
+                                              &decoded)));
+    return decoded;
+}
+
+// Acceptance criterion: "pedido acima do maximo e limitado e informado ao
+// cliente" -- clamped, answered SUCCESS, never rejected. The mirror case
+// (below the schema's floor) is rejected, because section 7 forbids granting
+// a rate above the requested one.
+void test_subscribe_above_max_is_clamped_and_below_min_is_rejected() {
+    BtpEndpoint endpoint;
+    TEST_ASSERT_TRUE(endpoint.configure(kLocalSource, kLocalBoot));
+    endpoint.set_send_callback(capture_send);
+    TelemetryPublisher publisher;
+    publisher.configure(endpoint);
+    SubscriptionResponder responder;
+    responder.configure(endpoint, publisher);
+
+    const auto request = subscribe_payload(
+        TelemetryPublisher::kProtocolTestTopicId, 200000U, 5000U);
+    const btp::Header header = control_header(
+        SubscriptionResponder::kSubscribeObjectId, 0x0C30AA5CU, 0x10203040U, 7U);
+
+    sent_count = 0U;
+    TEST_ASSERT_TRUE(responder.handle_subscribe(
+        header, {request.data(), request.size()}, 1000U));
+    btp::DecodedFrame decoded = decode_only_frame();
+    TEST_ASSERT_EQUAL_HEX16(SubscriptionResponder::kSubscribeResultObjectId,
+                            decoded.header.object_id);
+    TEST_ASSERT_EQUAL_UINT32(28U, decoded.payload.size);
+    // Reference to the request: (source, boot, reply_to_sequence).
+    TEST_ASSERT_EQUAL_HEX32(0x0C30AA5CU, read_u32(decoded.payload.data));
+    TEST_ASSERT_EQUAL_HEX32(0x10203040U, read_u32(decoded.payload.data + 4U));
+    TEST_ASSERT_EQUAL_UINT32(7U, read_u32(decoded.payload.data + 8U));
+    TEST_ASSERT_EQUAL_UINT8(0x00U, decoded.payload.data[12]);   // SUCCESS
+    TEST_ASSERT_EQUAL_HEX16(0x0000U, read_u16(decoded.payload.data + 14U));
+    TEST_ASSERT_NOT_EQUAL(0U, read_u32(decoded.payload.data + 16U));
+    // 200 Hz requested, schema max is 50 Hz: clamped, and the client is told.
+    TEST_ASSERT_EQUAL_UINT32(50000U, read_u32(decoded.payload.data + 20U));
+    TEST_ASSERT_EQUAL_UINT32(5000U, read_u32(decoded.payload.data + 24U));
+    // The topic now publishes at the granted rate, not the requested one.
+    TEST_ASSERT_EQUAL_UINT64(
+        20000U,
+        publisher.topic_period_us(TelemetryPublisher::kProtocolTestTopicId));
+
+    // Below the schema floor (0.1 Hz for protocol.test): rejected with
+    // INVALID_ARGUMENT instead of being silently raised.
+    const auto slow = subscribe_payload(
+        TelemetryPublisher::kProtocolTestTopicId, 50U, 5000U);
+    sent_count = 0U;
+    TEST_ASSERT_TRUE(responder.handle_subscribe(
+        control_header(SubscriptionResponder::kSubscribeObjectId, 0x0C30AA5CU,
+                       0x10203040U, 8U),
+        {slow.data(), slow.size()}, 2000U));
+    decoded = decode_only_frame();
+    TEST_ASSERT_EQUAL_UINT8(0x01U, decoded.payload.data[12]);  // REJECTED
+    TEST_ASSERT_EQUAL_HEX16(0x0003U, read_u16(decoded.payload.data + 14U));
+    TEST_ASSERT_EQUAL_UINT32(0U, read_u32(decoded.payload.data + 16U));
+    TEST_ASSERT_EQUAL_UINT32(0U, read_u32(decoded.payload.data + 20U));
+    TEST_ASSERT_EQUAL_UINT32(0U, read_u32(decoded.payload.data + 24U));
+
+    // A non-periodic topic (max_rate_millihz == 0) is capped by the schema's
+    // nominal default instead, so the answer is never an arbitrary echo.
+    const auto state = subscribe_payload(
+        TelemetryPublisher::kRobotStateTopicId, 999000U, 5000U);
+    sent_count = 0U;
+    TEST_ASSERT_TRUE(responder.handle_subscribe(
+        control_header(SubscriptionResponder::kSubscribeObjectId, 0x0C30AA5CU,
+                       0x10203040U, 9U),
+        {state.data(), state.size()}, 3000U));
+    decoded = decode_only_frame();
+    TEST_ASSERT_EQUAL_UINT8(0x00U, decoded.payload.data[12]);
+    TEST_ASSERT_EQUAL_UINT32(10000U, read_u32(decoded.payload.data + 20U));
+}
+
+// PASSO 5: several sessions on one topic aggregate; the slow one never
+// throttles the fast one and each is told its own granted rate.
+void test_multiple_subscribers_aggregate_on_one_topic() {
+    BtpEndpoint endpoint;
+    TEST_ASSERT_TRUE(endpoint.configure(kLocalSource, kLocalBoot));
+    TelemetryPublisher publisher;
+    publisher.configure(endpoint);
+
+    const auto slow = publisher.subscribe(
+        TelemetryPublisher::kProtocolTestTopicId, 0xAAAAU, 1U, 1000U, 5000U, 0U);
+    const auto fast = publisher.subscribe(
+        TelemetryPublisher::kProtocolTestTopicId, 0xBBBBU, 1U, 25000U, 5000U, 0U);
+    TEST_ASSERT_TRUE(slow.topic_known);
+    TEST_ASSERT_TRUE(fast.topic_known);
+    TEST_ASSERT_NOT_EQUAL(slow.subscription_id, fast.subscription_id);
+    TEST_ASSERT_EQUAL_UINT32(1000U, slow.effective_rate_millihz);
+    TEST_ASSERT_EQUAL_UINT32(25000U, fast.effective_rate_millihz);
+
+    TEST_ASSERT_EQUAL_UINT16(
+        2U, publisher.topic_subscriber_count(
+                TelemetryPublisher::kProtocolTestTopicId));
+    TEST_ASSERT_EQUAL_UINT32(
+        25000U, publisher.topic_effective_rate_millihz(
+                    TelemetryPublisher::kProtocolTestTopicId));
+    TEST_ASSERT_EQUAL_UINT64(
+        40000U,
+        publisher.topic_period_us(TelemetryPublisher::kProtocolTestTopicId));
+
+    // An exact repeat of the same request from the same session renews the
+    // lease and returns the same subscription instead of creating another.
+    const auto repeat = publisher.subscribe(
+        TelemetryPublisher::kProtocolTestTopicId, 0xAAAAU, 1U, 1000U, 5000U, 500U);
+    TEST_ASSERT_EQUAL_UINT32(slow.subscription_id, repeat.subscription_id);
+    TEST_ASSERT_EQUAL_UINT32(2U, publisher.active_subscription_count());
+
+    // Different bytes from the same session atomically replace it.
+    const auto changed = publisher.subscribe(
+        TelemetryPublisher::kProtocolTestTopicId, 0xAAAAU, 1U, 2000U, 5000U, 600U);
+    TEST_ASSERT_NOT_EQUAL(slow.subscription_id, changed.subscription_id);
+    TEST_ASSERT_EQUAL_UINT32(2U, publisher.active_subscription_count());
+}
+
+// Acceptance criterion: "fechar um grafico reduz trafego quando nenhum outro
+// consumidor usa o topico" -- and only then.
+void test_topic_keeps_publishing_until_the_last_consumer_leaves() {
+    BtpEndpoint endpoint;
+    TEST_ASSERT_TRUE(endpoint.configure(kLocalSource, kLocalBoot));
+    TelemetryPublisher publisher;
+    publisher.configure(endpoint);
+
+    const auto first = publisher.subscribe(
+        TelemetryPublisher::kProtocolTestTopicId, 0xAAAAU, 1U, 50000U, 5000U, 0U);
+    const auto second = publisher.subscribe(
+        TelemetryPublisher::kProtocolTestTopicId, 0xBBBBU, 1U, 10000U, 5000U, 0U);
+
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<std::uint8_t>(TelemetryPublisher::UnsubscribeOutcome::Removed),
+        static_cast<std::uint8_t>(publisher.unsubscribe(first.subscription_id)));
+    // The fast consumer left; the topic keeps going for the slow one, now at
+    // the slow one's rate.
+    TEST_ASSERT_TRUE(
+        publisher.topic_active(TelemetryPublisher::kProtocolTestTopicId));
+    TEST_ASSERT_EQUAL_UINT32(
+        10000U, publisher.topic_effective_rate_millihz(
+                    TelemetryPublisher::kProtocolTestTopicId));
+
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<std::uint8_t>(TelemetryPublisher::UnsubscribeOutcome::Removed),
+        static_cast<std::uint8_t>(publisher.unsubscribe(second.subscription_id)));
+    TEST_ASSERT_FALSE(
+        publisher.topic_active(TelemetryPublisher::kProtocolTestTopicId));
+    TEST_ASSERT_EQUAL_UINT64(
+        0U, publisher.topic_period_us(TelemetryPublisher::kProtocolTestTopicId));
+
+    // Removing an already-absent subscription stays idempotent.
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<std::uint8_t>(TelemetryPublisher::UnsubscribeOutcome::NotFound),
+        static_cast<std::uint8_t>(publisher.unsubscribe(second.subscription_id)));
+}
+
+// PASSO 6: lease expiry and peer reboot both end a session's subscriptions.
+void test_lease_expiry_and_new_boot_id_end_a_session() {
+    BtpEndpoint endpoint;
+    TEST_ASSERT_TRUE(endpoint.configure(kLocalSource, kLocalBoot));
+    TelemetryPublisher publisher;
+    publisher.configure(endpoint);
+
+    // 2000 ms lease granted at t=1 s.
+    const auto held = publisher.subscribe(
+        TelemetryPublisher::kProtocolTestTopicId, 0xAAAAU, 1U, 50000U, 2000U,
+        1000000U);
+    TEST_ASSERT_EQUAL_UINT32(2000U, held.granted_lease_ms);
+
+    publisher.expire_subscriptions(2999999U);
+    TEST_ASSERT_TRUE(
+        publisher.topic_active(TelemetryPublisher::kProtocolTestTopicId));
+    publisher.expire_subscriptions(3000000U);
+    TEST_ASSERT_FALSE(
+        publisher.topic_active(TelemetryPublisher::kProtocolTestTopicId));
+    TEST_ASSERT_EQUAL_UINT64(
+        0U, publisher.topic_period_us(TelemetryPublisher::kProtocolTestTopicId));
+
+    // A lease shorter than the local floor is raised, so an abandoned client
+    // is never swept faster than the minimum.
+    const auto short_lease = publisher.subscribe(
+        TelemetryPublisher::kProtocolTestTopicId, 0xAAAAU, 2U, 50000U, 1U, 0U);
+    TEST_ASSERT_EQUAL_UINT32(1000U, short_lease.granted_lease_ms);
+
+    // Same peer, new boot_id: the old session's subscriptions are released
+    // before the new one is granted.
+    publisher.subscribe(TelemetryPublisher::kRobotStateTopicId, 0xAAAAU, 2U,
+                        5000U, 5000U, 0U);
+    TEST_ASSERT_EQUAL_UINT32(2U, publisher.active_subscription_count());
+    publisher.subscribe(TelemetryPublisher::kProtocolTestTopicId, 0xAAAAU, 3U,
+                        50000U, 5000U, 0U);
+    TEST_ASSERT_EQUAL_UINT32(1U, publisher.active_subscription_count());
+    TEST_ASSERT_EQUAL_UINT16(
+        0U, publisher.topic_subscriber_count(
+                TelemetryPublisher::kRobotStateTopicId));
+
+    // Explicit teardown of the surviving session.
+    TEST_ASSERT_EQUAL_UINT32(1U, publisher.drop_session(0xAAAAU, 3U));
+    TEST_ASSERT_EQUAL_UINT32(0U, publisher.active_subscription_count());
+}
+
+// PASSO 8/9: bytes and drops are measured per topic and reach the wire as the
+// 24-octet topic_status records of COMMANDS_AND_ACTIONS.md section 8.1.
+void test_topic_status_is_measured_and_serialized() {
+    sent_count = 0U;
+    BtpEndpoint endpoint;
+    TEST_ASSERT_TRUE(endpoint.configure(kLocalSource, kLocalBoot));
+    endpoint.set_send_callback(capture_send);
+    TelemetryPublisher publisher;
+    publisher.configure(endpoint);
+    publisher.subscribe(TelemetryPublisher::kProtocolTestTopicId, 0xAAAAU, 1U,
+                        50000U, 5000U, 0U);
+
+    // One published sample: 10 octets of logical TELEMETRY payload, no
+    // envelope, no CRC.
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<std::uint8_t>(TelemetryPublisher::PublishResult::Queued),
+        static_cast<std::uint8_t>(publisher.publish_protocol_test(
+            1U, float_from_bits(0x3F0D0A00U), 1000U)));
+    TEST_ASSERT_EQUAL_UINT32(1U, publisher.flush(1U));
+
+    // Then fill the queue and force one drop on the same topic.
+    for (std::size_t i = 0U; i < TelemetryPublisher::kQueueCapacity; ++i) {
+        publisher.publish_protocol_test(static_cast<std::uint32_t>(i),
+                                        float_from_bits(0x3F0D0A00U), 2000U);
+    }
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<std::uint8_t>(TelemetryPublisher::PublishResult::QueueFull),
+        static_cast<std::uint8_t>(publisher.publish_protocol_test(
+            99U, float_from_bits(0x3F0D0A00U), 3000U)));
+
+    TelemetryPublisher::TopicStats stats[4]{};
+    TEST_ASSERT_EQUAL_UINT32(2U, publisher.topic_stats(stats, 4U));
+    TEST_ASSERT_EQUAL_HEX16(TelemetryPublisher::kProtocolTestTopicId,
+                            stats[0].topic_id);
+    TEST_ASSERT_EQUAL_UINT16(1U, stats[0].subscriber_count);
+    TEST_ASSERT_EQUAL_UINT32(50000U, stats[0].effective_rate_millihz);
+    TEST_ASSERT_EQUAL_UINT64(TelemetryPublisher::kProtocolTestPayloadSize,
+                             stats[0].bytes_sent_total);
+    TEST_ASSERT_EQUAL_UINT64(1U, stats[0].samples_dropped_total);
+    TEST_ASSERT_EQUAL_UINT16(0U, stats[1].subscriber_count);
+    TEST_ASSERT_EQUAL_UINT32(0U, stats[1].effective_rate_millihz);
+
+    StatusReporter::Counters counters{};
+    counters.frames_rx = 0x0102030405060708ULL;
+    counters.telemetry_dropped = 1U;
+    StatusReporter::TopicRecord records[2]{};
+    records[0].source_id = kLocalSource;
+    records[0].topic_id = TelemetryPublisher::kProtocolTestTopicId;
+    records[0].subscriber_count = 2U;
+    records[0].effective_rate_millihz = 50000U;
+    records[0].bytes_total = 0x1122334455667788ULL;
+    records[0].samples_dropped_total = 7U;
+    records[1].source_id = kLocalSource;
+    records[1].topic_id = TelemetryPublisher::kRobotStateTopicId;
+
+    std::uint8_t payload[StatusReporter::kMaxPayloadSize]{};
+    const std::size_t size = StatusReporter::serialize(
+        StatusReporter::kFlagDegraded, 0x00000000DEADBEEFULL, counters, records,
+        2U, payload, sizeof(payload));
+    TEST_ASSERT_EQUAL_UINT32(92U + 2U + (28U * 2U), size);
+    TEST_ASSERT_EQUAL_UINT16(2U, read_u16(payload));  // status_version
+    TEST_ASSERT_EQUAL_HEX16(0x0001U, read_u16(payload + 2U));  // DEGRADED
+    TEST_ASSERT_EQUAL_UINT64(0x00000000DEADBEEFULL, read_u64(payload + 4U));
+    TEST_ASSERT_EQUAL_UINT64(0x0102030405060708ULL, read_u64(payload + 12U));
+    TEST_ASSERT_EQUAL_UINT64(1U, read_u64(payload + 84U));
+    TEST_ASSERT_EQUAL_UINT16(2U, read_u16(payload + 92U));  // topic_status_count
+    TEST_ASSERT_EQUAL_HEX32(kLocalSource, read_u32(payload + 94U));
+    TEST_ASSERT_EQUAL_HEX16(TelemetryPublisher::kProtocolTestTopicId,
+                            read_u16(payload + 98U));
+    TEST_ASSERT_EQUAL_UINT16(2U, read_u16(payload + 100U));
+    TEST_ASSERT_EQUAL_UINT32(50000U, read_u32(payload + 102U));
+    TEST_ASSERT_EQUAL_UINT64(0x1122334455667788ULL, read_u64(payload + 106U));
+    TEST_ASSERT_EQUAL_UINT64(7U, read_u64(payload + 114U));
+    TEST_ASSERT_EQUAL_HEX16(TelemetryPublisher::kRobotStateTopicId,
+                            read_u16(payload + 94U + 28U + 4U));
+
+    // A record without a source_id or topic_id is not emitted, and the count
+    // reflects what was actually written.
+    records[1].topic_id = 0U;
+    const std::size_t trimmed = StatusReporter::serialize(
+        0U, 1U, counters, records, 2U, payload, sizeof(payload));
+    TEST_ASSERT_EQUAL_UINT32(92U + 2U + 28U, trimmed);
+    TEST_ASSERT_EQUAL_UINT16(1U, read_u16(payload + 92U));
+
+    // status_version=1 MUST NOT carry the per-topic block at all.
+    const std::size_t legacy = StatusReporter::serialize(
+        0U, 1U, counters, records, 2U, payload, sizeof(payload), true);
+    TEST_ASSERT_EQUAL_UINT32(92U, legacy);
+    TEST_ASSERT_EQUAL_UINT16(1U, read_u16(payload));
+}
+
+// The reporter stamps this robot's own source_id on every record and sends
+// one unfragmented CONTROL/STATUS.
+void test_status_is_published_as_a_control_message() {
+    sent_count = 0U;
+    BtpEndpoint endpoint;
+    TEST_ASSERT_TRUE(endpoint.configure(kLocalSource, kLocalBoot));
+    endpoint.set_send_callback(capture_send);
+    TelemetryPublisher publisher;
+    publisher.configure(endpoint);
+    publisher.subscribe(TelemetryPublisher::kProtocolTestTopicId, 0xAAAAU, 1U,
+                        50000U, 5000U, 0U);
+
+    StatusReporter reporter;
+    reporter.configure(endpoint, publisher);
+    StatusReporter::Counters counters{};
+    TEST_ASSERT_TRUE(reporter.publish(0U, 123456U, counters, 123456U));
+
+    const btp::DecodedFrame decoded = decode_only_frame();
+    TEST_ASSERT_EQUAL_UINT8(static_cast<std::uint8_t>(btp::MessageType::Control),
+                            static_cast<std::uint8_t>(decoded.header.type));
+    TEST_ASSERT_EQUAL_HEX16(StatusReporter::kStatusObjectId,
+                            decoded.header.object_id);
+    TEST_ASSERT_EQUAL_UINT8(1U, decoded.header.fragment_count);
+    TEST_ASSERT_EQUAL_UINT32(92U + 2U + (28U * 2U), decoded.payload.size);
+    TEST_ASSERT_EQUAL_UINT16(2U, read_u16(decoded.payload.data));
+    TEST_ASSERT_EQUAL_UINT16(2U, read_u16(decoded.payload.data + 92U));
+    TEST_ASSERT_EQUAL_HEX32(kLocalSource, read_u32(decoded.payload.data + 94U));
+    TEST_ASSERT_EQUAL_UINT32(50000U, read_u32(decoded.payload.data + 102U));
+}
+
+// Rate control must not touch the sample itself: same schema_version, same
+// payload bytes and the origin timestamp, whatever rate was granted.
+void test_rate_control_changes_neither_timestamp_nor_schema() {
+    sent_count = 0U;
+    BtpEndpoint endpoint;
+    TEST_ASSERT_TRUE(endpoint.configure(kLocalSource, kLocalBoot));
+    endpoint.set_send_callback(capture_send);
+    TelemetryPublisher publisher;
+    publisher.configure(endpoint);
+    publisher.subscribe(TelemetryPublisher::kProtocolTestTopicId, 0xAAAAU, 1U,
+                        1000U, 5000U, 0U);
+
+    publisher.publish_protocol_test(0x01020304U, float_from_bits(0x3F0D0A00U),
+                                    987654321U);
+    TEST_ASSERT_EQUAL_UINT32(1U, publisher.flush(1U));
+    const btp::DecodedFrame decoded = decode_only_frame();
+    TEST_ASSERT_EQUAL_UINT64(987654321U, decoded.header.timestamp_us);
+    TEST_ASSERT_EQUAL_UINT16(TelemetryPublisher::kSchemaVersion,
+                             read_u16(decoded.payload.data));
+    TEST_ASSERT_EQUAL_UINT32(TelemetryPublisher::kProtocolTestPayloadSize,
+                             decoded.payload.size);
+    TEST_ASSERT_EQUAL_HEX32(0x01020304U, read_u32(decoded.payload.data + 2U));
+}
+
 }  // namespace
 
 void setUp() {}
@@ -504,5 +914,12 @@ int main(int, char**) {
     RUN_TEST(test_saturated_execution_queue_returns_cached_busy_result);
     RUN_TEST(test_full_telemetry_queue_cannot_block_command_result);
     RUN_TEST(test_scheduler_counts_delivery_timeout_and_link_delivery);
+    RUN_TEST(test_subscribe_above_max_is_clamped_and_below_min_is_rejected);
+    RUN_TEST(test_multiple_subscribers_aggregate_on_one_topic);
+    RUN_TEST(test_topic_keeps_publishing_until_the_last_consumer_leaves);
+    RUN_TEST(test_lease_expiry_and_new_boot_id_end_a_session);
+    RUN_TEST(test_topic_status_is_measured_and_serialized);
+    RUN_TEST(test_status_is_published_as_a_control_message);
+    RUN_TEST(test_rate_control_changes_neither_timestamp_nor_schema);
     return UNITY_END();
 }

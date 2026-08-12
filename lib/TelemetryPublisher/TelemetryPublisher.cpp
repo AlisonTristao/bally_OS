@@ -28,7 +28,10 @@ constexpr TelemetryPublisher::TopicSchema kSchemas[] = {
      kProtocolTestFields,
      sizeof(kProtocolTestFields) / sizeof(kProtocolTestFields[0]),
      TelemetryPublisher::kProtocolTestPayloadSize,
-     50000U},  // 50 Hz (topico 10/15)
+     50000U,  // max: 50 Hz (topico 10/15)
+     100U,    // min: 0.1 Hz -- one sample every 10 s is the slowest schedule
+              // worth keeping a subscription alive for
+     10000U},  // default/nominal: 10 Hz (unused while max is nonzero)
     {TelemetryPublisher::kRobotStateTopicId,
      TelemetryPublisher::kSchemaVersion,
      "robot.state",
@@ -36,7 +39,10 @@ constexpr TelemetryPublisher::TopicSchema kSchemas[] = {
      kRobotStateFields,
      sizeof(kRobotStateFields) / sizeof(kRobotStateFields[0]),
      TelemetryPublisher::kRobotStatePayloadSize,
-     0U},  // published on state transitions, not periodic
+     0U,      // max: published on state transitions, not periodic
+     0U,      // min: no floor -- an event-driven topic has no schedule
+     10000U},  // default: caps the informational rate echoed back at the
+               // state machine's own 10 Hz-ish transition ceiling
 };
 
 void write_u16_le(std::uint8_t* output, std::uint16_t value) noexcept {
@@ -255,6 +261,64 @@ void TelemetryPublisher::init_runtime_if_needed() noexcept {
     runtime_initialized_ = true;
 }
 
+const TelemetryPublisher::TopicSchema* TelemetryPublisher::find_schema(
+    std::uint16_t topic_id) noexcept {
+    std::size_t schema_count = 0U;
+    const TopicSchema* schema_list = schemas(&schema_count);
+    for (std::size_t i = 0U; i < schema_count; ++i) {
+        if (schema_list[i].topic_id == topic_id) return &schema_list[i];
+    }
+    return nullptr;
+}
+
+TelemetryPublisher::RateResolution TelemetryPublisher::resolve_effective_rate(
+    const TopicSchema& schema, std::uint32_t requested_rate_millihz) noexcept {
+    RateResolution resolution{};
+
+    // A periodic topic is capped by its manifest max_rate_millihz; a
+    // non-periodic one (max == 0) by the local nominal default, if any.
+    // Either way the result never exceeds what the client asked for, which
+    // is the MUST NOT of COMMANDS_AND_ACTIONS.md section 7.
+    const std::uint32_t cap = (schema.max_rate_millihz != 0U)
+                                  ? schema.max_rate_millihz
+                                  : schema.default_rate_millihz;
+    std::uint32_t effective = requested_rate_millihz;
+    if (cap != 0U && effective > cap) effective = cap;
+
+    if (schema.min_rate_millihz != 0U && effective < schema.min_rate_millihz) {
+        resolution.below_minimum = true;
+        resolution.effective_rate_millihz = 0U;
+        return resolution;
+    }
+
+    resolution.effective_rate_millihz = effective;
+    return resolution;
+}
+
+std::uint16_t TelemetryPublisher::locked_subscriber_count(
+    std::uint16_t topic_id) const noexcept {
+    std::uint16_t count = 0U;
+    for (std::size_t i = 0U; i < kMaxSubscriptions; ++i) {
+        if (subscriptions_[i].active && subscriptions_[i].topic_id == topic_id) ++count;
+    }
+    return count;
+}
+
+std::uint32_t TelemetryPublisher::locked_topic_rate(std::uint16_t topic_id) const noexcept {
+    // Aggregate = max over live subscriptions. A 1 Hz chart sharing a topic
+    // with a 50 Hz chart must not slow the fast one down, and the fast one
+    // already covers the slow one's samples.
+    std::uint32_t rate = 0U;
+    for (std::size_t i = 0U; i < kMaxSubscriptions; ++i) {
+        const Subscription& subscription = subscriptions_[i];
+        if (subscription.active && subscription.topic_id == topic_id &&
+            subscription.effective_rate_millihz > rate) {
+            rate = subscription.effective_rate_millihz;
+        }
+    }
+    return rate;
+}
+
 TelemetryPublisher::SubscribeOutcome TelemetryPublisher::subscribe(
     std::uint16_t topic_id,
     std::uint32_t request_source_id,
@@ -264,78 +328,112 @@ TelemetryPublisher::SubscribeOutcome TelemetryPublisher::subscribe(
     std::uint64_t now_us) noexcept {
     SubscribeOutcome outcome{};
 
-    std::size_t schema_count = 0U;
-    const TopicSchema* schema_list = schemas(&schema_count);
-    const TopicSchema* schema = nullptr;
-    for (std::size_t i = 0U; i < schema_count; ++i) {
-        if (schema_list[i].topic_id == topic_id) {
-            schema = &schema_list[i];
+    const TopicSchema* schema = find_schema(topic_id);
+    if (schema == nullptr) return outcome;  // topic_known stays false
+
+    const RateResolution rate = resolve_effective_rate(*schema, requested_rate_millihz);
+    if (rate.below_minimum) {
+        outcome.topic_known = true;
+        outcome.rate_below_minimum = true;
+        return outcome;
+    }
+
+    RuntimeLockGuard guard(runtime_lock_);
+    if (!guard.acquired()) {
+        // Losing the short spin is not a protocol error, but answering
+        // SUCCESS without having stored anything would be a lie; report it
+        // as a capacity problem so the client simply retries.
+        outcome.topic_known = true;
+        outcome.capacity_exhausted = true;
+        return outcome;
+    }
+    init_runtime_if_needed();
+
+    // PASSO 6: the same peer coming back with a different boot_id means the
+    // old session is gone for good; release everything it still held before
+    // granting anything to the new one.
+    for (std::size_t i = 0U; i < kMaxSubscriptions; ++i) {
+        Subscription& subscription = subscriptions_[i];
+        if (subscription.active &&
+            subscription.subscriber_source_id == request_source_id &&
+            subscription.subscriber_boot_id != request_boot_id) {
+            subscription = Subscription{};
+        }
+    }
+
+    const std::uint32_t granted_lease_ms =
+        (requested_lease_ms < kMinLeaseMs) ? kMinLeaseMs
+        : (requested_lease_ms > kMaxLeaseMs) ? kMaxLeaseMs
+                                             : requested_lease_ms;
+
+    Subscription* slot = nullptr;
+    for (std::size_t i = 0U; i < kMaxSubscriptions; ++i) {
+        Subscription& subscription = subscriptions_[i];
+        if (subscription.active && subscription.topic_id == topic_id &&
+            subscription.subscriber_source_id == request_source_id &&
+            subscription.subscriber_boot_id == request_boot_id) {
+            slot = &subscription;
             break;
         }
     }
-    if (schema == nullptr) return outcome;  // topic_known stays false
 
-    RuntimeLockGuard guard(runtime_lock_);
-    if (!guard.acquired()) return outcome;
-    init_runtime_if_needed();
-
-    const int idx = find_topic_index(topic_id);
-    if (idx < 0) return outcome;
-    TopicRuntime& runtime = runtime_[static_cast<std::size_t>(idx)];
-
-    const std::uint32_t clamped_lease_ms =
-        (requested_lease_ms < kMinLeaseMs) ? kMinLeaseMs
-        : (requested_lease_ms > kMaxLeaseMs) ? kMaxLeaseMs
-                                              : requested_lease_ms;
-    // Effective rate never exceeds what was asked nor the schema's max
-    // (COMMANDS_AND_ACTIONS.md section 7). A schema max of zero means "not
-    // periodic" (robot.state): the request is accepted and the rate is
-    // echoed back informationally, but nothing in sampleTelemetry() uses it
-    // to gate an event-driven publish.
-    std::uint32_t effective_rate = requested_rate_millihz;
-    if (schema->max_rate_millihz != 0U && effective_rate > schema->max_rate_millihz) {
-        effective_rate = schema->max_rate_millihz;
-    }
-    if (effective_rate == 0U) effective_rate = 1U;  // never grant a zero rate
-
-    const bool sameRequester = runtime.subscribed &&
-        runtime.request_source_id == request_source_id &&
-        runtime.request_boot_id == request_boot_id &&
-        runtime.requested_rate_millihz == requested_rate_millihz &&
-        runtime.requested_lease_ms == requested_lease_ms;
-
-    if (!sameRequester) {
-        runtime.subscription_id = next_subscription_id_++;
+    if (slot != nullptr) {
+        // Same session, same topic: renew when the request bytes are
+        // identical, replace (new subscription_id) when they are not.
+        const bool identical_request =
+            slot->requested_rate_millihz == requested_rate_millihz &&
+            slot->requested_lease_ms == requested_lease_ms;
+        if (!identical_request) {
+            slot->subscription_id = next_subscription_id_++;
+            if (next_subscription_id_ == 0U) next_subscription_id_ = 1U;
+        }
+    } else {
+        for (std::size_t i = 0U; i < kMaxSubscriptions; ++i) {
+            if (!subscriptions_[i].active) {
+                slot = &subscriptions_[i];
+                break;
+            }
+        }
+        if (slot == nullptr) {
+            outcome.topic_known = true;
+            outcome.capacity_exhausted = true;
+            return outcome;
+        }
+        *slot = Subscription{};
+        slot->subscription_id = next_subscription_id_++;
         if (next_subscription_id_ == 0U) next_subscription_id_ = 1U;  // never 0
     }
 
-    runtime.subscribed = true;
-    runtime.effective_rate_millihz = effective_rate;
-    runtime.lease_deadline_us = now_us + (static_cast<std::uint64_t>(clamped_lease_ms) * 1000ULL);
-    runtime.request_source_id = request_source_id;
-    runtime.request_boot_id = request_boot_id;
-    runtime.requested_rate_millihz = requested_rate_millihz;
-    runtime.requested_lease_ms = clamped_lease_ms;
+    slot->active = true;
+    slot->topic_id = topic_id;
+    slot->subscriber_source_id = request_source_id;
+    slot->subscriber_boot_id = request_boot_id;
+    slot->requested_rate_millihz = requested_rate_millihz;
+    slot->requested_lease_ms = requested_lease_ms;
+    slot->effective_rate_millihz = rate.effective_rate_millihz;
+    slot->lease_deadline_us =
+        now_us + (static_cast<std::uint64_t>(granted_lease_ms) * 1000ULL);
 
     outcome.topic_known = true;
-    outcome.subscription_id = runtime.subscription_id;
-    outcome.effective_rate_millihz = effective_rate;
-    outcome.granted_lease_ms = clamped_lease_ms;
+    outcome.subscription_id = slot->subscription_id;
+    // Reported per subscription, never above what this subscriber asked for.
+    // The topic itself is published at locked_topic_rate(), the aggregate.
+    outcome.effective_rate_millihz = rate.effective_rate_millihz;
+    outcome.granted_lease_ms = granted_lease_ms;
     return outcome;
 }
 
 TelemetryPublisher::UnsubscribeOutcome TelemetryPublisher::unsubscribe(
     std::uint32_t subscription_id) noexcept {
+    if (subscription_id == 0U) return UnsubscribeOutcome::NotFound;
     RuntimeLockGuard guard(runtime_lock_);
     if (!guard.acquired()) return UnsubscribeOutcome::NotFound;
     init_runtime_if_needed();
 
-    for (std::size_t i = 0U; i < kMaxTopics; ++i) {
-        TopicRuntime& runtime = runtime_[i];
-        if (runtime.subscribed && runtime.subscription_id == subscription_id) {
-            runtime.subscribed = false;
-            runtime.effective_rate_millihz = 0U;
-            runtime.lease_deadline_us = 0U;
+    for (std::size_t i = 0U; i < kMaxSubscriptions; ++i) {
+        Subscription& subscription = subscriptions_[i];
+        if (subscription.active && subscription.subscription_id == subscription_id) {
+            subscription = Subscription{};
             return UnsubscribeOutcome::Removed;
         }
     }
@@ -347,41 +445,75 @@ TelemetryPublisher::UnsubscribeOutcome TelemetryPublisher::unsubscribe(
     return UnsubscribeOutcome::NotFound;
 }
 
+std::size_t TelemetryPublisher::drop_session(std::uint32_t subscriber_source_id,
+                                             std::uint32_t subscriber_boot_id) noexcept {
+    RuntimeLockGuard guard(runtime_lock_);
+    if (!guard.acquired()) return 0U;
+    init_runtime_if_needed();
+
+    std::size_t removed = 0U;
+    for (std::size_t i = 0U; i < kMaxSubscriptions; ++i) {
+        Subscription& subscription = subscriptions_[i];
+        if (subscription.active &&
+            subscription.subscriber_source_id == subscriber_source_id &&
+            subscription.subscriber_boot_id == subscriber_boot_id) {
+            subscription = Subscription{};
+            ++removed;
+        }
+    }
+    return removed;
+}
+
 void TelemetryPublisher::expire_subscriptions(std::uint64_t now_us) noexcept {
     RuntimeLockGuard guard(runtime_lock_);
     if (!guard.acquired()) return;
     init_runtime_if_needed();
 
-    for (std::size_t i = 0U; i < kMaxTopics; ++i) {
-        TopicRuntime& runtime = runtime_[i];
-        if (runtime.subscribed && now_us >= runtime.lease_deadline_us) {
-            runtime.subscribed = false;
-            runtime.effective_rate_millihz = 0U;
+    for (std::size_t i = 0U; i < kMaxSubscriptions; ++i) {
+        Subscription& subscription = subscriptions_[i];
+        if (subscription.active && now_us >= subscription.lease_deadline_us) {
+            subscription = Subscription{};
         }
     }
 }
 
 bool TelemetryPublisher::topic_active(std::uint16_t topic_id) const noexcept {
-    RuntimeLockGuard guard(runtime_lock_);
-    if (!guard.acquired()) return false;
-    const_cast<TelemetryPublisher*>(this)->init_runtime_if_needed();
+    return topic_subscriber_count(topic_id) != 0U;
+}
 
-    const int idx = find_topic_index(topic_id);
-    if (idx < 0) return false;
-    return runtime_[static_cast<std::size_t>(idx)].subscribed;
+std::uint16_t TelemetryPublisher::topic_subscriber_count(
+    std::uint16_t topic_id) const noexcept {
+    if (topic_id == 0U) return 0U;
+    RuntimeLockGuard guard(runtime_lock_);
+    if (!guard.acquired()) return 0U;
+    return locked_subscriber_count(topic_id);
+}
+
+std::uint32_t TelemetryPublisher::topic_effective_rate_millihz(
+    std::uint16_t topic_id) const noexcept {
+    if (topic_id == 0U) return 0U;
+    RuntimeLockGuard guard(runtime_lock_);
+    if (!guard.acquired()) return 0U;
+    return locked_topic_rate(topic_id);
+}
+
+std::size_t TelemetryPublisher::active_subscription_count() const noexcept {
+    RuntimeLockGuard guard(runtime_lock_);
+    if (!guard.acquired()) return 0U;
+    std::size_t count = 0U;
+    for (std::size_t i = 0U; i < kMaxSubscriptions; ++i) {
+        if (subscriptions_[i].active) ++count;
+    }
+    return count;
 }
 
 std::uint64_t TelemetryPublisher::topic_period_us(std::uint16_t topic_id) const noexcept {
     RuntimeLockGuard guard(runtime_lock_);
     if (!guard.acquired()) return 0U;
-    const_cast<TelemetryPublisher*>(this)->init_runtime_if_needed();
-
-    const int idx = find_topic_index(topic_id);
-    if (idx < 0) return 0U;
-    const TopicRuntime& runtime = runtime_[static_cast<std::size_t>(idx)];
-    if (!runtime.subscribed || runtime.effective_rate_millihz == 0U) return 0U;
+    const std::uint32_t rate = locked_topic_rate(topic_id);
+    if (rate == 0U) return 0U;
     // period_us = 1e9 / rate_millihz (rate_hz = rate_millihz / 1000).
-    return 1000000000ULL / static_cast<std::uint64_t>(runtime.effective_rate_millihz);
+    return 1000000000ULL / static_cast<std::uint64_t>(rate);
 }
 
 std::size_t TelemetryPublisher::topic_stats(TopicStats* out, std::size_t max_count) const noexcept {
@@ -395,8 +527,8 @@ std::size_t TelemetryPublisher::topic_stats(TopicStats* out, std::size_t max_cou
         const TopicRuntime& runtime = runtime_[i];
         if (runtime.topic_id == 0U) continue;
         out[written].topic_id = runtime.topic_id;
-        out[written].subscriber_count = runtime.subscribed ? 1U : 0U;
-        out[written].effective_rate_millihz = runtime.effective_rate_millihz;
+        out[written].subscriber_count = locked_subscriber_count(runtime.topic_id);
+        out[written].effective_rate_millihz = locked_topic_rate(runtime.topic_id);
         out[written].bytes_sent_total = runtime.bytes_sent_total;
         out[written].samples_dropped_total = runtime.samples_dropped_total;
         ++written;

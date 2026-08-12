@@ -266,6 +266,7 @@ bool ROBOT::configureProtocolIdentity() {
     manifest_responder.configure(protocol, protocol_uuid_);
     telemetry.configure(protocol);
     subscription_responder.configure(protocol, telemetry);
+    status_reporter.configure(protocol, telemetry);
     logger.insert_logf(
         logType::INFO,
         "BTP v%u, bally_protocol %u.%u.%u, source=%08lx boot=%08lx",
@@ -571,10 +572,23 @@ void ROBOT::handleReceiveStatic(const esp_now_recv_info_t *recv_info, const uint
     if (instance_ == nullptr || recv_info == nullptr || incomingData == nullptr ||
         len <= 0 || instance_->receivedDataQueue == nullptr) return;
 
+    // STATUS section 8 counters: every octet stream the radio hands us is one
+    // received frame attempt; CRC and decode failures are counted separately
+    // (a frame rejected by CRC is never also counted as a decode error).
+    instance_->link_frames_rx_.fetch_add(1U, std::memory_order_relaxed);
+
     btp::DecodedFrame decoded{};
-    if (btp::decode(incomingData, static_cast<size_t>(len),
-                    btp::TransportProfile::EspNow,
-                    &decoded) != btp::Error::Ok) return;
+    const btp::Error decode_error = btp::decode(
+        incomingData, static_cast<size_t>(len), btp::TransportProfile::EspNow,
+        &decoded);
+    if (decode_error != btp::Error::Ok) {
+        if (decode_error == btp::Error::CrcMismatch) {
+            instance_->link_crc_errors_.fetch_add(1U, std::memory_order_relaxed);
+        } else {
+            instance_->link_decode_errors_.fetch_add(1U, std::memory_order_relaxed);
+        }
+        return;
+    }
 
 #ifdef MAC_ADDR
     static constexpr uint8_t expected_peer[6] = {MAC_ADDR};
@@ -625,10 +639,12 @@ void ROBOT::handleReceiveStatic(const esp_now_recv_info_t *recv_info, const uint
         decoded, static_cast<uint64_t>(esp_timer_get_time() / 1000ULL),
         &completed);
     if (event == btp::ReassemblyEvent::Complete) {
+        instance_->link_reassembly_completed_.fetch_add(1U, std::memory_order_relaxed);
         instance_->dispatchDecoded(completed.header, completed.payload);
         instance_->command_reassembler_->release(completed.slot_index);
     } else if (event != btp::ReassemblyEvent::Accepted &&
                event != btp::ReassemblyEvent::Duplicate) {
+        instance_->link_reassembly_rejected_.fetch_add(1U, std::memory_order_relaxed);
         instance_->command_processor.note_drop();
     }
 }
@@ -1179,6 +1195,10 @@ void ROBOT::routine(void *param){
             ROBOT::logger.flush_logs();              // send the logger messagens to output
             instance_->tx_scheduler.pump(
                 static_cast<uint64_t>(esp_timer_get_time() / 1000ULL));
+            // Topico 17 PASSOS 8/9. Runs on the comms task, after the
+            // telemetry drain, so the control loop and the state-machine
+            // task never see it.
+            instance_->publishStatus();
         }
         instance_->resetFlags();                    // reset the flags - buttons, side sensors, pwm...
         instance_->setOutputs();                    // set the output - leds, pwm...
@@ -1186,6 +1206,53 @@ void ROBOT::routine(void *param){
         instance_->updateSoundFeedback();           // react to the changes above with a Junkebox sound
         vTaskDelay(WDOG_TIMEOUT_TK); // delay for wathdog timer and to allow other tasks to run
     }
+}
+
+// CONTROL/STATUS, status_version=2 (COMMANDS_AND_ACTIONS.md sections 8/8.1).
+// Spontaneous publication, no response expected, one per kStatusPeriodUs.
+void ROBOT::publishStatus() {
+    const uint64_t now_us = static_cast<uint64_t>(esp_timer_get_time());
+    if (now_us < next_status_us_) return;
+    next_status_us_ = now_us + kStatusPeriodUs;
+
+    // Nothing else in the firmware sweeps abandoned reassembly slots, and a
+    // timed-out partial message is exactly what reassembly_timeouts counts.
+    if (command_reassembler_.has_value()) {
+        const std::size_t expired =
+            command_reassembler_->expire(now_us / 1000ULL);
+        if (expired != 0U) {
+            link_reassembly_timeouts_.fetch_add(
+                static_cast<uint64_t>(expired), std::memory_order_relaxed);
+        }
+    }
+
+    const TxScheduler::Stats tx = tx_scheduler.stats();
+    const TelemetryPublisher::Stats telemetry_stats = telemetry.stats();
+    const CommandProcessor::Stats command_stats = command_processor.stats();
+
+    StatusReporter::Counters counters{};
+    counters.frames_rx = link_frames_rx_.load(std::memory_order_relaxed);
+    // "frames_tx": frames actually handed to the radio. "frames_dropped":
+    // valid frames discarded by queues/capacity, which on this side means
+    // the scheduler's own drops plus the publisher's full-queue drops.
+    counters.frames_tx = tx.accepted;
+    counters.frames_dropped =
+        static_cast<uint64_t>(tx.dropped) + telemetry_stats.dropped_full;
+    counters.crc_errors = link_crc_errors_.load(std::memory_order_relaxed);
+    counters.decode_errors = link_decode_errors_.load(std::memory_order_relaxed);
+    counters.reassembly_completed =
+        link_reassembly_completed_.load(std::memory_order_relaxed);
+    counters.reassembly_timeouts =
+        link_reassembly_timeouts_.load(std::memory_order_relaxed);
+    counters.reassembly_rejected =
+        link_reassembly_rejected_.load(std::memory_order_relaxed);
+    counters.command_duplicates = command_stats.duplicates;
+    // A sample dropped by the full telemetry queue contributes both here and
+    // to that topic's samples_dropped_total (section 8.1 allows exactly
+    // that), but never twice inside the same counter.
+    counters.telemetry_dropped = telemetry_stats.dropped_full;
+
+    status_reporter.publish(0U, now_us, counters, now_us);
 }
 
 void ROBOT::sampleTelemetry() {

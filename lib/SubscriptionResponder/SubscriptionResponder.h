@@ -22,10 +22,14 @@ class TelemetryPublisher;
 // published: here, what SUBSCRIBE_RESULT grants can never drift from what
 // sampleTelemetry() actually does, because they read the same table.
 //
-// This robot has exactly one authorized peer (the dongle, enforced upstream
-// by btp_command::authorized_source before any frame reaches this class), so
-// "aggregating multiple clients" is entirely the dongle's job (topico 17
-// PASSO 3/5); a leaf node only ever sees one requester per topic.
+// This robot has exactly one authorized *radio* peer (the dongle, enforced
+// upstream by btp_command::authorized_source before any frame reaches this
+// class), but that peer is a gateway: the (source_id, boot_id) in the
+// envelope identifies the subscriber session, and nothing stops it from
+// forwarding several independent desktop sessions. Subscriptions are
+// therefore keyed by (session, topic_id) in TelemetryPublisher and the topic
+// only stops being published when the last of them goes away (topico 17
+// PASSO 5).
 class SubscriptionResponder {
 public:
     static constexpr std::uint16_t kSubscribeObjectId = 0x0005U;

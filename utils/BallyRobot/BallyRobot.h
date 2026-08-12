@@ -29,6 +29,7 @@
 #include <CommandProcessor.h>
 #include <ManifestResponder.h>
 #include <SubscriptionResponder.h>
+#include <StatusReporter.h>
 #include <TelemetryPublisher.h>
 #include <TxScheduler.h>
 #include <OTAUpdater.h>
@@ -146,6 +147,7 @@ public:
     ManifestResponder manifest_responder;
     TelemetryPublisher telemetry;
     SubscriptionResponder subscription_responder;
+    StatusReporter status_reporter;
     StateMachine machine;
     TinyShell shell;
     RobotSettings settings;
@@ -416,6 +418,27 @@ private:
     uint64_t next_protocol_test_us_ = 0U;
     uint32_t protocol_test_counter_ = 0U;
     stateName last_telemetry_state_ = NONE;
+
+    // CONTROL/STATUS (topico 17 PASSOS 8/9): one spontaneous message per
+    // second, published from routine() -- the same task that already drains
+    // the telemetry queue and pumps the scheduler, so the control loop and
+    // the state-machine task never pay for it. status_version=2 carries the
+    // per-topic block (subscriber count, aggregate rate, bytes, drops).
+    static constexpr uint64_t kStatusPeriodUs = 1000000ULL;
+    uint64_t next_status_us_ = 0U;
+    void publishStatus();
+
+    // Link counters for STATUS section 8. Written only by the ESP-NOW
+    // receive callback (single writer) and read by publishStatus(); relaxed
+    // atomics keep the callback free of any lock. frames_tx/frames_dropped/
+    // telemetry_dropped/command_duplicates come from TxScheduler,
+    // TelemetryPublisher and CommandProcessor, which already count them.
+    std::atomic<uint64_t> link_frames_rx_{0U};
+    std::atomic<uint64_t> link_crc_errors_{0U};
+    std::atomic<uint64_t> link_decode_errors_{0U};
+    std::atomic<uint64_t> link_reassembly_completed_{0U};
+    std::atomic<uint64_t> link_reassembly_timeouts_{0U};
+    std::atomic<uint64_t> link_reassembly_rejected_{0U};
 };
 
 #endif

@@ -45,6 +45,26 @@ public:
         // section 6.2's max_rate_millihz); zero means "not periodic" (e.g.
         // robot.state, published on transitions only).
         std::uint32_t max_rate_millihz;
+        // Topico 17 PASSO 4 ("robo aplica min/max/default do schema"). Only
+        // max_rate_millihz travels on the wire (section 6.2 topic record);
+        // these two are local publisher policy and are deliberately NOT
+        // serialized into the manifest, because v1 has no field for them and
+        // inventing one would be a wire change.
+        //
+        // min_rate_millihz: slowest rate this publisher is willing to
+        //   schedule. A slower request is REJECTED (INVALID_ARGUMENT) instead
+        //   of being silently sped up, because section 7 says the effective
+        //   rate MUST NOT exceed the requested one -- clamping *up* is not
+        //   allowed, so the only honest answers are "reject" or "publish
+        //   slower than the client can use". Zero disables the floor.
+        // default_rate_millihz: nominal rate, used as the cap when the topic
+        //   declares no periodic max (max_rate_millihz == 0). For such a
+        //   topic the granted rate is informational only (delivery stays
+        //   event-driven), but capping it keeps SUBSCRIBE_RESULT from echoing
+        //   an arbitrary client number back as if the robot had promised it.
+        //   Zero means "no cap for a non-periodic topic".
+        std::uint32_t min_rate_millihz;
+        std::uint32_t default_rate_millihz;
     };
 
     enum class PublishResult : std::uint8_t {
@@ -72,10 +92,15 @@ public:
     // ManifestResponder already uses against schemas()).
     struct TopicStats {
         std::uint16_t topic_id;
-        std::uint16_t subscriber_count;  // 0 or 1: this leaf has exactly one
-                                          // authorized peer (the dongle),
-                                          // which already aggregates its own
-                                          // downstream desktop clients.
+        // Number of live (unexpired) subscriptions for this topic. The robot
+        // has a single authorized ESP-NOW peer, but that peer is a gateway
+        // that may forward several independent desktop sessions, so this is
+        // a real aggregate over (subscriber session, topic_id) and not a
+        // 0/1 flag.
+        std::uint16_t subscriber_count;
+        // Aggregate publish rate: the maximum granted rate over the live
+        // subscriptions of this topic. Zero means "not being published now"
+        // (STATUS section 8.1 defines the field exactly that way).
         std::uint32_t effective_rate_millihz;
         std::uint64_t bytes_sent_total;
         std::uint64_t samples_dropped_total;
@@ -83,27 +108,53 @@ public:
 
     struct SubscribeOutcome {
         bool topic_known = false;
+        // Requested rate resolved below the schema's min_rate_millihz; the
+        // caller turns this into REJECTED/INVALID_ARGUMENT.
+        bool rate_below_minimum = false;
+        // Subscription table full; the caller turns this into
+        // REJECTED/CAPACITY_EXHAUSTED.
+        bool capacity_exhausted = false;
         std::uint32_t subscription_id = 0U;
         std::uint32_t effective_rate_millihz = 0U;
         std::uint32_t granted_lease_ms = 0U;
+    };
+
+    struct RateResolution {
+        bool below_minimum = false;
+        std::uint32_t effective_rate_millihz = 0U;
     };
 
     enum class UnsubscribeOutcome : std::uint8_t { Removed, NotFound, UnknownTopic };
 
     void configure(BtpEndpoint& endpoint) noexcept;
 
-    // Applies the schema's max_rate_millihz cap (COMMANDS_AND_ACTIONS.md
-    // section 6.2/7): effective_rate_millihz never exceeds the smaller of
-    // requested_rate_millihz and the schema's max (when the schema is
-    // periodic; a max of zero means "not periodic", so the request is
-    // accepted but the rate stays informational and does not gate publish --
-    // see robot.state). A repeat of the same (request_source_id,
-    // request_boot_id, topic_id, requested_rate_millihz, requested_lease_ms)
-    // while a matching subscription is still active returns the same
-    // subscription_id (idempotent retry); anything else atomically replaces
-    // the topic's single subscription with a new subscription_id. Unknown
-    // topic_id returns topic_known=false and must not be turned into a wire
-    // SUBSCRIBE_RESULT with a nonzero subscription_id.
+    // Pure rate policy, exposed for testing: applies min/default/max of the
+    // schema to a requested rate (see TopicSchema above). Never returns a
+    // rate above `requested_rate_millihz`.
+    static RateResolution resolve_effective_rate(
+        const TopicSchema& schema, std::uint32_t requested_rate_millihz) noexcept;
+
+    static const TopicSchema* find_schema(std::uint16_t topic_id) noexcept;
+
+    // Creates, renews or replaces the subscription of one subscriber session
+    // for one topic. A subscription is keyed by
+    // (request_source_id, request_boot_id, topic_id) -- the session identity
+    // of COMMANDS_AND_ACTIONS.md section 7 -- so several sessions can hold
+    // independent subscriptions to the same topic and the topic only stops
+    // being published when the *last* one goes away (PASSO 5).
+    //
+    // Repeating the same request bytes from the same identity returns the
+    // same subscription_id and only pushes the lease deadline forward
+    // ("repetir a mesma requisicao ... retorna a mesma assinatura sem criar
+    // outra"); different bytes atomically replace that session's
+    // subscription for that topic with a new subscription_id ("uma nova
+    // sequencia cria ou substitui").
+    //
+    // PASSO 6 (session disconnect): a SUBSCRIBE from a source_id whose
+    // boot_id changed means the previous session of that peer is gone, so
+    // every subscription still held by the old boot_id is dropped here
+    // before the new one is granted -- a rebooted client never leaves the
+    // robot publishing for a session that no longer exists.
     SubscribeOutcome subscribe(std::uint16_t topic_id,
                                std::uint32_t request_source_id,
                                std::uint32_t request_boot_id,
@@ -113,21 +164,39 @@ public:
 
     UnsubscribeOutcome unsubscribe(std::uint32_t subscription_id) noexcept;
 
+    // Drops every subscription held by one subscriber session. PASSO 6's
+    // explicit disconnect path: the ESP-NOW leg has no SESSION_CLOSE (that
+    // exchange belongs to the dongle's serial transport, section 10), so on
+    // this side a session ends either by lease expiry, by the peer coming
+    // back with a new boot_id, or by this call. Returns how many
+    // subscriptions were removed.
+    std::size_t drop_session(std::uint32_t subscriber_source_id,
+                             std::uint32_t subscriber_boot_id) noexcept;
+
     // Clears any subscription whose lease has elapsed. PASSO 6: a robot that
     // stops hearing from the dongle (no renewed SUBSCRIBE) falls back to "not
     // publishing" for that topic instead of leaking a stale high rate
     // forever.
     void expire_subscriptions(std::uint64_t now_us) noexcept;
 
-    // True when topic_id is periodic (nonzero schema max_rate_millihz) and
-    // currently has a live, unexpired subscription. Non-periodic topics
-    // (robot.state) are always "active" in the sense that their
-    // event-triggered publish is never gated by subscription state.
+    // True when topic_id currently has at least one live, unexpired
+    // subscription. Non-periodic topics (robot.state) are published on
+    // events regardless of this, so callers only gate periodic topics on it.
     bool topic_active(std::uint16_t topic_id) const noexcept;
 
-    // Publish period derived from the topic's effective rate, in
-    // microseconds. Returns 0 when the topic is periodic and has no active
-    // subscription (caller must not publish), or when the topic is unknown.
+    // Live subscription count for one topic (0 when unknown/unsubscribed).
+    std::uint16_t topic_subscriber_count(std::uint16_t topic_id) const noexcept;
+
+    // Aggregate publish rate for one topic: the maximum granted rate across
+    // its live subscriptions, so a slow subscriber never throttles a fast
+    // one and no subscriber ever receives less than it asked for.
+    std::uint32_t topic_effective_rate_millihz(std::uint16_t topic_id) const noexcept;
+
+    std::size_t active_subscription_count() const noexcept;
+
+    // Publish period derived from the topic's aggregate effective rate, in
+    // microseconds. Returns 0 when the topic has no live subscription
+    // (caller must not publish), or when the topic is unknown.
     std::uint64_t topic_period_us(std::uint16_t topic_id) const noexcept;
 
     std::size_t topic_stats(TopicStats* out, std::size_t max_count) const noexcept;
@@ -159,6 +228,14 @@ public:
 private:
     static constexpr std::size_t kMaxPayloadSize = kProtocolTestPayloadSize;
     static constexpr std::size_t kMaxTopics = 2U;  // matches kSchemas today
+public:
+    // Bounded subscription table: kMaxTopics topics times a handful of
+    // concurrent desktop sessions behind the single ESP-NOW peer. A request
+    // that would exceed it is answered CAPACITY_EXHAUSTED instead of
+    // evicting somebody else's subscription.
+    static constexpr std::size_t kMaxSubscriptions = 8U;
+
+private:
     // Leases are requester-supplied but bounded locally so an abandoned
     // client (dongle rebooted without UNSUBSCRIBE) cannot pin a rate forever.
     static constexpr std::uint32_t kMinLeaseMs = 1000U;
@@ -172,20 +249,27 @@ private:
         std::uint8_t payload[kMaxPayloadSize];
     };
 
-    // Runtime subscription/rate/byte-counter state for one topic row of
-    // kSchemas (topico 17). Index-aligned with schemas(), not a separate map.
+    // Per-topic byte/drop counters for STATUS section 8.1. Index-aligned with
+    // schemas(), not a separate map. Subscriptions themselves live in
+    // subscriptions_ below, because a topic can now have several.
     struct TopicRuntime {
         std::uint16_t topic_id = 0U;
-        bool subscribed = false;
-        std::uint32_t subscription_id = 0U;
-        std::uint32_t effective_rate_millihz = 0U;
-        std::uint64_t lease_deadline_us = 0U;
-        std::uint32_t request_source_id = 0U;
-        std::uint32_t request_boot_id = 0U;
-        std::uint32_t requested_rate_millihz = 0U;
-        std::uint32_t requested_lease_ms = 0U;
         std::uint64_t bytes_sent_total = 0U;
         std::uint64_t samples_dropped_total = 0U;
+    };
+
+    // One row per (subscriber session, topic_id). Statically sized: no
+    // allocation anywhere on the control or radio path.
+    struct Subscription {
+        bool active = false;
+        std::uint16_t topic_id = 0U;
+        std::uint32_t subscription_id = 0U;
+        std::uint32_t subscriber_source_id = 0U;
+        std::uint32_t subscriber_boot_id = 0U;
+        std::uint32_t requested_rate_millihz = 0U;  // raw request bytes, kept
+        std::uint32_t requested_lease_ms = 0U;      // to detect an exact retry
+        std::uint32_t effective_rate_millihz = 0U;
+        std::uint64_t lease_deadline_us = 0U;
     };
 
     PublishResult enqueue(std::uint16_t topic_id,
@@ -195,10 +279,14 @@ private:
     void count_invalid() noexcept;
     int find_topic_index(std::uint16_t topic_id) const noexcept;
     void init_runtime_if_needed() noexcept;
+    // Callers must already hold runtime_lock_.
+    std::uint16_t locked_subscriber_count(std::uint16_t topic_id) const noexcept;
+    std::uint32_t locked_topic_rate(std::uint16_t topic_id) const noexcept;
 
     BtpEndpoint* endpoint_ = nullptr;
     Sample queue_[kQueueCapacity]{};
     TopicRuntime runtime_[kMaxTopics]{};
+    Subscription subscriptions_[kMaxSubscriptions]{};
     bool runtime_initialized_ = false;
     std::uint32_t next_subscription_id_ = 1U;
     // Guards runtime_[] and next_subscription_id_ only. Independent of, and

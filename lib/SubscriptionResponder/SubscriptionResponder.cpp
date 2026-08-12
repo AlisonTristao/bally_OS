@@ -12,6 +12,7 @@ constexpr std::uint8_t kStatusSuccess = 0x00U;
 constexpr std::uint8_t kStatusRejected = 0x01U;
 constexpr std::uint16_t kErrorNone = 0x0000U;
 constexpr std::uint16_t kErrorInvalidArgument = 0x0003U;
+constexpr std::uint16_t kErrorCapacityExhausted = 0x0005U;
 constexpr std::uint16_t kErrorStaleTargetBoot = 0x0009U;
 constexpr std::uint16_t kErrorNotFound = 0x000BU;
 
@@ -93,6 +94,18 @@ bool SubscriptionResponder::handle_subscribe(const btp::Header& request_header, 
         if (!outcome.topic_known) {
             status = kStatusRejected;
             errorCode = kErrorNotFound;
+        } else if (outcome.rate_below_minimum) {
+            // A rate under the schema's floor cannot be granted: section 7
+            // forbids answering with a rate above the requested one, so the
+            // only honest answer is a rejection. Note this is the *opposite*
+            // of the max case just above, where the request is clamped and
+            // the client is told the clamped value (topico 17 acceptance
+            // criterion "pedido acima do maximo e limitado e informado").
+            status = kStatusRejected;
+            errorCode = kErrorInvalidArgument;
+        } else if (outcome.capacity_exhausted) {
+            status = kStatusRejected;
+            errorCode = kErrorCapacityExhausted;
         } else {
             subscriptionId = outcome.subscription_id;
             effectiveRateMillihz = outcome.effective_rate_millihz;
