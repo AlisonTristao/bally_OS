@@ -1,12 +1,12 @@
-# Bally OS - Robô ESP32-S3
+# Bally_OS - Firmware ESP32-S3
 
-Este projeto implementa o controle de um robô baseado em ESP32-S3, utilizando arquitetura orientada a objetos, FreeRTOS, comunicação ESP-NOW e execução paralela em dois núcleos.
+Este projeto implementa o controle de um robô baseado em ESP32-S3, utilizando arquitetura orientada a objetos, FreeRTOS, comunicação ESP-NOW e execução paralela em dois núcleos. A telemetria e os comandos trafegam via [BTP](https://github.com/AlisonTristao/BTP), um protocolo binário de comunicação e plotagem de dados em tempo real sobre ESP-NOW.
 
 > **Compatibilidade:**
 > Este software está sendo desenvolvido para ser totalmente compatível com o hardware documentado no repositório [bally_robot](https://github.com/AlisonTristao/bally_robot).
 
 > **Telemetria com T-Dongle S3 (LilyGO):**
-> Para realizar a telemetria via ESP-NOW, é utilizado o T-Dongle S3 da LilyGO como receptor dos dados. O código desenvolvido para enviar comandos e logs do robô para o dongle está disponível em: [t_dongle_develop](https://github.com/AlisonTristao/t_dongle_develop).
+> Para realizar a telemetria via ESP-NOW, é utilizado o T-Dongle S3 da LilyGO como receptor dos dados. O código desenvolvido para enviar comandos e logs do robô para o dongle está disponível em: [Bally_dongle](https://github.com/AlisonTristao/Bally_dongle).
 
 ## Estrutura do Projeto
 
@@ -80,7 +80,7 @@ No segundo núcleo, é executada a rotina paralela do robô, responsável por:
 ---
 
 ### Comunicação
-- **ESP-NOW/BTP v1:** Utilizado para comunicação sem fio. `bally_protocol` 0.1.0 é integrado por dependência local identificável; nenhum `struct` C/C++ é transmitido.
+- **ESP-NOW/BTP v1:** Utilizado para comunicação sem fio. `BTP` (`v1.0.1-beta`) é integrado via `lib_deps` do PlatformIO, fixado numa tag; nenhum `struct` C/C++ é transmitido.
 - **Identidade:** `source_id` deriva do MAC de fábrica; `boot_id` é aleatório, não nulo e persistido em NVS para impedir repetição imediata. A sequência é única por mensagem lógica e compartilhada com segurança entre tasks.
 - **Comandos:** o peer autorizado é o `MAC_ADDR` do build e seu `source_id` precisa corresponder ao MAC recebido. O payload da ação de shell é uma única linha de até 512 bytes, sem NUL, CR ou LF. O resultado BTP repete a tripla da requisição, `action_id/version`, status e erro; o cache estático de 16 entradas permanece durante todo o boot, portanto retry nunca repete o efeito.
 - **Scheduler TX:** cada produtor entrega frames completos a uma fila bounded da sua classe. Há capacidade exclusiva para resultados de comando mesmo com 16 telemetrias pendentes. Telemetria e logs espontâneos não são retransmitidos; perda de resultado é recuperada pelo retry da requisição e replay do cache.
