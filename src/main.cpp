@@ -113,8 +113,10 @@ static void setup_system_callbacks() {
         }
     });
 
-    // start the state machine in the SETUP state
-    robot.machine.current_state.store(SETUP, std::memory_order_release);
+    // Start the state machine in SETUP, unless robot.init() already jumped
+    // straight into DEBUG because button 1/2 was held at boot (see
+    // ROBOT::bootState()).
+    robot.machine.current_state.store(robot.bootState(), std::memory_order_release);
 
     // verify that all the callbacks for the state machine are properly configured before starting the tasks
     // it is important to ensure that the state machine is properly configured to avoid errors during runtime,

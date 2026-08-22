@@ -300,8 +300,17 @@ uint16_t OTAUpdater::network_count() const {
 
 bool OTAUpdater::start() {
     if (phase_.load(std::memory_order_acquire) != Phase::IDLE) return true;
-    if (card_ == nullptr || !card_->is_mounted()) return false;
-    if (!load_candidates()) return false;
+
+    if (card_ == nullptr || !card_->is_mounted()) {
+        log(logType::ERRO, "OTA: cannot start, SD card is not mounted for the robot");
+        return false;
+    }
+    if (!load_candidates()) {
+        log(logType::ERRO,
+            "OTA: cannot start, no networks stored in " OTA_WIFI_LIST_FILE
+            " (use 'ota wifi_add')");
+        return false;
+    }
 
     scan_done_.store(false, std::memory_order_relaxed);
     got_ip_.store(false, std::memory_order_relaxed);
@@ -313,13 +322,22 @@ bool OTAUpdater::start() {
     scan_in_flight_ = esp_wifi_scan_start(&scan_config, false) == ESP_OK;
     next_scan_ms_ = now_ms() + tuning_.retry_scan_ms;
 
+    // From here on OTA is committed to the SCANNING phase even if this
+    // particular esp_wifi_scan_start() call didn't succeed synchronously:
+    // process()'s SCANNING case retries it on its own once next_scan_ms_
+    // elapses. Returning false here (as this used to) left phase_ stuck in
+    // SCANNING while callers -- believing start() had failed -- never drove
+    // the state machine into DEBUG, so process() was never ticked and OTA
+    // silently stranded itself until a full reboot. This is also what the
+    // header's doc comment already promises: true "when the scan was
+    // scheduled", regardless of whether it landed on the first try.
     phase_.store(Phase::SCANNING, std::memory_order_release);
 
     log(logType::INFO, "OTA: started, scanning for %u known network(s)%s",
         static_cast<unsigned>(candidate_count_),
         scan_in_flight_ ? "" : " (initial scan failed to start, retrying)");
 
-    return scan_in_flight_;
+    return true;
 }
 
 void OTAUpdater::handle_scan_done() {
@@ -772,9 +790,9 @@ void OTAUpdater::register_shell_commands(TinyShell& shell, Logger& logger, SDCar
         }
 
         if (!start()) {
-            logger.insert_log(
-                logType::ERRO,
-                "Failed to start OTA update: no networks stored in " OTA_WIFI_LIST_FILE);
+            // start() already logged the specific reason (unmounted card vs.
+            // empty OTA_WIFI_LIST_FILE).
+            logger.insert_log(logType::ERRO, "Failed to start OTA update");
             return RESULT_ERROR;
         }
 

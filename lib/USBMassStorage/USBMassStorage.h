@@ -13,12 +13,17 @@
 class SDCard;
 class TinyShell;
 class Logger;
+class Flags_out;
 
 /**
  * @brief Transfer exclusive SD card access between the robot and a USB host.
  *
  * The PC and the application are never allowed to mount the FAT filesystem at
  * the same time. The native ESP32-S3 USB peripheral uses GPIO19/20 internally.
+ *
+ * While the card is exposed (see is_active()), the LEDs report it the same
+ * way OTAUpdater reports its own sub-mode: LED0/LED2 and LED1/LED3 blink in
+ * antiphase, one second per half — see update_status_led().
  */
 class USBMassStorage {
 public:
@@ -30,8 +35,10 @@ public:
 
     /**
      * @brief Register an initialized SD card and mount it for the robot.
+     * @param leds LED outputs used to report storage-mode status while
+     * exposed (see update_status_led()); mirrors OTAUpdater::begin().
      */
-    bool begin(SDCard& card);
+    bool begin(SDCard& card, Flags_out& leds);
 
     /**
      * @brief Unmount the card from the robot and expose it through USB MSC.
@@ -95,6 +102,7 @@ private:
                                   void* context);
 
     SDCard* card_ = nullptr;
+    Flags_out* leds_ = nullptr;
     void* storage_handle_ = nullptr;
     char usb_serial_[13]{};
     const char* usb_string_descriptors_[5]{};
@@ -105,9 +113,21 @@ private:
     std::atomic<bool> host_attached_{false};
     std::atomic<bool> mount_transition_failed_{false};
 
+    // LED blink state while exposed; see update_status_led().
+    uint32_t blink_next_ms_ = 0;
+    bool blink_alt_ = false;
+
     bool prepare_usb_identity();
     bool sync_mount_state();
     void handle_storage_event(void* event);
+
+    /**
+     * @brief Non-blocking LED tick for storage mode, called every process()
+     * pass while the card is exposed. Same on-time refresh trick as
+     * OTAUpdater::update_status_led(): LED0/LED2 on for one second, then
+     * LED1/LED3 on for the next second, repeating.
+     */
+    void update_status_led();
 };
 
 #endif // USB_MASS_STORAGE_H

@@ -182,6 +182,17 @@ public:
     // Call once per pass; non-blocking.
     void blinkErrorLeds();
 
+    // DEBUG when init() found button 3 / cfg.btn2 (OTA) or button 2 /
+    // cfg.btn1 (USB storage) held at boot and actually managed to start that
+    // sub-mode; SETUP otherwise. cfg.btn0 can't be used for this: it is
+    // GPIO0, the boot strapping pin -- holding it at reset drops the chip
+    // into ROM download mode instead of running the firmware.
+    // Read once by main.cpp, right after init() returns, to pick the state
+    // machine's initial state — this is the boot-time equivalent of the
+    // existing DEBUG-state shell commands ("ota start" / "storage expose"),
+    // which are unaffected and still work the normal way.
+    stateName bootState() const { return boot_state_; }
+
     // Keep selected shell responses out of the retained PSRAM log.
     void sendNextShellOutputDirect();
     bool consumeDirectShellOutputRequest();
@@ -232,6 +243,10 @@ private:
     // save a instance of the ROBOT class to be used in the static functions
     static ROBOT* instance_;
     bool initialized = false;
+
+    // Set in init() (see bootState() above); stays SETUP unless a boot-time
+    // sub-mode button was held AND that sub-mode actually started.
+    stateName boot_state_ = SETUP;
 
     // Guards configureCommunication(): init() can be retried by app_main's
     // `while (!robot.init())` loop after a later step fails (e.g. motor),

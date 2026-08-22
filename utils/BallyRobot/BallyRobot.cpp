@@ -1064,6 +1064,51 @@ void ROBOT::registerDebugCommands() {
 // MAIN TASKS & INITIALIZATION
 // ==============================================================================
 
+// ------------------------------------------------------------------------------
+// BUTTON DEBOUNCE (used by the three button ISRs in initInterruptions)
+// ------------------------------------------------------------------------------
+// Mechanical buttons chatter on release just as much as on press: letting go
+// bounces the contact, and every bounce that pulls the line back down is
+// another falling edge. On a plain NEGEDGE interrupt those were
+// indistinguishable from a new press -- which is what made OTA quit the
+// moment the finger came off the boot button (OTAUpdater::process() cancels
+// on any button flag).
+//
+// So the interrupt is armed on ANY edge and filtered here instead: every
+// edge, in either direction, restarts the guard window, and only a falling
+// edge that arrives after a full quiet window counts as a press. That is
+// what makes a release safe no matter how long the button was held -- its
+// first bounce restarts the window from the rising edge, so the chatter
+// behind it can never reach setFlag().
+namespace {
+
+struct ButtonIsr {
+    gpio_num_t pin;
+    uint8_t    bit;
+};
+
+// Only ever touched from the button ISRs themselves (one context per pin,
+// and same-pin interrupts don't nest), so no locking is needed.
+DRAM_ATTR ButtonIsr        button_isr_cfg[3]        = {};
+DRAM_ATTR volatile int64_t button_last_edge_us[3]   = {};
+DRAM_ATTR volatile int64_t button_debounce_us       = 0;
+
+// True only for a genuine press. Always stamps the edge, so the window
+// slides along with the chatter instead of expiring in the middle of it.
+bool IRAM_ATTR button_press_accepted(const ButtonIsr& btn) {
+    const int64_t now      = esp_timer_get_time();
+    const int64_t previous = button_last_edge_us[btn.bit];
+    button_last_edge_us[btn.bit] = now;
+
+    // Pull-up wiring: LOW is pressed, so a HIGH level here means this edge
+    // was the release (or a bounce of it) -- never a press.
+    if (gpio_get_level(btn.pin) != 0) return false;
+
+    return (now - previous) >= button_debounce_us;
+}
+
+} // namespace
+
 void ROBOT::initInterruptions(void *param){
     (void)param; // Suppress unused parameter warning
 
@@ -1076,22 +1121,35 @@ void ROBOT::initInterruptions(void *param){
     const gpio_num_t left = static_cast<gpio_num_t>(cfg.left);
     const gpio_num_t right = static_cast<gpio_num_t>(cfg.right);
 
+    // Debounce window: half of delay_flags, the period at which the flags
+    // self-clear and the state machine samples them (see setFlags()/
+    // runStateMachine()). Comfortably longer than the few ms a switch really
+    // bounces for, and still only half a sampling period, so a deliberate
+    // press is never swallowed.
+    button_debounce_us = static_cast<int64_t>(cfg.delay_flags) * 1000 / 2;
+    button_isr_cfg[BIT_0] = {btn0, BIT_0};
+    button_isr_cfg[BIT_1] = {btn1, BIT_1};
+    button_isr_cfg[BIT_2] = {btn2, BIT_2};
+
+    // Start the window running: a button still held from boot (the OTA/USB
+    // storage sub-mode select in init()) is about to be released, and its
+    // release must land inside a window, not on a stale zero timestamp.
+    const int64_t now_us = esp_timer_get_time();
+    for (volatile int64_t& stamp : button_last_edge_us) stamp = now_us;
+
     // set the interrupt type for the buttons and side sensors,
     // and add the corresponding ISR handlers to set the flags when the interrupts are triggered
-    gpio_set_intr_type(btn0, GPIO_INTR_NEGEDGE); // FALLING
-    gpio_isr_handler_add(btn0, [](void* arg) IRAM_ATTR {
-        instance_->buttons.setFlag(BIT_0);
-    }, nullptr);
+    const gpio_isr_t button_isr = [](void* arg) IRAM_ATTR {
+        const ButtonIsr& btn = *static_cast<const ButtonIsr*>(arg);
+        if (button_press_accepted(btn)) instance_->buttons.setFlag(btn.bit);
+    };
 
-    gpio_set_intr_type(btn1, GPIO_INTR_NEGEDGE);
-    gpio_isr_handler_add(btn1, [](void* arg) IRAM_ATTR {
-        instance_->buttons.setFlag(BIT_1);
-    }, nullptr);
-
-    gpio_set_intr_type(btn2, GPIO_INTR_NEGEDGE);
-    gpio_isr_handler_add(btn2, [](void* arg) IRAM_ATTR {
-        instance_->buttons.setFlag(BIT_2);
-    }, nullptr);
+    // ANYEDGE, not NEGEDGE: the handler needs to see the releases too, since
+    // they are what re-arm the guard window (see button_press_accepted()).
+    for (ButtonIsr& btn : button_isr_cfg) {
+        gpio_set_intr_type(btn.pin, GPIO_INTR_ANYEDGE);
+        gpio_isr_handler_add(btn.pin, button_isr, &btn);
+    }
 
     gpio_set_intr_type(left, GPIO_INTR_POSEDGE); // RISING
     gpio_isr_handler_add(left, [](void* arg) IRAM_ATTR {
@@ -1588,7 +1646,7 @@ bool ROBOT::init() {
     if (!sd_card.begin()) {
         logger.insert_log(logType::ERRO, "Failed to initialize SD card");
         ESP_LOGE("ROBOT_INIT", "Failed to initialize SD card");
-    } else if (!usb_storage.begin(sd_card)) {
+    } else if (!usb_storage.begin(sd_card, leds)) {
         logger.insert_log(logType::ERRO,
                           "Failed to mount SD card through USB storage manager");
         ESP_LOGE("ROBOT_INIT", "Failed to mount SD card through USB storage manager");
@@ -1618,6 +1676,24 @@ bool ROBOT::init() {
     }
 
     const SettingsData& cfg = settings.data();
+
+    // Boot-time sub-mode select, in addition to the DEBUG-state shell
+    // commands ("ota start" / "storage expose") which still work the normal
+    // way. Read right after configurePinsFromSettings() configured the
+    // button pins with a pull-up (pressed reads LOW) and before anything
+    // else can move; actually acted on further down, once OTA/USB storage
+    // themselves are ready (see ota.begin()/usb_storage.begin() below).
+    //
+    // cfg.btn0 is deliberately NOT used here: it defaults to GPIO0, the
+    // ESP32-S3 boot strapping pin (see RobotSettings.h). Holding it while
+    // the chip comes out of reset selects Joint Download Boot in ROM, so
+    // the application never runs at all and this code is never reached --
+    // the boot-time sub-mode select only works on non-strapping buttons.
+    // OTA (cfg.btn2) wins if both are held.
+    const bool boot_enter_ota = gpio_get_level(static_cast<gpio_num_t>(cfg.btn2)) == 0;
+    const bool boot_enter_storage = !boot_enter_ota &&
+        gpio_get_level(static_cast<gpio_num_t>(cfg.btn1)) == 0;
+
     array_sensor.emplace(cfg.s0, cfg.s1, cfg.s2, cfg.sig, cfg.len_sensor);
     encoder_left.emplace(cfg.enc_a0, cfg.enc_a1);
     encoder_right.emplace(cfg.enc_b0, cfg.enc_b1);
@@ -1687,6 +1763,30 @@ bool ROBOT::init() {
             ROBOT::logger.insert_log(type, msg);
         })) {
         logger.insert_log(logType::ERRO, "Failed to initialize OTA updater");
+    }
+
+    // Act on the boot-time sub-mode select read earlier: only takes effect
+    // once the corresponding sub-mode actually starts, so a stray held
+    // button with no stored Wi-Fi network (OTA) or no SD card (storage)
+    // just boots normally instead of stranding the robot in DEBUG.
+    if (boot_enter_ota) {
+        if (ota.start()) {
+            boot_state_ = DEBUG;
+            logger.insert_log(logType::INFO,
+                              "Boot: button 3 held, entering OTA mode directly");
+        } else {
+            logger.insert_log(logType::ERRO,
+                              "Boot: button 3 held but OTA could not be started");
+        }
+    } else if (boot_enter_storage) {
+        if (usb_storage.expose()) {
+            boot_state_ = DEBUG;
+            logger.insert_log(logType::INFO,
+                              "Boot: button 2 held, entering USB storage mode directly");
+        } else {
+            logger.insert_log(logType::ERRO,
+                              "Boot: button 2 held but USB storage could not be exposed");
+        }
     }
 
     if (motor_left->init() != ESP_OK) {

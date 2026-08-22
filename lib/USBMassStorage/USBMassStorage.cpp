@@ -12,11 +12,27 @@
 #include <Logger.h>
 #include <Format.h>
 #include <StateMachine.h>
+// LED0_idx/LED1_idx/LED2_idx/LED3_idx only, for update_status_led()'s blink
+// pattern (see CONTRIBUTING.md on why Settings.h isn't pulled into the
+// header for this).
+#include <Settings.h>
 
 namespace {
 
 constexpr char USB_HEX_DIGITS[] = "0123456789ABCDEF";
 const char USB_LANGUAGE_DESCRIPTOR[] = {0x09, 0x04};
+
+// Storage-mode LED pattern: LED0/LED2 and LED1/LED3 alternate every
+// kStorageBlinkPeriodMs; kStorageLedHoldMs is the refresh window kept lit
+// each pass, mirroring OtaDefaults::led_hold_ms, so the previous pair's
+// Flags_out entry auto-expires (see Flags::checkFlagsDuration) shortly after
+// each swap instead of staying lit.
+constexpr uint32_t kStorageBlinkPeriodMs = 1000;
+constexpr uint32_t kStorageLedHoldMs     = 200;
+
+uint32_t now_ms() {
+    return static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
+}
 
 } // namespace
 
@@ -71,12 +87,14 @@ USBMassStorage::~USBMassStorage() {
     if (card_ != nullptr) card_->set_app_mounted(false);
 }
 
-bool USBMassStorage::begin(SDCard& card) {
+bool USBMassStorage::begin(SDCard& card, Flags_out& leds) {
     if (initialized_.load()) return true;
     if (card.card_handle() == nullptr || card.mount_point() == nullptr) {
         return false;
     }
     if (!prepare_usb_identity()) return false;
+
+    leds_ = &leds;
 
     // Own every mount-point transition ourselves. Left at its default,
     // esp_tinyusb's MSC driver auto-returns the card to the app on
@@ -178,6 +196,9 @@ bool USBMassStorage::expose() {
 
     usb_driver_installed_.store(true);
     session_active_.store(true);
+    // Always start the blink pattern from the same phase (LED0/LED2 first).
+    blink_alt_ = false;
+    blink_next_ms_ = now_ms() + kStorageBlinkPeriodMs;
     return true;
 }
 
@@ -196,6 +217,14 @@ bool USBMassStorage::reclaim() {
 
     host_attached_.store(false);
     session_active_.store(false);
+
+    // Same "set for 1ms" trick as OTAUpdater::cancel(): lets Flags_out's own
+    // auto-clear turn every LED off on the next pass instead of leaving
+    // whichever pair was lit stuck on.
+    if (leds_ != nullptr) {
+        for (uint8_t i = 0; i < 4; ++i) leds_->setFlag(i, 1);
+    }
+
     return app_has_access_.load();
 }
 
@@ -205,9 +234,31 @@ void USBMassStorage::process(uint8_t button_flags) {
     // Do not auto-uninstall the native USB driver here: a DETACHED event can
     // also be raised by SetConfiguration(0) without the cable being removed.
     sync_mount_state();
+    update_status_led();
 
     if ((button_flags & (1 << BIT_2)) != 0) {
         reclaim();
+    }
+}
+
+void USBMassStorage::update_status_led() {
+    if (leds_ == nullptr) return;
+
+    const uint32_t now = now_ms();
+    if (static_cast<int32_t>(now - blink_next_ms_) >= 0) {
+        blink_alt_ = !blink_alt_;
+        blink_next_ms_ = now + kStorageBlinkPeriodMs;
+    }
+
+    // "on - off - on - off" (blink_alt_ false) then, one second later,
+    // "off - on - off - on" (blink_alt_ true): only the lit pair needs
+    // refreshing each pass, the other expires on its own.
+    if (blink_alt_) {
+        leds_->setFlag(LED1_idx, kStorageLedHoldMs);
+        leds_->setFlag(LED3_idx, kStorageLedHoldMs);
+    } else {
+        leds_->setFlag(LED0_idx, kStorageLedHoldMs);
+        leds_->setFlag(LED2_idx, kStorageLedHoldMs);
     }
 }
 
