@@ -37,6 +37,7 @@
 #include <RobotSettings.h>
 #include <SDCard.h>
 #include <KeyStore.h>
+#include <RadioSeal.h>
 #include <StateMachine.h>
 #include <USBMassStorage.h>
 
@@ -442,6 +443,13 @@ private:
     // as rx_router_ -- only the receive callback touches it, and only
     // between submit() returning Routed and dispatchDecoded() returning.
     RxRouter::RoutedMessage rx_routed_{};
+
+    // Holds what RadioSeal::open() writes: rx_routed_.payload is the
+    // ciphertext, this is the plaintext handleReceiveStatic's type switch
+    // and dispatchDecoded() actually read. Same reasoning as rx_routed_
+    // itself (not a stack buffer -- see its comment) and the same
+    // single-writer/single-reader rule.
+    uint8_t rx_plaintext_[RxRouter::kMaxPayloadSize]{};
 
     // The state-machine task is the sole telemetry producer. The routine task
     // only consumes the publisher's bounded SPSC queue. The publish period is

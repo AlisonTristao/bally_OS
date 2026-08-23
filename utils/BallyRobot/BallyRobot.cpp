@@ -272,12 +272,23 @@ bool ROBOT::configureProtocolIdentity() {
                                                 0xB5, 0xB6, 0xB7, 0xB8, 0xB9};
     std::memcpy(protocol_uuid_ + 6U, kUuidSuffix, sizeof(kUuidSuffix));
 
+    // Binds RadioSeal to key_store regardless of load order: seal()/open()
+    // below read the KeyStore's state at call time, and both already fail
+    // closed on !loaded() -- see RadioSeal.h. Safe to do before
+    // key_store.load_from_card() runs later in init().
+    RadioSeal::configure(key_store);
+
     logger.configure_btp(protocol);
-    command_processor.configure(protocol);
+    // COMMAND_RESULT always replies to a channel C request today (COMMAND
+    // has no path from TraceView into this firmware yet, topico 31), so it
+    // seals for real.
+    command_processor.configure(protocol, RadioSeal::seal, nullptr);
     manifest_responder.configure(protocol, protocol_uuid_);
     telemetry.configure(protocol);
     subscription_responder.configure(protocol, telemetry);
-    status_reporter.configure(protocol, telemetry);
+    // STATUS (heartbeat) is channel C by definition (bally_channels.h), so
+    // it seals for real too.
+    status_reporter.configure(protocol, telemetry, RadioSeal::seal, nullptr);
     logger.insert_logf(
         logType::INFO,
         "BTP v%u, bally_protocol %u.%u.%u, source=%08lx boot=%08lx",
@@ -657,14 +668,38 @@ void ROBOT::handleReceiveStatic(const esp_now_recv_info_t *recv_info, const uint
         instance_->link_reassembly_completed_.fetch_add(1U, std::memory_order_relaxed);
     }
 
-    // Stage two: route. Explicit MessageType filter -- no other channel can
+    // Stage two: open. Everything that reaches this point today is channel C
+    // (dongle<->robot, key L) -- the dongle already seals every frame it
+    // originates this way (bally_dongle's RadioSeal, topico 30), and channel
+    // B (key E, TraceView<->robot) has no path into this firmware yet,
+    // topico 31. This is the robot's REAL authorization now (see the long
+    // comment on btp_command::authorized_source): the MAC check above is a
+    // cheap radio prefilter a forged sender clears in one line, this tag is
+    // not -- it needs key L. RadioSeal::open() fails closed on every branch
+    // (no key loaded, ENCRYPTED not set, a cipher other than AES-128-GCM, or
+    // a tag that does not verify); there is no fallback to reading the
+    // still-sealed bytes as plaintext.
+    const btp::Header& header = instance_->rx_routed_.header;
+    const std::size_t ciphertext_size = instance_->rx_routed_.payload_size;
+    const bool opened =
+        ciphertext_size >= RadioSeal::kTagSize &&
+        ciphertext_size - RadioSeal::kTagSize <= sizeof(instance_->rx_plaintext_) &&
+        RadioSeal::open(header, static_cast<uint16_t>(ciphertext_size),
+                        instance_->rx_routed_.payload,
+                        instance_->rx_plaintext_);
+    if (!opened) {
+        instance_->command_processor.note_unauthorized();
+        return;
+    }
+    const std::size_t plaintext_size = ciphertext_size - RadioSeal::kTagSize;
+
+    // Stage three: route. Explicit MessageType filter -- no other channel can
     // fall through to the shell path, even if its payload happens to look
     // like text. A type the robot has no handler for (TELEMETRY, LOG and
     // TERMINAL today) is dropped HERE rather than before reassembly, so a
     // fragmented one costs a slot until it completes or times out. That is
     // the price of the ordering above, bounded by RxRouter::kSlotCount and
     // its 4000 ms timeout; filtering earlier is what loses real messages.
-    const btp::Header& header = instance_->rx_routed_.header;
     switch (header.type) {
         case btp::MessageType::Command:
             if (header.object_id != btp_command::kCommandRequestObjectId) {
@@ -689,8 +724,7 @@ void ROBOT::handleReceiveStatic(const esp_now_recv_info_t *recv_info, const uint
     }
 
     instance_->dispatchDecoded(
-        header, btp::ByteView{instance_->rx_routed_.payload,
-                              instance_->rx_routed_.payload_size});
+        header, btp::ByteView{instance_->rx_plaintext_, plaintext_size});
 }
 
 // Stage three of the pipeline above: hands one complete Command/Control

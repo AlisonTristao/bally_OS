@@ -95,9 +95,12 @@ std::size_t StatusReporter::serialize(std::uint16_t flags,
 }
 
 void StatusReporter::configure(BtpEndpoint& endpoint,
-                               TelemetryPublisher& publisher) noexcept {
+                               TelemetryPublisher& publisher,
+                               BtpSealFn seal, void* seal_context) noexcept {
     endpoint_ = &endpoint;
     publisher_ = &publisher;
+    seal_ = seal;
+    seal_context_ = seal_context;
 }
 
 bool StatusReporter::publish(std::uint16_t flags,
@@ -125,5 +128,6 @@ bool StatusReporter::publish(std::uint16_t flags,
     if (size == 0U) return false;
 
     return endpoint_->send_logical(btp::MessageType::Control, kStatusObjectId,
-                                   payload, size, timestamp_us);
+                                   payload, size, timestamp_us, seal_,
+                                   seal_context_);
 }

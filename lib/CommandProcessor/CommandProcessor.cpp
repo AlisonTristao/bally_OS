@@ -2,8 +2,11 @@
 
 #include <cstring>
 
-void CommandProcessor::configure(BtpEndpoint& endpoint) noexcept {
+void CommandProcessor::configure(BtpEndpoint& endpoint, BtpSealFn seal,
+                                 void* seal_context) noexcept {
     endpoint_ = &endpoint;
+    seal_ = seal;
+    seal_context_ = seal_context;
 }
 
 bool CommandProcessor::same_key(const RequestKey& left,
@@ -299,7 +302,8 @@ bool CommandProcessor::send_result(const ResultView& result) noexcept {
     }
     const bool sent = endpoint_->send_fragment(
         btp::MessageType::Command, kCommandResultObjectId, result.sequence,
-        result.timestamp_us, result.payload, result.payload_size, 0U, 1U);
+        result.timestamp_us, result.payload, result.payload_size, 0U, 1U,
+        seal_, seal_context_);
     if (!sent) note_drop();
     return sent;
 }

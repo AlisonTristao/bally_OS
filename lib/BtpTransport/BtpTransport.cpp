@@ -108,18 +108,29 @@ bool BtpEndpoint::encode_fragment(btp::MessageType type,
                                   std::uint8_t fragment_count,
                                   std::uint8_t* output,
                                   std::size_t output_capacity,
-                                  std::size_t* bytes_written) const noexcept {
+                                  std::size_t* bytes_written,
+                                  SealFn seal,
+                                  void* seal_context) const noexcept {
     if (source_id_ == 0U || boot_id_ == 0U || sequence == 0U ||
         fragment_count == 0U || fragment_index >= fragment_count ||
         payload_size > btp::kEspNowMaxPayloadSize ||
         (payload == nullptr && payload_size != 0U)) {
         return false;
     }
+    // The AEAD tag covers the whole logical payload, never a slice of one
+    // (see SealFn's contract) -- a call representing only part of a message
+    // cannot seal here.
+    if (seal != nullptr && fragment_count != 1U) return false;
+    if (seal != nullptr &&
+        payload_size + kAeadTagSize > btp::kEspNowMaxPayloadSize) {
+        return false;
+    }
 
-    btp::Header header{
+    const btp::Header header{
         .type = type,
         .flags = static_cast<std::uint16_t>(
-            fragment_count > 1U ? btp::kFlagFragmented : 0U),
+            (fragment_count > 1U ? btp::kFlagFragmented : 0U) |
+            (seal != nullptr ? btp::kFlagEncrypted : 0U)),
         .source_id = source_id_,
         .boot_id = boot_id_,
         .sequence = sequence,
@@ -128,7 +139,21 @@ bool BtpEndpoint::encode_fragment(btp::MessageType type,
         .fragment_index = fragment_index,
         .fragment_count = fragment_count,
     };
-    const btp::Frame frame{header, {payload, payload_size}};
+
+    if (seal == nullptr) {
+        const btp::Frame frame{header, {payload, payload_size}};
+        return btp::encode(frame, btp::TransportProfile::EspNow, output,
+                           output_capacity, bytes_written) == btp::Error::Ok;
+    }
+
+    // Sealed once, in place of the plaintext -- ENCRYPTED is already set on
+    // `header` above, since the AAD is computed from the header AS GIVEN.
+    std::uint8_t sealed[btp::kEspNowMaxPayloadSize];
+    if (!seal(seal_context, header, static_cast<std::uint16_t>(payload_size),
+             payload, sealed)) {
+        return false;
+    }
+    const btp::Frame frame{header, {sealed, payload_size + kAeadTagSize}};
     return btp::encode(frame, btp::TransportProfile::EspNow, output,
                        output_capacity, bytes_written) == btp::Error::Ok;
 }
@@ -140,12 +165,14 @@ bool BtpEndpoint::send_fragment(btp::MessageType type,
                                 const std::uint8_t* payload,
                                 std::size_t payload_size,
                                 std::uint8_t fragment_index,
-                                std::uint8_t fragment_count) const noexcept {
+                                std::uint8_t fragment_count,
+                                SealFn seal,
+                                void* seal_context) const noexcept {
     std::uint8_t frame[btp::kEspNowMaxFrameSize];
     std::size_t frame_size = 0U;
     if (!encode_fragment(type, object_id, sequence, timestamp_us, payload,
                          payload_size, fragment_index, fragment_count, frame,
-                         sizeof(frame), &frame_size)) {
+                         sizeof(frame), &frame_size, seal, seal_context)) {
         return false;
     }
     return send_encoded(frame, frame_size);
@@ -155,32 +182,90 @@ bool BtpEndpoint::send_logical(btp::MessageType type,
                                std::uint16_t object_id,
                                const std::uint8_t* payload,
                                std::size_t payload_size,
-                               std::uint64_t timestamp_us) noexcept {
+                               std::uint64_t timestamp_us,
+                               SealFn seal,
+                               void* seal_context) noexcept {
     if (payload == nullptr && payload_size != 0U) return false;
-
-    std::uint8_t count = 0U;
-    if (btp::fragment_count(payload_size, btp::TransportProfile::EspNow,
-                            &count) != btp::Error::Ok) {
-        return false;
-    }
 
     std::uint32_t sequence = 0U;
     if (!reserve_sequence(&sequence)) return false;
 
-    for (std::uint8_t index = 0U; index < count; ++index) {
-        const std::size_t offset =
-            static_cast<std::size_t>(index) * btp::kEspNowMaxPayloadSize;
-        const std::size_t remaining = payload_size - offset;
-        const std::size_t fragment_size =
-            remaining < btp::kEspNowMaxPayloadSize
-                ? remaining
-                : btp::kEspNowMaxPayloadSize;
-        const std::uint8_t* fragment =
-            payload == nullptr ? nullptr : payload + offset;
-        if (!send_fragment(type, object_id, sequence, timestamp_us, fragment,
-                           fragment_size, index, count)) {
+    if (seal == nullptr) {
+        std::uint8_t count = 0U;
+        if (btp::fragment_count(payload_size, btp::TransportProfile::EspNow,
+                                &count) != btp::Error::Ok) {
             return false;
         }
+        for (std::uint8_t index = 0U; index < count; ++index) {
+            const std::size_t offset =
+                static_cast<std::size_t>(index) * btp::kEspNowMaxPayloadSize;
+            const std::size_t remaining = payload_size - offset;
+            const std::size_t fragment_size =
+                remaining < btp::kEspNowMaxPayloadSize
+                    ? remaining
+                    : btp::kEspNowMaxPayloadSize;
+            const std::uint8_t* fragment =
+                payload == nullptr ? nullptr : payload + offset;
+            if (!send_fragment(type, object_id, sequence, timestamp_us,
+                               fragment, fragment_size, index, count)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Sealed path: seal ONCE over the whole logical message -- canonical
+    // header, FRAGMENTED cleared, index 0, count 1 -- then slice the SEALED
+    // bytes into wire fragments via btp::make_fragment. Never hand-slice a
+    // sealed payload the way the plaintext loop above does: make_fragment is
+    // what keeps every fragment's header agreeing with the one that was
+    // actually sealed.
+    if (payload_size > kMaxLogicalPayloadSize) return false;
+
+    const btp::Header seal_header{
+        .type = type,
+        .flags = btp::kFlagEncrypted,
+        .source_id = source_id_,
+        .boot_id = boot_id_,
+        .sequence = sequence,
+        .timestamp_us = timestamp_us,
+        .object_id = object_id,
+        .fragment_index = 0U,
+        .fragment_count = 1U,
+    };
+
+    std::uint8_t sealed[kMaxLogicalPayloadSize + kAeadTagSize];
+    if (!seal(seal_context, seal_header,
+             static_cast<std::uint16_t>(payload_size), payload, sealed)) {
+        return false;
+    }
+    const std::size_t sealed_size = payload_size + kAeadTagSize;
+
+    std::uint8_t count = 0U;
+    if (btp::fragment_count(sealed_size, btp::TransportProfile::EspNow,
+                            &count) != btp::Error::Ok) {
+        return false;
+    }
+
+    btp::Header logical_header = seal_header;
+    logical_header.flags = static_cast<std::uint16_t>(
+        btp::kFlagEncrypted | (count > 1U ? btp::kFlagFragmented : 0U));
+    logical_header.fragment_count = count;
+
+    for (std::uint8_t index = 0U; index < count; ++index) {
+        btp::Frame fragment{};
+        if (btp::make_fragment(logical_header, {sealed, sealed_size},
+                               btp::TransportProfile::EspNow, index,
+                               &fragment) != btp::Error::Ok) {
+            return false;
+        }
+        std::uint8_t frame[btp::kEspNowMaxFrameSize];
+        std::size_t frame_size = 0U;
+        if (btp::encode(fragment, btp::TransportProfile::EspNow, frame,
+                        sizeof(frame), &frame_size) != btp::Error::Ok) {
+            return false;
+        }
+        if (!send_encoded(frame, frame_size)) return false;
     }
     return true;
 }

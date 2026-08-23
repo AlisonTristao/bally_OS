@@ -72,7 +72,13 @@ public:
         std::uint32_t unauthorized;
     };
 
-    void configure(BtpEndpoint& endpoint) noexcept;
+    // `seal`/`seal_context` (default nullptr) are forwarded verbatim to
+    // BtpEndpoint::send_fragment -- see BtpSealFn. COMMAND_RESULT here is
+    // always a reply to a channel C request (COMMAND has no path from
+    // TraceView into this firmware yet, topico 31), so the real caller
+    // passes RadioSeal::seal.
+    void configure(BtpEndpoint& endpoint, BtpSealFn seal = nullptr,
+                   void* seal_context = nullptr) noexcept;
 
     Intake intake(const btp::Header& header, btp::ByteView payload,
                   std::uint64_t now_us) noexcept;
@@ -137,6 +143,8 @@ private:
                        std::uint16_t* size_out) noexcept;
 
     BtpEndpoint* endpoint_ = nullptr;
+    BtpSealFn seal_ = nullptr;
+    void* seal_context_ = nullptr;
     std::atomic_flag cache_lock_ = ATOMIC_FLAG_INIT;
     CacheEntry cache_[kCacheCapacity]{};
     std::uint8_t transient_result_[kMaxResultPayloadSize]{};

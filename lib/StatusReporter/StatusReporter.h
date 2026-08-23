@@ -6,7 +6,10 @@
 
 #include <btp/codec.hpp>
 
-class BtpEndpoint;
+// Needed for BtpSealFn (a file-scope type alias, not a member of
+// BtpEndpoint -- see the comment on it), which configure() below names.
+#include <BtpTransport.h>
+
 class TelemetryPublisher;
 
 // Builds and publishes CONTROL/STATUS
@@ -85,7 +88,15 @@ public:
                                  std::size_t output_capacity,
                                  bool version1 = false) noexcept;
 
-    void configure(BtpEndpoint& endpoint, TelemetryPublisher& publisher) noexcept;
+    // `seal`/`seal_context` (default nullptr) are forwarded verbatim to
+    // BtpEndpoint::send_logical -- see BtpSealFn. STATUS is channel C
+    // (dongle<->robot, heartbeat -- bally_channels.h), so its real caller
+    // passes RadioSeal::seal; this class stays free of any AEAD dependency
+    // itself, the same reason BtpEndpoint takes a function pointer instead
+    // of calling btp::aead directly.
+    void configure(BtpEndpoint& endpoint, TelemetryPublisher& publisher,
+                   BtpSealFn seal = nullptr,
+                   void* seal_context = nullptr) noexcept;
 
     // Snapshots TelemetryPublisher's per-topic block, stamps this robot's own
     // source_id on every record (commands.md section 5.1: "a source
@@ -102,6 +113,8 @@ public:
 private:
     BtpEndpoint* endpoint_ = nullptr;
     TelemetryPublisher* publisher_ = nullptr;
+    BtpSealFn seal_ = nullptr;
+    void* seal_context_ = nullptr;
 };
 
 #endif  // STATUS_REPORTER_H
