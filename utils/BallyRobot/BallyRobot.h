@@ -32,12 +32,13 @@
 #include <StatusReporter.h>
 #include <TelemetryPublisher.h>
 #include <TxScheduler.h>
+#include <RxRouter.h>
 #include <OTAUpdater.h>
 #include <RobotSettings.h>
 #include <SDCard.h>
+#include <KeyStore.h>
 #include <StateMachine.h>
 #include <USBMassStorage.h>
-#include <btp/fragmentation.hpp>
 
 #ifdef ENABLE_SYSTEM_MONITOR
 #include <SystemMonitor.h>
@@ -156,6 +157,12 @@ public:
     // cannot run at static-init time like the other members below.
     std::optional<ArraySensor> array_sensor;
     SDCard sd_card;
+    // The two channel keys (E, TraceView<->robot; L, dongle<->robot),
+    // loaded once from bally.key in init(). Nothing encrypts against them
+    // yet -- see the AEAD comment on handleReceiveStatic -- so this only
+    // holds the keys for the day that lands; last_error()/verify_e()/
+    // verify_l() are what a bench log reports meanwhile.
+    KeyStore key_store;
     // Constructed in init() once cfg.bzr (settings) is known — same reason
     // as array_sensor above. Public (not alongside motor_left/imu below)
     // because state functions in src/robot/ call junkebox->play() directly,
@@ -417,12 +424,24 @@ private:
     uint8_t received_data_queue_storage_[
         kCommandQueueLength * sizeof(QueuedCommand)]{};
 
-    static constexpr size_t kCommandReassemblySlots = 2U;
-    btp::ReassemblySlot command_reassembly_slots_[kCommandReassemblySlots];
-    uint8_t command_reassembly_buffers_[kCommandReassemblySlots]
-                                       [btp_command::kMaxLogicalRequestSize]{};
-    btp::ReassemblyStorage command_reassembly_storage_[kCommandReassemblySlots]{};
-    std::optional<btp::Reassembler> command_reassembler_;
+    // Receive pipeline, stage one: decode + reassemble. Every frame the
+    // radio hands us goes through here before anything looks at its type
+    // (see handleReceiveStatic).
+    //
+    // Two tasks touch it and it holds no lock: submit() from the ESP-NOW
+    // receive callback, expire() once a second from routine() via
+    // publishStatus(). Unchanged from the command_reassembler_ this replaced
+    // -- see the concurrency note on RxRouter::Router for why that is
+    // tolerated and what the worst case is.
+    RxRouter::Router rx_router_;
+
+    // The router's output lives here, not on the caller's stack: submit()
+    // copies up to RxRouter::kMaxPayloadSize octets into it, and
+    // handleReceiveStatic runs on the Wi-Fi task's stack, which is not ours
+    // to spend ~640 octets of. Single-writer/single-reader by the same rule
+    // as rx_router_ -- only the receive callback touches it, and only
+    // between submit() returning Routed and dispatchDecoded() returning.
+    RxRouter::RoutedMessage rx_routed_{};
 
     // The state-machine task is the sole telemetry producer. The routine task
     // only consumes the publisher's bounded SPSC queue. The publish period is
@@ -443,7 +462,7 @@ private:
     uint64_t next_status_us_ = 0U;
     void publishStatus();
 
-    // Link counters for STATUS section 8. Written only by the ESP-NOW
+    // Link counters for STATUS section 5. Written only by the ESP-NOW
     // receive callback (single writer) and read by publishStatus(); relaxed
     // atomics keep the callback free of any lock. frames_tx/frames_dropped/
     // telemetry_dropped/command_duplicates come from TxScheduler,

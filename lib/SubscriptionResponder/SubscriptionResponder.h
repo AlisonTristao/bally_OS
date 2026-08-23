@@ -10,7 +10,7 @@ class BtpEndpoint;
 class TelemetryPublisher;
 
 // Answers CONTROL/SUBSCRIBE and CONTROL/UNSUBSCRIBE
-// (bally_protocol/docs/COMMANDS_AND_ACTIONS.md section 7) for this robot's
+// (BTP/docs/commands.md section 4) for this robot's
 // two static topics. Deliberately pure C++ (no Arduino/FreeRTOS), same shape
 // as ManifestResponder, so it links into env:native.
 //

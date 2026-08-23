@@ -5,8 +5,8 @@
 
 namespace {
 
-// Common result/error codes, bally_protocol/docs/COMMANDS_AND_ACTIONS.md
-// section 2 -- same local-constant pattern ManifestResponder.cpp already
+// Common result/error codes, BTP/docs/commands.md section 1 ("Result and
+// error codes") -- same local-constant pattern ManifestResponder.cpp already
 // uses rather than pulling in CommandProcessor for a handful of enum values.
 constexpr std::uint8_t kStatusSuccess = 0x00U;
 constexpr std::uint8_t kStatusRejected = 0x01U;
@@ -95,7 +95,7 @@ bool SubscriptionResponder::handle_subscribe(const btp::Header& request_header, 
             status = kStatusRejected;
             errorCode = kErrorNotFound;
         } else if (outcome.rate_below_minimum) {
-            // A rate under the schema's floor cannot be granted: section 7
+            // A rate under the schema's floor cannot be granted: section 4
             // forbids answering with a rate above the requested one, so the
             // only honest answer is a rejection. Note this is the *opposite*
             // of the max case just above, where the request is clamped and
@@ -151,7 +151,7 @@ bool SubscriptionResponder::handle_unsubscribe(const btp::Header& request_header
         errorCode = kErrorStaleTargetBoot;
     } else {
         // Removing an already-absent subscription is SUCCESS/NONE per
-        // COMMANDS_AND_ACTIONS.md section 7 ("torna retries idempotentes"),
+        // commands.md section 4 ("makes retries idempotent"),
         // so UnsubscribeOutcome::NotFound is not turned into an error here.
         (void)publisher_->unsubscribe(subscriptionId);
     }

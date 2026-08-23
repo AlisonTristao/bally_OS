@@ -7,8 +7,8 @@
 
 namespace {
 
-// Common result/error codes, bally_protocol/docs/COMMANDS_AND_ACTIONS.md
-// section 2 -- mirrors CommandProcessor::Status/ErrorCode (same source of
+// Common result/error codes, BTP/docs/commands.md section 1 ("Result and
+// error codes") -- mirrors CommandProcessor::Status/ErrorCode (same source of
 // truth, kept as local constants here rather than pulling in a dependency on
 // CommandProcessor for two enum values).
 constexpr std::uint8_t kStatusSuccess = 0x00U;
@@ -17,7 +17,7 @@ constexpr std::uint16_t kErrorNone = 0x0000U;
 constexpr std::uint16_t kErrorStaleTargetBoot = 0x0009U;
 constexpr std::uint16_t kErrorNotFound = 0x000BU;
 
-// MANIFEST_DATA flags (COMMANDS_AND_ACTIONS.md section 6.2).
+// MANIFEST_DATA flags (commands.md section 3.2).
 constexpr std::uint8_t kFlagNotModified = 0x01U;
 constexpr std::uint8_t kFlagCatalogComplete = 0x02U;
 constexpr std::uint8_t kSourceFlagOnline = 0x01U;
@@ -144,7 +144,7 @@ bool write_topic_record(Writer& writer, const TelemetryPublisher::TopicSchema& t
 // Writes the full MANIFEST_DATA payload. For an error status (REJECTED),
 // identity/role/flags/revision/topic&action counts are all zero and `name`
 // (if non-null) carries a short human diagnostic instead of the source name
-// -- COMMANDS_AND_ACTIONS.md section 6.2 "Em erro...".
+// -- commands.md section 3.2, the error case.
 std::size_t build_manifest_data(const btp::Header& request_header, std::uint8_t status, std::uint8_t flags,
                                 std::uint16_t error_code, const std::uint8_t uuid[16],
                                 std::uint32_t described_source_id, std::uint32_t described_boot_id,

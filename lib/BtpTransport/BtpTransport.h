@@ -119,9 +119,15 @@ ParseError copy_shell_command(const RequestView& request,
 
 std::uint32_t source_id_from_mac(const std::uint8_t mac[6]) noexcept;
 
+// Radio-level filter only, NOT authentication -- see the long comment on the
+// definition in BtpTransport.cpp. The claimed_source_id parameter this used
+// to take was removed rather than left unused on purpose: an ignored
+// parameter would let a call site keep passing a source_id and keep
+// believing it is being checked, which is precisely the mistake this change
+// makes possible. Removing it turns every call site into a compile error
+// until someone reads why.
 bool authorized_source(const std::uint8_t expected_mac[6],
-                       const std::uint8_t received_mac[6],
-                       std::uint32_t claimed_source_id) noexcept;
+                       const std::uint8_t received_mac[6]) noexcept;
 
 const char* parse_error_string(ParseError error) noexcept;
 

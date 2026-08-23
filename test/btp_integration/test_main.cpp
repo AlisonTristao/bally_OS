@@ -19,8 +19,8 @@ namespace {
 
 std::vector<std::uint8_t> read_vector(const char* relative_path) {
     const std::string candidates[] = {
-        std::string("../bally_protocol/test-vectors/v1/") + relative_path,
-        std::string("../../bally_protocol/test-vectors/v1/") + relative_path,
+        std::string("../BTP/test-vectors/v1/") + relative_path,
+        std::string("../../BTP/test-vectors/v1/") + relative_path,
     };
     for (const auto& path : candidates) {
         std::ifstream input(path, std::ios::binary);
@@ -210,15 +210,21 @@ void test_endpoint_fragments_with_one_shared_sequence_and_exact_sizes() {
     TEST_ASSERT_EQUAL_UINT8(2U, first.header.fragment_count);
 }
 
-void test_authorization_binds_mac_to_claimed_source() {
+// Renamed from test_authorization_binds_mac_to_claimed_source: topico 28
+// removed that binding, so asserting it would assert a rule the firmware no
+// longer has. What is left is a radio filter, and the last assertion is the
+// point -- a frame whose source_id is somebody else's is now ACCEPTED, which
+// is what makes the hub work and what leaves the robot unauthenticated until
+// the AEAD tag arrives in topico 30.
+void test_peer_mac_filter_accepts_relayed_source_ids() {
     const std::uint8_t expected[6] = {0xDC, 0xDA, 0x0C, 0x30, 0xAA, 0x5C};
     const std::uint8_t attacker[6] = {0xDC, 0xDA, 0x0C, 0x30, 0xAA, 0x5D};
-    const std::uint32_t source = btp_command::source_id_from_mac(expected);
-    TEST_ASSERT_EQUAL_HEX32(0x0C30AA5CU, source);
-    TEST_ASSERT_TRUE(btp_command::authorized_source(expected, expected, source));
-    TEST_ASSERT_FALSE(btp_command::authorized_source(expected, attacker, source));
-    TEST_ASSERT_FALSE(btp_command::authorized_source(expected, expected,
-                                                     source + 1U));
+    TEST_ASSERT_EQUAL_HEX32(0x0C30AA5CU,
+                            btp_command::source_id_from_mac(expected));
+    TEST_ASSERT_TRUE(btp_command::authorized_source(expected, expected));
+    TEST_ASSERT_FALSE(btp_command::authorized_source(expected, attacker));
+    TEST_ASSERT_FALSE(btp_command::authorized_source(nullptr, expected));
+    TEST_ASSERT_FALSE(btp_command::authorized_source(expected, nullptr));
 }
 
 void test_protocol_test_matches_canonical_vector_and_origin_timestamp() {
@@ -555,7 +561,7 @@ btp::DecodedFrame decode_only_frame() {
 
 // Acceptance criterion: "pedido acima do maximo e limitado e informado ao
 // cliente" -- clamped, answered SUCCESS, never rejected. The mirror case
-// (below the schema's floor) is rejected, because section 7 forbids granting
+// (below the schema's floor) is rejected, because section 4 forbids granting
 // a rate above the requested one.
 void test_subscribe_above_max_is_clamped_and_below_min_is_rejected() {
     BtpEndpoint endpoint;
@@ -749,7 +755,7 @@ void test_lease_expiry_and_new_boot_id_end_a_session() {
 }
 
 // PASSO 8/9: bytes and drops are measured per topic and reach the wire as the
-// 24-octet topic_status records of COMMANDS_AND_ACTIONS.md section 8.1.
+// 28-octet topic_status records of commands.md section 5.1.
 void test_topic_status_is_measured_and_serialized() {
     sent_count = 0U;
     BtpEndpoint endpoint;
@@ -905,7 +911,7 @@ int main(int, char**) {
     RUN_TEST(test_telemetry_can_never_become_a_command);
     RUN_TEST(test_only_supported_single_shell_command_is_copied);
     RUN_TEST(test_endpoint_fragments_with_one_shared_sequence_and_exact_sizes);
-    RUN_TEST(test_authorization_binds_mac_to_claimed_source);
+    RUN_TEST(test_peer_mac_filter_accepts_relayed_source_ids);
     RUN_TEST(test_protocol_test_matches_canonical_vector_and_origin_timestamp);
     RUN_TEST(test_publisher_queue_is_bounded_and_drop_newest_is_counted);
     RUN_TEST(test_publisher_registers_static_schemas_and_rejects_nan);

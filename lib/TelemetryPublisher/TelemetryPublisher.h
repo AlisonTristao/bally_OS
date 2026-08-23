@@ -41,19 +41,19 @@ public:
         const FieldSchema* fields;
         std::size_t field_count;
         std::size_t payload_size;
-        // Declared publish rate for the manifest (COMMANDS_AND_ACTIONS.md
-        // section 6.2's max_rate_millihz); zero means "not periodic" (e.g.
+        // Declared publish rate for the manifest (commands.md section 3.3's
+        // max_rate_millihz); zero means "not periodic" (e.g.
         // robot.state, published on transitions only).
         std::uint32_t max_rate_millihz;
         // Topico 17 PASSO 4 ("robo aplica min/max/default do schema"). Only
-        // max_rate_millihz travels on the wire (section 6.2 topic record);
+        // max_rate_millihz travels on the wire (section 3.3 topic record);
         // these two are local publisher policy and are deliberately NOT
         // serialized into the manifest, because v1 has no field for them and
         // inventing one would be a wire change.
         //
         // min_rate_millihz: slowest rate this publisher is willing to
         //   schedule. A slower request is REJECTED (INVALID_ARGUMENT) instead
-        //   of being silently sped up, because section 7 says the effective
+        //   of being silently sped up, because section 4 says the effective
         //   rate MUST NOT exceed the requested one -- clamping *up* is not
         //   allowed, so the only honest answers are "reject" or "publish
         //   slower than the client can use". Zero disables the floor.
@@ -100,7 +100,7 @@ public:
         std::uint16_t subscriber_count;
         // Aggregate publish rate: the maximum granted rate over the live
         // subscriptions of this topic. Zero means "not being published now"
-        // (STATUS section 8.1 defines the field exactly that way).
+        // (STATUS section 5.1 defines the field exactly that way).
         std::uint32_t effective_rate_millihz;
         std::uint64_t bytes_sent_total;
         std::uint64_t samples_dropped_total;
@@ -139,16 +139,16 @@ public:
     // Creates, renews or replaces the subscription of one subscriber session
     // for one topic. A subscription is keyed by
     // (request_source_id, request_boot_id, topic_id) -- the session identity
-    // of COMMANDS_AND_ACTIONS.md section 7 -- so several sessions can hold
+    // of commands.md section 4 -- so several sessions can hold
     // independent subscriptions to the same topic and the topic only stops
     // being published when the *last* one goes away (PASSO 5).
     //
     // Repeating the same request bytes from the same identity returns the
     // same subscription_id and only pushes the lease deadline forward
-    // ("repetir a mesma requisicao ... retorna a mesma assinatura sem criar
-    // outra"); different bytes atomically replace that session's
-    // subscription for that topic with a new subscription_id ("uma nova
-    // sequencia cria ou substitui").
+    // ("repeating the identical request returns the same subscription rather
+    // than creating another"); different bytes atomically replace that
+    // session's subscription for that topic with a new subscription_id ("a
+    // new sequence atomically creates or replaces").
     //
     // PASSO 6 (session disconnect): a SUBSCRIBE from a source_id whose
     // boot_id changed means the previous session of that peer is gone, so
@@ -166,10 +166,10 @@ public:
 
     // Drops every subscription held by one subscriber session. PASSO 6's
     // explicit disconnect path: the ESP-NOW leg has no SESSION_CLOSE (that
-    // exchange belongs to the dongle's serial transport, section 10), so on
-    // this side a session ends either by lease expiry, by the peer coming
-    // back with a new boot_id, or by this call. Returns how many
-    // subscriptions were removed.
+    // exchange belongs to the dongle's serial transport,
+    // session-and-terminal.md section 4), so on this side a session ends
+    // either by lease expiry, by the peer coming back with a new boot_id, or
+    // by this call. Returns how many subscriptions were removed.
     std::size_t drop_session(std::uint32_t subscriber_source_id,
                              std::uint32_t subscriber_boot_id) noexcept;
 
@@ -249,7 +249,7 @@ private:
         std::uint8_t payload[kMaxPayloadSize];
     };
 
-    // Per-topic byte/drop counters for STATUS section 8.1. Index-aligned with
+    // Per-topic byte/drop counters for STATUS section 5.1. Index-aligned with
     // schemas(), not a separate map. Subscriptions themselves live in
     // subscriptions_ below, because a topic can now have several.
     struct TopicRuntime {

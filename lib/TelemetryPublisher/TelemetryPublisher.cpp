@@ -278,7 +278,7 @@ TelemetryPublisher::RateResolution TelemetryPublisher::resolve_effective_rate(
     // A periodic topic is capped by its manifest max_rate_millihz; a
     // non-periodic one (max == 0) by the local nominal default, if any.
     // Either way the result never exceeds what the client asked for, which
-    // is the MUST NOT of COMMANDS_AND_ACTIONS.md section 7.
+    // is the MUST NOT of commands.md section 4.
     const std::uint32_t cap = (schema.max_rate_millihz != 0U)
                                   ? schema.max_rate_millihz
                                   : schema.default_rate_millihz;
@@ -438,7 +438,7 @@ TelemetryPublisher::UnsubscribeOutcome TelemetryPublisher::unsubscribe(
         }
     }
     // Removing an already-absent subscription is a success per
-    // COMMANDS_AND_ACTIONS.md section 7 ("torna retries idempotentes"), not
+    // commands.md section 4 ("makes retries idempotent"), not
     // an UnknownTopic error -- the caller cannot tell "already gone" apart
     // from "never existed" from subscription_id alone, and both map to the
     // same SUCCESS/NONE result on the wire.

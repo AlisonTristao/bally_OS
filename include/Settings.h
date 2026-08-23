@@ -50,7 +50,7 @@
 #define EKF_IMU_RY      0.1f
 
 // -------------------- logger configuration --------------------
-// Wire limits, fragmentation and CRC are owned by bally_protocol. The ring
+// Wire limits, fragmentation and CRC are owned by BTP. The ring
 // stores compact logical records and creates exact-size BTP frames on flush.
 // Sized once, at static-init time: `Logger ROBOT::logger` is a namespace-
 // scope static (utils/BallyRobot/BallyRobot.h/.cpp), constructed before

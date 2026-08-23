@@ -8,8 +8,8 @@
 
 class BtpEndpoint;
 
-// Answers CONTROL/MANIFEST_REQUEST (bally_protocol/docs/COMMANDS_AND_ACTIONS.md
-// section 6) by describing this robot's own two static schemas, taken
+// Answers CONTROL/MANIFEST_REQUEST (BTP/docs/commands.md
+// section 3) by describing this robot's own two static schemas, taken
 // verbatim from TelemetryPublisher::schemas() -- the same table the robot
 // already uses to pack samples, so the manifest can never drift from what is
 // actually published on the wire.
@@ -25,8 +25,7 @@ class BtpEndpoint;
 // to the wildcard target 0, which for a leaf node with no gateway role below
 // it just means "describe yourself") always describes exactly one source
 // (this robot), so catalog_index=0/catalog_count=1/CATALOG_COMPLETE is set on
-// every response, per COMMANDS_AND_ACTIONS.md section 6.2's "em requisicao
-// direcionada".
+// every response, per commands.md section 3.2's "for a targeted request".
 class ManifestResponder {
 public:
     static constexpr std::uint16_t kManifestRequestObjectId = 0x0003U;
@@ -36,7 +35,7 @@ public:
     static constexpr std::uint8_t kSourceRoleRobot = 0x01U;
     // Comfortably covers the two current schemas (protocol.test, robot.state)
     // with headroom for a few more fields/topics; well under the manifest's
-    // 49152-octet wire ceiling (COMMANDS_AND_ACTIONS.md section 13).
+    // 49152-octet wire ceiling (commands.md section 6).
     // BtpEndpoint::send_logical fragments this across ESP-NOW frames
     // (kEspNowMaxPayloadSize=210) automatically -- reusing the same
     // btp::fragment_count/make_fragment machinery every other logical send in

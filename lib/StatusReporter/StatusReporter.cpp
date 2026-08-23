@@ -38,10 +38,11 @@ std::size_t StatusReporter::serialize(std::uint16_t flags,
     if (topics == nullptr) topic_count = 0U;
     if (topic_count > kMaxTopicRecords) topic_count = kMaxTopicRecords;
 
-    // Section 8, unchanged layout in version 2.
+    // Section 5, unchanged layout in version 2.
     write_u16_le(output + 0U, version1 ? kStatusVersion1 : kStatusVersion2);
     // "flags | bit 0 DEGRADED, demais zero": every reserved bit MUST be zero
-    // on the wire (section 1), so anything else the caller passes is dropped
+    // on the wire (model.md section 7), so anything else the caller passes
+    // is dropped
     // here rather than emitted and rejected by the peer.
     write_u16_le(output + 2U, static_cast<std::uint16_t>(flags & kFlagDegraded));
     write_u64_le(output + 4U, uptime_us);

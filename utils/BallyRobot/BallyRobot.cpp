@@ -57,6 +57,17 @@ Logger ROBOT::logger;
 // HELPER FUNCTIONS
 // ==============================================================================
 
+// verify_e/verify_l are public tags, safe to log; this is the only place
+// that turns them into text. Never call this on key_e()/key_l() themselves.
+static void hexEncode(const uint8_t* data, size_t size, char* out) {
+    static const char kHexDigits[] = "0123456789abcdef";
+    for (size_t i = 0; i < size; ++i) {
+        out[i * 2] = kHexDigits[data[i] >> 4];
+        out[i * 2 + 1] = kHexDigits[data[i] & 0x0F];
+    }
+    out[size * 2] = '\0';
+}
+
 static void readMacAddress() {
     uint8_t baseMac[6];
     esp_err_t ret = esp_wifi_get_mac(WIFI_IF_STA, baseMac);
@@ -565,35 +576,47 @@ void ROBOT::updateSoundFeedback() {
 // COMMUNICATION CALLBACKS
 // ==============================================================================
 
+// The receive pipeline, in this order and no other:
+//
+//     decode -> reassemble -> route
+//
+// It used to be decode -> route by type -> reassemble, with reassembly
+// reachable only from the COMMAND and CONTROL branches. That worked while
+// the dongle was the only peer and delivered whole messages. Behind a hub it
+// does not: TraceView now speaks to this robot end to end and the dongle
+// relays fragment by fragment, verbatim, by design -- reassembly is the
+// endpoint's job. A type filter placed before reassembly judges the header
+// of a fragment, and throws away pieces of messages it would have accepted
+// whole. So reassembly became a stage every frame crosses (RxRouter), and
+// the type filter moved behind it, where it only ever sees complete
+// messages. Topico 31 slots aead_open() into the same gap, for the same
+// reason: a tag computed over the whole logical payload cannot be checked
+// against a piece of it.
 void ROBOT::handleReceiveStatic(const esp_now_recv_info_t *recv_info, const uint8_t *incomingData, int len) {
-    // Partial or malformed radio payloads are rejected by btp::decode before
-    // any field is read. Only the authorized COMMAND_REQUEST route below can
-    // enqueue work for TinyShell.
+    // Partial or malformed radio payloads are rejected by btp::decode inside
+    // the router, before any field is read. Only the COMMAND_REQUEST route
+    // below can enqueue work for TinyShell.
     if (instance_ == nullptr || recv_info == nullptr || incomingData == nullptr ||
         len <= 0 || instance_->receivedDataQueue == nullptr) return;
 
-    // STATUS section 8 counters: every octet stream the radio hands us is one
-    // received frame attempt; CRC and decode failures are counted separately
-    // (a frame rejected by CRC is never also counted as a decode error).
+    // STATUS section 5 counters: every octet stream the radio hands us is one
+    // received frame attempt.
     instance_->link_frames_rx_.fetch_add(1U, std::memory_order_relaxed);
 
-    btp::DecodedFrame decoded{};
-    const btp::Error decode_error = btp::decode(
-        incomingData, static_cast<size_t>(len), btp::TransportProfile::EspNow,
-        &decoded);
-    if (decode_error != btp::Error::Ok) {
-        if (decode_error == btp::Error::CrcMismatch) {
-            instance_->link_crc_errors_.fetch_add(1U, std::memory_order_relaxed);
-        } else {
-            instance_->link_decode_errors_.fetch_add(1U, std::memory_order_relaxed);
-        }
-        return;
-    }
-
+    // Cheap radio filter, and NOT authentication -- read the comment on
+    // btp_command::authorized_source. It no longer binds the frame's
+    // source_id to the sender's MAC, because behind a hub every frame
+    // legitimately arrives from the dongle's MAC carrying somebody else's
+    // source_id. The real authorization (the AEAD tag) lands at this exact
+    // spot in topico 30; until then a spoofed MAC reaches the shell, which
+    // is why this build is for the bench.
+    //
+    // It runs before btp::decode now, where it used to run after: a frame
+    // from a radio that is not our peer no longer moves the CRC or
+    // decode-error counters, which describe our own link.
 #ifdef MAC_ADDR
     static constexpr uint8_t expected_peer[6] = {MAC_ADDR};
-    if (!btp_command::authorized_source(expected_peer, recv_info->src_addr,
-                                        decoded.header.source_id)) {
+    if (!btp_command::authorized_source(expected_peer, recv_info->src_addr)) {
         instance_->command_processor.note_unauthorized();
         return;
     }
@@ -602,20 +625,57 @@ void ROBOT::handleReceiveStatic(const esp_now_recv_info_t *recv_info, const uint
     return;
 #endif
 
-    // Explicit MessageType router. No other channel can fall through to the
-    // shell path, even if its payload happens to look like text.
-    switch (decoded.header.type) {
+    // Stage one: decode + reassemble. Returns Routed only for a COMPLETE
+    // logical message. CRC and decode failures stay counted separately (a
+    // frame rejected by CRC is never also counted as a decode error).
+    const RxRouter::Outcome outcome = instance_->rx_router_.submit(
+        incomingData, static_cast<size_t>(len),
+        static_cast<uint64_t>(esp_timer_get_time() / 1000ULL),
+        &instance_->rx_routed_);
+    switch (outcome) {
+        case RxRouter::Outcome::Routed:
+            break;
+        case RxRouter::Outcome::FragmentAccepted:
+        case RxRouter::Outcome::DuplicateFragment:
+            // Not an error, and not a message yet. A byte-identical retry is
+            // absorbed by the reassembler without disturbing the slot.
+            return;
+        case RxRouter::Outcome::DroppedCrc:
+            instance_->link_crc_errors_.fetch_add(1U, std::memory_order_relaxed);
+            return;
+        case RxRouter::Outcome::DroppedDecode:
+        case RxRouter::Outcome::DroppedInvalidArgument:
+            instance_->link_decode_errors_.fetch_add(1U, std::memory_order_relaxed);
+            return;
+        case RxRouter::Outcome::DroppedReassembly:
+            instance_->link_reassembly_rejected_.fetch_add(1U, std::memory_order_relaxed);
+            instance_->command_processor.note_drop();
+            return;
+    }
+
+    if (instance_->rx_routed_.reassembled) {
+        instance_->link_reassembly_completed_.fetch_add(1U, std::memory_order_relaxed);
+    }
+
+    // Stage two: route. Explicit MessageType filter -- no other channel can
+    // fall through to the shell path, even if its payload happens to look
+    // like text. A type the robot has no handler for (TELEMETRY, LOG and
+    // TERMINAL today) is dropped HERE rather than before reassembly, so a
+    // fragmented one costs a slot until it completes or times out. That is
+    // the price of the ordering above, bounded by RxRouter::kSlotCount and
+    // its 4000 ms timeout; filtering earlier is what loses real messages.
+    const btp::Header& header = instance_->rx_routed_.header;
+    switch (header.type) {
         case btp::MessageType::Command:
-            if (decoded.header.object_id !=
-                btp_command::kCommandRequestObjectId) {
+            if (header.object_id != btp_command::kCommandRequestObjectId) {
                 instance_->command_processor.note_drop();
                 return;
             }
             break;
         case btp::MessageType::Control:
-            if (decoded.header.object_id != ManifestResponder::kManifestRequestObjectId &&
-                decoded.header.object_id != SubscriptionResponder::kSubscribeObjectId &&
-                decoded.header.object_id != SubscriptionResponder::kUnsubscribeObjectId) {
+            if (header.object_id != ManifestResponder::kManifestRequestObjectId &&
+                header.object_id != SubscriptionResponder::kSubscribeObjectId &&
+                header.object_id != SubscriptionResponder::kUnsubscribeObjectId) {
                 instance_->command_processor.note_drop();
                 return;
             }
@@ -628,32 +688,15 @@ void ROBOT::handleReceiveStatic(const esp_now_recv_info_t *recv_info, const uint
             return;
     }
 
-    if ((decoded.header.flags & btp::kFlagFragmented) == 0U) {
-        instance_->dispatchDecoded(decoded.header, decoded.payload);
-        return;
-    }
-
-    if (!instance_->command_reassembler_.has_value()) return;
-    btp::ReassembledMessage completed{};
-    const auto event = instance_->command_reassembler_->push(
-        decoded, static_cast<uint64_t>(esp_timer_get_time() / 1000ULL),
-        &completed);
-    if (event == btp::ReassemblyEvent::Complete) {
-        instance_->link_reassembly_completed_.fetch_add(1U, std::memory_order_relaxed);
-        instance_->dispatchDecoded(completed.header, completed.payload);
-        instance_->command_reassembler_->release(completed.slot_index);
-    } else if (event != btp::ReassemblyEvent::Accepted &&
-               event != btp::ReassemblyEvent::Duplicate) {
-        instance_->link_reassembly_rejected_.fetch_add(1U, std::memory_order_relaxed);
-        instance_->command_processor.note_drop();
-    }
+    instance_->dispatchDecoded(
+        header, btp::ByteView{instance_->rx_routed_.payload,
+                              instance_->rx_routed_.payload_size});
 }
 
-// Shared by the unfragmented and reassembled paths above: routes a fully
-// decoded Command/Control frame to the matching handler by object_id.
-// handleReceiveStatic's switch already rejected any object_id not listed
-// here, so the final else is unreachable in practice but kept as a safe
-// no-op rather than an assert.
+// Stage three of the pipeline above: hands one complete Command/Control
+// message to the matching handler by object_id. handleReceiveStatic's switch
+// already rejected any object_id not listed here, so the final else is
+// unreachable in practice but kept as a safe no-op rather than an assert.
 void ROBOT::dispatchDecoded(const btp::Header& header, btp::ByteView payload) {
     if (header.type == btp::MessageType::Control) {
         if (header.object_id == ManifestResponder::kManifestRequestObjectId) {
@@ -1266,23 +1309,20 @@ void ROBOT::routine(void *param){
     }
 }
 
-// CONTROL/STATUS, status_version=2 (COMMANDS_AND_ACTIONS.md sections 8/8.1).
+// CONTROL/STATUS, status_version=2 (commands.md sections 5/5.1).
 // Spontaneous publication, no response expected, one per kStatusPeriodUs.
 void ROBOT::publishStatus() {
     const uint64_t now_us = static_cast<uint64_t>(esp_timer_get_time());
     if (now_us < next_status_us_) return;
     next_status_us_ = now_us + kStatusPeriodUs;
 
-    // Nothing else in the firmware sweeps abandoned reassembly slots, and a
-    // timed-out partial message is exactly what reassembly_timeouts counts.
-    if (command_reassembler_.has_value()) {
-        const std::size_t expired =
-            command_reassembler_->expire(now_us / 1000ULL);
-        if (expired != 0U) {
-            link_reassembly_timeouts_.fetch_add(
-                static_cast<uint64_t>(expired), std::memory_order_relaxed);
-        }
-    }
+    // READ, never sweep. The sweep happens inside RxRouter::submit(), on the
+    // ESP-NOW receive callback -- doing it from here as well would mean two
+    // tasks mutating the same slot table with nothing between them. See the
+    // concurrency note in RxRouter.h.
+    const uint32_t timeouts = rx_router_.stats().reassembly_timeouts;
+    link_reassembly_timeouts_.store(static_cast<uint64_t>(timeouts),
+                                    std::memory_order_relaxed);
 
     const TxScheduler::Stats tx = tx_scheduler.stats();
     const TelemetryPublisher::Stats telemetry_stats = telemetry.stats();
@@ -1306,7 +1346,7 @@ void ROBOT::publishStatus() {
         link_reassembly_rejected_.load(std::memory_order_relaxed);
     counters.command_duplicates = command_stats.duplicates;
     // A sample dropped by the full telemetry queue contributes both here and
-    // to that topic's samples_dropped_total (section 8.1 allows exactly
+    // to that topic's samples_dropped_total (section 5.1 allows exactly
     // that), but never twice inside the same counter.
     counters.telemetry_dropped = telemetry_stats.dropped_full;
 
@@ -1327,9 +1367,9 @@ void ROBOT::sampleTelemetry() {
     // protocol.test is periodic and now gated by an active subscription
     // (topic_period_us() returns 0 -- "don't publish" -- until the dongle
     // has forwarded at least one SUBSCRIBE for it). robot.state below stays
-    // ungated: it is event-driven, not periodic, and section 6.2 of
-    // COMMANDS_AND_ACTIONS.md defines max_rate_millihz=0 to mean exactly
-    // that ("nao periodico").
+    // ungated: it is event-driven, not periodic, and section 3.3 of
+    // commands.md defines max_rate_millihz=0 to mean exactly
+    // that ("not periodic").
     const uint64_t period_us = telemetry.topic_period_us(TelemetryPublisher::kProtocolTestTopicId);
     if (period_us != 0U && now_us >= next_protocol_test_us_) {
         // IEEE-754 bits 3f 0d 0a 00 become PACKED_LE bytes 00 0a 0d 3f.
@@ -1667,6 +1707,26 @@ bool ROBOT::init() {
     logger.set_flush_limits(settings.data().max_chunks_per_flush,
                             settings.data().block_size);
 
+    // bally.key (lib/KeyStore): the two channel keys, already derived from
+    // the two passwords by scripts/provision_key.py -- the robot never runs
+    // PBKDF2 itself. Not fatal when missing or wrong, same as settings.conf
+    // above: no channel is encrypted yet (see the AEAD comment on
+    // handleReceiveStatic), so a robot without a card must still boot and
+    // run on the bench. Only verify_e/verify_l are logged -- they are public
+    // by construction; key_e()/key_l() must never be.
+    if (key_store.load_from_card(sd_card)) {
+        char verify_e_hex[KeyStore::kVerifyLength * 2U + 1U];
+        char verify_l_hex[KeyStore::kVerifyLength * 2U + 1U];
+        hexEncode(key_store.verify_e(), KeyStore::kVerifyLength, verify_e_hex);
+        hexEncode(key_store.verify_l(), KeyStore::kVerifyLength, verify_l_hex);
+        logger.insert_logf(logType::INFO,
+                           "bally.key loaded: verify_e=%s verify_l=%s",
+                           verify_e_hex, verify_l_hex);
+    } else {
+        logger.insert_logf(logType::WARN, "bally.key not loaded: %s",
+                           KeyStore::error_field(key_store.last_error()));
+    }
+
     // Configure the remaining pins now that settings are known, then build
     // the peripherals whose constructors need those pins (ArraySensor
     // touches GPIO/ADC immediately, so it cannot be built earlier).
@@ -1726,16 +1786,10 @@ bool ROBOT::init() {
         return false;
     }
 
-    for (size_t index = 0U; index < kCommandReassemblySlots; ++index) {
-        command_reassembly_storage_[index] = {
-            command_reassembly_buffers_[index],
-            sizeof(command_reassembly_buffers_[index]),
-        };
-    }
-    command_reassembler_.emplace(
-        command_reassembly_slots_, command_reassembly_storage_,
-        kCommandReassemblySlots, 2000U);
-    if (!command_reassembler_->valid()) {
+    // rx_router_ wires its own slots and storage in its constructor, so the
+    // only thing that can be wrong here is that wiring, which is a
+    // programming error -- checked once at boot and never again.
+    if (!rx_router_.valid()) {
         ROBOT::logger.insert_log(logType::ERRO,
                                  "Failed to initialize BTP reassembly");
         return false;
