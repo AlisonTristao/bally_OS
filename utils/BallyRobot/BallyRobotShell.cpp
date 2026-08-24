@@ -25,7 +25,9 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <string>
+#include <vector>
 
 #include "esp_app_desc.h"
 #include "esp_chip_info.h"
@@ -107,6 +109,7 @@ void ROBOT::startWrappers() {
     // Modules owned by ROBOT itself — see the declarations in BallyRobot.h
     // for why each one stays here instead of moving to a subsystem lib.
     registerSystemCommands();
+    registerMotionCommands();
     registerLinkCommands();
     registerTelemetryCommands();
     registerSecurityCommands();
@@ -145,7 +148,428 @@ void ROBOT::startWrappers() {
         shell, logger, sd_card,
         [this]() { sendNextShellOutputDirect(); });
 
+    // Last on purpose: this one ADDS commands into modules the calls above
+    // create (sensor, storage, ota, junkebox, debug, help). create_module() is
+    // idempotent in TinyShell, but registering into a module before its owner
+    // has described it would leave the module carrying this file's description
+    // instead of the subsystem's.
+    registerCoverageCommands();
+
     sysmon.register_shell_commands(shell, logger);
+}
+
+void ROBOT::registerMotionCommands() {
+    // "motion": movement in the robot's own terms instead of per-motor PWM.
+    //
+    // IMPORTANT, and the reason drive() below is not in m/s: this firmware has
+    // no calibrated motor model. EKF_K_R/EKF_K_L are 1.0 placeholders and
+    // control_input[] is raw PWM (see sampleEKF), so nothing here can convert a
+    // metre per second into a duty cycle. Accepting "0.2 m/s" and quietly
+    // treating it as a percentage would be a fabricated unit, so drive takes
+    // NORMALISED command: -100..100 forward, -100..100 turn. The differential
+    // mix is real; only the scale is uncalibrated, and "motion -limits" says so.
+    //
+    // When the RUN controller lands it produces the same normalised pair and
+    // goes through this same path -- that is the seam this module exists to
+    // leave behind.
+    shell.create_module("motion", "Movement, arming and braking");
+
+    shell.add([]() -> uint8_t {
+        instance_->motors_armed_.store(true, std::memory_order_release);
+        ROBOT::logger.insert_log(logType::INFO, "armed=1");
+        return RESULT_OK;
+    }, "arm", "Allow the motors to be driven", "motion");
+
+    shell.add([]() -> uint8_t {
+        // Not just a flag the commands check: setOutputs() forces zero while
+        // disarmed, so this stops the motors even if something else is still
+        // writing PWM flags. That is what makes it usable as a kill switch.
+        instance_->motors_armed_.store(false, std::memory_order_release);
+        instance_->stopMotors();
+        ROBOT::logger.insert_log(logType::WARN, "armed=0 motors forced to zero");
+        return RESULT_OK;
+    }, "disarm", "Force the motors off and refuse further drive commands", "motion");
+
+    shell.add([](int8_t forward, int8_t turn, uint32_t time_ms) -> uint8_t {
+        if (!instance_->motors_armed_.load(std::memory_order_acquire)) {
+            ROBOT::logger.insert_log(logType::ERRO,
+                                     "refused: motors are disarmed (motion -arm)");
+            return RESULT_ERROR;
+        }
+
+        // Differential mix. Saturated rather than scaled: a caller asking for
+        // full forward AND full turn gets the turn, which is what a line
+        // follower wants at the limit.
+        int32_t left  = static_cast<int32_t>(forward) - static_cast<int32_t>(turn);
+        int32_t right = static_cast<int32_t>(forward) + static_cast<int32_t>(turn);
+        if (left  >  100) left  =  100;
+        if (left  < -100) left  = -100;
+        if (right >  100) right =  100;
+        if (right < -100) right = -100;
+
+        // Through Flags_pwm like every other motor command, so the value
+        // expires on its own after time_ms -- an operator who loses the link
+        // mid-command does not leave the robot driving.
+        instance_->motors.setValue(MOTOR_LEFT_idx, static_cast<int8_t>(left), time_ms);
+        instance_->motors.setValue(MOTOR_RIGHT_idx, static_cast<int8_t>(right), time_ms);
+
+        ROBOT::logger.insert_logf(logType::INFO,
+                                  "forward=%d turn=%d left_pwm=%ld right_pwm=%ld time_ms=%lu",
+                                  static_cast<int>(forward), static_cast<int>(turn),
+                                  static_cast<long>(left), static_cast<long>(right),
+                                  static_cast<unsigned long>(time_ms));
+        return RESULT_OK;
+    }, "drive", "Move with a differential mix: forward,turn,time_ms (both -100..100)", "motion");
+
+    shell.add([]() -> uint8_t {
+        instance_->clearCoast();
+        instance_->stopMotors();
+        ROBOT::logger.insert_log(logType::INFO, "stopped=1 mode=brake");
+        return RESULT_OK;
+    }, "stop", "Stop immediately (PWM zero, which is an active brake)", "motion");
+
+    shell.add([](uint32_t time_ms) -> uint8_t {
+        // PWM zero already means active brake in HBridge::applyPWM, so this is
+        // "hold zero for time_ms" rather than a different electrical state. It
+        // exists so the intent is sayable, and so brake/coast are a pair.
+        instance_->clearCoast();
+        instance_->motors.setValue(MOTOR_LEFT_idx, 0, time_ms);
+        instance_->motors.setValue(MOTOR_RIGHT_idx, 0, time_ms);
+        ROBOT::logger.insert_logf(logType::INFO, "mode=brake time_ms=%lu",
+                                  static_cast<unsigned long>(time_ms));
+        return RESULT_OK;
+    }, "brake", "Hold an active brake for a while: time_ms", "motion");
+
+    shell.add([](uint32_t time_ms) -> uint8_t {
+        if (time_ms == 0U) {
+            ROBOT::logger.insert_log(logType::ERRO, "time_ms must be greater than zero");
+            return RESULT_ERROR;
+        }
+        // Coast needs a latch because setOutputs() re-applies the PWM flags on
+        // every routine pass, and applyPWM(0) brakes -- a bare HBridge::coast()
+        // call would be undone within a millisecond. See setOutputs().
+        instance_->setCoast(time_ms);
+        ROBOT::logger.insert_logf(logType::INFO, "mode=coast time_ms=%lu",
+                                  static_cast<unsigned long>(time_ms));
+        return RESULT_OK;
+    }, "coast", "Free-wheel (both inputs low) for a while: time_ms", "motion");
+
+    shell.add([]() -> uint8_t {
+        const SettingsData& cfg = instance_->settings.data();
+        // Reports geometry and, deliberately, the absence of a speed
+        // calibration -- so nobody reads "drive" as metres per second.
+        ROBOT::logger.insert_logf(
+            logType::INFO,
+            "armed=%d pwm_range=-100..100 wheel_radius_m=%.4f wheel_base_m=%.3f "
+            "encoder_ppr=%.1f left_pwm=%d right_pwm=%d speed_calibrated=0",
+            instance_->motors_armed_.load(std::memory_order_acquire) ? 1 : 0,
+            cfg.wheel_radius, static_cast<double>(EKF_WHEEL_BASE), cfg.encoder_ppr,
+            static_cast<int>(instance_->motors.getValue(MOTOR_LEFT_idx)),
+            static_cast<int>(instance_->motors.getValue(MOTOR_RIGHT_idx)));
+        ROBOT::logger.insert_log(
+            logType::INFO,
+            "note: drive takes normalised -100..100, not m/s; no motor model is calibrated yet");
+        return RESULT_OK;
+    }, "limits", "Arming state, wheel geometry and current PWM", "motion");
+}
+
+void ROBOT::registerCoverageCommands() {
+    // The rest of Fase 4: capabilities that already existed in the libraries
+    // and simply had no door in the shell. Each one registers into an EXISTING
+    // module name, which TinyShell allows (sensor and storage are already
+    // split across two owners each).
+    //
+    // These live here rather than in their libraries only where the command
+    // needs something the library cannot see on its own -- the debug-test
+    // gate, the IMU's readiness flag, the shell object itself. Anything that
+    // is purely one library's business stays in that library's own
+    // register_shell_commands().
+
+    // ---- storage: reading and writing files, and taking the card back ----
+    shell.create_module("storage", "SD card file management and USB MSC ownership");
+
+    shell.add([]() -> uint8_t {
+        if (!instance_->usb_storage.is_active()) {
+            ROBOT::logger.insert_log(logType::INFO,
+                                     "owner=robot nothing to reclaim");
+            return RESULT_OK;
+        }
+        // The counterpart of "storage -expose". Windows' safe eject no longer
+        // hands the card back on its own (see the USBMassStorage class
+        // comment), so without this the only way back was the physical button.
+        if (!instance_->usb_storage.reclaim()) {
+            ROBOT::logger.insert_log(
+                logType::ERRO,
+                "reclaim failed; unmount the volume on the host first");
+            return RESULT_ERROR;
+        }
+        ROBOT::logger.insert_log(logType::INFO, "owner=robot reclaimed=1");
+        return RESULT_OK;
+    }, "reclaim", "Take the SD card back from the USB host", "storage");
+
+    shell.add([](uint16_t file_index, uint32_t max_bytes) -> uint8_t {
+        SDFileInfo info{};
+        if (!instance_->sd_card.get_file_info(file_index, info)) {
+            ROBOT::logger.insert_logf(logType::ERRO, "no file at index %u",
+                                      static_cast<unsigned>(file_index));
+            return RESULT_ERROR;
+        }
+
+        // Bounded on purpose, and the bound is an argument rather than a
+        // constant: shell output leaves as LOG frames that share the TX queue
+        // with telemetry, so an unbounded cat of a multi-megabyte log would
+        // starve the link. See CONTRIBUTING.md's output rule.
+        static constexpr uint32_t kHardCap = 1024U;
+        uint32_t wanted = (max_bytes == 0U || max_bytes > kHardCap) ? kHardCap
+                                                                   : max_bytes;
+
+        char buffer[kHardCap + 1U];
+        size_t read_bytes = 0;
+        if (!instance_->sd_card.read_file(info.name, buffer, wanted, &read_bytes)) {
+            ROBOT::logger.insert_logf(logType::ERRO, "cannot read %s", info.name);
+            return RESULT_ERROR;
+        }
+
+        // Binary read: terminate it here, and stop at the first NUL so a
+        // non-text file cannot inject one into the log payload.
+        buffer[read_bytes] = '\0';
+        for (size_t i = 0; i < read_bytes; ++i) {
+            if (buffer[i] == '\0') { read_bytes = i; break; }
+        }
+
+        ROBOT::logger.insert_logf(logType::INFO,
+                                  "file=%s size=%llu shown=%u truncated=%d",
+                                  info.name,
+                                  static_cast<unsigned long long>(info.size),
+                                  static_cast<unsigned>(read_bytes),
+                                  (info.size > read_bytes) ? 1 : 0);
+        if (read_bytes > 0) ROBOT::logger.insert_log(logType::INFO, buffer);
+        return RESULT_OK;
+    }, "cat", "Show the start of a file: file_index,max_bytes (0 = the 1024 cap)", "storage");
+
+    shell.add([](std::string path, std::string text) -> uint8_t {
+        // The point of this command is writing autoexec.job over the radio, so
+        // a literal "\n" is turned into a newline -- the shell line itself
+        // cannot carry one (COMMAND_REQUEST forbids CR and LF).
+        std::string content;
+        content.reserve(text.size() + 1U);
+        for (size_t i = 0; i < text.size(); ++i) {
+            if (text[i] == '\\' && (i + 1U) < text.size() && text[i + 1U] == 'n') {
+                content += '\n';
+                ++i;
+            } else {
+                content += text[i];
+            }
+        }
+        content += '\n';
+
+        if (!instance_->sd_card.write_file(path.c_str(), content.data(),
+                                           content.size())) {
+            ROBOT::logger.insert_logf(logType::ERRO, "cannot write %s", path.c_str());
+            return RESULT_ERROR;
+        }
+        ROBOT::logger.insert_logf(logType::INFO, "wrote=%s bytes=%u",
+                                  path.c_str(),
+                                  static_cast<unsigned>(content.size()));
+        return RESULT_OK;
+    }, "write", "Create/overwrite a text file: path,text (\\n becomes a newline)", "storage");
+
+    shell.add([](std::string path, std::string text) -> uint8_t {
+        std::string content;
+        content.reserve(text.size() + 1U);
+        for (size_t i = 0; i < text.size(); ++i) {
+            if (text[i] == '\\' && (i + 1U) < text.size() && text[i + 1U] == 'n') {
+                content += '\n';
+                ++i;
+            } else {
+                content += text[i];
+            }
+        }
+        content += '\n';
+
+        if (!instance_->sd_card.append_file(path.c_str(), content.data(),
+                                            content.size())) {
+            ROBOT::logger.insert_logf(logType::ERRO, "cannot append to %s",
+                                      path.c_str());
+            return RESULT_ERROR;
+        }
+        ROBOT::logger.insert_logf(logType::INFO, "appended=%s bytes=%u",
+                                  path.c_str(),
+                                  static_cast<unsigned>(content.size()));
+        return RESULT_OK;
+    }, "append", "Append one line to a file: path,text (\\n becomes a newline)", "storage");
+
+    shell.add([](std::string path) -> uint8_t {
+        const bool exists = instance_->sd_card.file_exists(path.c_str());
+        ROBOT::logger.insert_logf(logType::INFO, "path=%s exists=%d mounted=%d",
+                                  path.c_str(), exists ? 1 : 0,
+                                  instance_->sd_card.is_mounted() ? 1 : 0);
+        return RESULT_OK;
+    }, "exists", "Check whether a file exists on the card", "storage");
+
+    // ---- sensor: encoder control and IMU readiness ----
+    shell.create_module("sensor", "Array sensor (line follower) and wheel encoders");
+
+    shell.add([]() -> uint8_t {
+        ROBOT::logger.insert_log(logType::INFO,
+                                 instance_->array_sensor->debug().c_str());
+        return RESULT_OK;
+    }, "debug", "Raw mux readings, tab separated", "sensor");
+
+    shell.add([]() -> uint8_t {
+        // getCountDiff() is stateful, so zeroing the counters also disturbs the
+        // EKF's next encoder measurement -- refuse while the filter is being
+        // driven hard rather than silently injecting a step into it.
+        if (StateMachine::current_state.load(std::memory_order_acquire) == RUN) {
+            ROBOT::logger.insert_log(logType::ERRO,
+                                     "refused: encoder reset would step the EKF while in RUN");
+            return RESULT_ERROR;
+        }
+        instance_->encoder_left->clearPCNT();
+        instance_->encoder_right->clearPCNT();
+        ROBOT::logger.insert_log(logType::INFO, "encoders_reset=1");
+        return RESULT_OK;
+    }, "enc_reset", "Zero both encoder counters (not allowed in RUN)", "sensor");
+
+    shell.add([]() -> uint8_t {
+        instance_->encoder_left->pausePCNT();
+        instance_->encoder_right->pausePCNT();
+        ROBOT::logger.insert_log(logType::WARN,
+                                 "encoders_paused=1 EKF is now blind to the wheels");
+        return RESULT_OK;
+    }, "enc_pause", "Stop counting encoder pulses", "sensor");
+
+    shell.add([]() -> uint8_t {
+        instance_->encoder_left->resumePCNT();
+        instance_->encoder_right->resumePCNT();
+        ROBOT::logger.insert_log(logType::INFO, "encoders_paused=0");
+        return RESULT_OK;
+    }, "enc_resume", "Resume counting encoder pulses", "sensor");
+
+    shell.add([]() -> uint8_t {
+        // imu_ready_ is the boot-time detection result; bus_open says whether
+        // the I2C bus object exists at all. They differ exactly in the case
+        // that matters on this hardware: bus up, sensor not answering.
+        ROBOT::logger.insert_logf(
+            logType::INFO, "imu_ready=%d bus_open=%d who_am_i=0x%02X expected=0x47",
+            instance_->imu_ready_ ? 1 : 0,
+            instance_->imu->busOpen() ? 1 : 0,
+            instance_->imu->busOpen() ? instance_->imu->whoAmI() : 0);
+        return RESULT_OK;
+    }, "imu_status", "Whether the IMU answered at boot, and what it answers now", "sensor");
+
+    // ---- ota: leaving the sub-mode, and where it landed ----
+    shell.create_module("ota", "Wi-Fi OTA firmware updates (DEBUG state)");
+
+    shell.add([]() -> uint8_t {
+        if (!instance_->ota.is_active()) {
+            ROBOT::logger.insert_log(logType::INFO, "ota_active=0 nothing to cancel");
+            return RESULT_OK;
+        }
+        if (instance_->ota.is_flashing()) {
+            // cancel() ignores this case itself; say why instead of reporting
+            // a success that did not happen.
+            ROBOT::logger.insert_log(
+                logType::ERRO,
+                "refused: a firmware write is in progress");
+            return RESULT_ERROR;
+        }
+        // Also restores the ESP-NOW channel, which is why this is reachable at
+        // all: while OTA holds the radio on the AP's channel, this command
+        // arrives only if the dongle happens to share it.
+        instance_->ota.cancel();
+        ROBOT::logger.insert_log(logType::INFO, "ota_active=0 cancelled=1");
+        return RESULT_OK;
+    }, "cancel", "Leave OTA mode and give the radio channel back", "ota");
+
+    shell.add([]() -> uint8_t {
+        const char* ssid = instance_->ota.connected_ssid();
+        const char* ip   = instance_->ota.connected_ip();
+        ROBOT::logger.insert_logf(
+            logType::INFO, "ssid=%s ip=%s hostname=%s.local ota_active=%d",
+            (ssid != nullptr && ssid[0] != '\0') ? ssid : "none",
+            (ip != nullptr && ip[0] != '\0') ? ip : "none",
+            instance_->ota.hostname(),
+            instance_->ota.is_active() ? 1 : 0);
+        return RESULT_OK;
+    }, "ip", "Which network OTA joined and the address it got", "ota");
+
+    // ---- junkebox: what is actually on the card ----
+    shell.create_module("junkebox", "Buzzer playback: SD-stored songs and compiled-in system sounds");
+
+    shell.add([]() -> uint8_t {
+        const uint16_t count = instance_->sd_card.get_file_count();
+        std::string out;
+        char line[SDFileInfo::MAX_NAME_LENGTH + 48U];
+        uint16_t shown = 0;
+
+        for (uint16_t i = 0; i < count; ++i) {
+            SDFileInfo info{};
+            if (!instance_->sd_card.get_file_info(i, info)) continue;
+
+            // Song files only, by extension. Listing the whole root here would
+            // duplicate "storage -list_logs" and bury the songs in log files.
+            const size_t name_length = std::strlen(info.name);
+            if (name_length < 5U) continue;
+            const char* extension = info.name + (name_length - 4U);
+            if (std::strcmp(extension, ".txt") != 0 &&
+                std::strcmp(extension, ".jkb") != 0) {
+                continue;
+            }
+
+            std::snprintf(line, sizeof(line), "%u name=%s bytes=%llu\n",
+                          static_cast<unsigned>(i), info.name,
+                          static_cast<unsigned long long>(info.size));
+            out += line;
+            ++shown;
+        }
+
+        std::snprintf(line, sizeof(line), "songs=%u builtin=click/success/error/warning/boot/elevator",
+                      static_cast<unsigned>(shown));
+        out += line;
+        ROBOT::logger.insert_log(logType::INFO, out.c_str());
+        return RESULT_OK;
+    }, "list", "List .txt/.jkb song files on the card, plus the builtin names", "junkebox");
+
+    // ---- debug: stopping the scheduled tests ----
+    shell.create_module("debug", "Safe non-blocking sensor tests");
+
+    shell.add([]() -> uint8_t {
+        instance_->cancelDebugTests();
+        ROBOT::logger.insert_log(logType::INFO, "debug_tests_cancelled=1");
+        return RESULT_OK;
+    }, "cancel", "Cancel every scheduled sensor test", "debug");
+
+    // ---- help: the completion the shell already knew how to do ----
+    shell.create_module("help", "Help module for listing available commands");
+
+    shell.add([](std::string partial) -> uint8_t {
+        // TinyShell::complete_line() has always existed and the README has
+        // always claimed autocompletion, but nothing in this firmware ever
+        // called it. Exposing it here means a remote console can complete
+        // against the robot's real catalogue instead of a local copy that
+        // drifts.
+        const std::vector<std::string> candidates =
+            instance_->shell.complete_line(partial, 16U);
+        if (candidates.empty()) {
+            ROBOT::logger.insert_logf(logType::INFO, "prefix=%s matches=0",
+                                      partial.c_str());
+            return RESULT_OK;
+        }
+
+        std::string out;
+        char header[96];
+        std::snprintf(header, sizeof(header), "prefix=%s matches=%u\n",
+                      partial.c_str(),
+                      static_cast<unsigned>(candidates.size()));
+        out += header;
+        for (const std::string& candidate : candidates) {
+            out += candidate;
+            out += '\n';
+        }
+        ROBOT::logger.insert_log(logType::INFO, out.c_str());
+        return RESULT_OK;
+    }, "complete", "Completion candidates for a partial command line", "help");
 }
 
 void ROBOT::registerLinkCommands() {
@@ -899,15 +1323,29 @@ void ROBOT::registerRobotIOCommands() {
         return RESULT_OK;
     }, "ssr", "Virtually trigger a side sensor", "robot");
 
+    // Both PWM commands below refuse early while disarmed. setOutputs() would
+    // force the output to zero anyway ("motion -disarm" is enforced there, not
+    // here), but accepting the command and moving nothing reads as a hardware
+    // fault -- say which software gate is closed instead.
     shell.add([](uint8_t led_idx, int8_t pwm_value, uint32_t time) -> uint8_t {
         // set the PWM value for the motor with the given index (-100..100)
         if (led_idx >= Flags_in::MAX_FLAGS)
             return RESULT_ERROR;
+        if (!instance_->motors_armed_.load(std::memory_order_acquire)) {
+            ROBOT::logger.insert_log(logType::ERRO,
+                                     "refused: motors are disarmed (motion -arm)");
+            return RESULT_ERROR;
+        }
         instance_->motors.setValue(led_idx, pwm_value, time);
         return RESULT_OK;
     }, "set_pwm", "Set PWM value for a motor (0 for left, 1 for right)", "robot");
 
     shell.add([](int8_t left_pwm, int8_t right_pwm, uint32_t time) -> uint8_t {
+        if (!instance_->motors_armed_.load(std::memory_order_acquire)) {
+            ROBOT::logger.insert_log(logType::ERRO,
+                                     "refused: motors are disarmed (motion -arm)");
+            return RESULT_ERROR;
+        }
         instance_->motors.setValue(MOTOR_LEFT_idx, left_pwm, time);
         instance_->motors.setValue(MOTOR_RIGHT_idx, right_pwm, time);
         return RESULT_OK;

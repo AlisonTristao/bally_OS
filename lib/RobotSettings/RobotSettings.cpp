@@ -301,15 +301,27 @@ bool RobotSettings::load(SDCard& card, uint16_t* skipped_lines) {
     if (skipped_lines != nullptr) *skipped_lines = 0;
     if (!card.is_mounted()) return false;
 
+    if (!parse_file(card, data_, skipped_lines)) {
+        // Missing (or unreadable) file: keep the compiled-in defaults
+        // already in data_ and persist them, so the SD ends up with a
+        // complete, valid file that matches what is actually running.
+        return save(card);
+    }
+    return true;
+}
+
+// The read-and-parse half of load(), against any destination. diff() uses it
+// to see what the FILE says without disturbing the live values.
+bool RobotSettings::parse_file(SDCard& card, SettingsData& out,
+                               uint16_t* skipped_lines) const {
+    if (!card.is_mounted()) return false;
+
     std::string buffer(ROBOT_SETTINGS_FILE_MAX_BYTES, '\0');
     size_t bytes_read = 0;
 
     if (!card.read_file(ROBOT_SETTINGS_FILE, &buffer[0], buffer.size() - 1,
                         &bytes_read)) {
-        // Missing (or unreadable) file: keep the compiled-in defaults
-        // already in data_ and persist them, so the SD ends up with a
-        // complete, valid file that matches what is actually running.
-        return save(card);
+        return false;
     }
     buffer.resize(bytes_read);
     buffer.push_back('\0');
@@ -334,7 +346,7 @@ bool RobotSettings::load(SDCard& card, uint16_t* skipped_lines) {
             if (equals != nullptr) {
                 *equals = '\0';
                 const SettingEntry* entry = find(current_module, line);
-                if (entry == nullptr || !parse_into(data_, *entry, equals + 1)) {
+                if (entry == nullptr || !parse_into(out, *entry, equals + 1)) {
                     if (skipped_lines != nullptr) ++*skipped_lines;
                 }
             } else if (skipped_lines != nullptr) {
@@ -349,12 +361,147 @@ bool RobotSettings::load(SDCard& card, uint16_t* skipped_lines) {
 }
 
 // ============================================================================
+// Applying changes without a reboot
+// ============================================================================
+
+bool RobotSettings::module_exists(const char* module) {
+    if (module == nullptr || module[0] == '\0') return false;
+    for (size_t i = 0; i < kTableCount; ++i) {
+        if (std::strcmp(kTable[i].module, module) == 0) return true;
+    }
+    return false;
+}
+
+bool RobotSettings::register_applier(const char* module, ApplyFn apply) {
+    if (!module_exists(module) || !apply) return false;
+    if (applier_count_ >= kMaxAppliers) return false;
+
+    // Re-registering a module replaces its applier rather than adding a
+    // second one, so a caller that runs twice cannot end up applying twice.
+    for (size_t i = 0; i < applier_count_; ++i) {
+        if (std::strcmp(appliers_[i].module, module) == 0) {
+            appliers_[i].apply = std::move(apply);
+            return true;
+        }
+    }
+
+    appliers_[applier_count_].module = module;
+    appliers_[applier_count_].apply = std::move(apply);
+    ++applier_count_;
+    return true;
+}
+
+RobotSettings::ApplyResult RobotSettings::apply(const char* module) {
+    if (!module_exists(module)) return ApplyResult::UnknownModule;
+
+    for (size_t i = 0; i < applier_count_; ++i) {
+        if (std::strcmp(appliers_[i].module, module) != 0) continue;
+        return appliers_[i].apply(data_) ? ApplyResult::Applied
+                                         : ApplyResult::Failed;
+    }
+
+    // A real module that simply cannot be changed while running (every
+    // pins_* group, and sensor -- see ROBOT::registerSettingsAppliers). Not
+    // an error: the caller turns this into "requires a reboot".
+    return ApplyResult::NoApplier;
+}
+
+void RobotSettings::apply_all(size_t* applied, size_t* failed) {
+    size_t ok = 0;
+    size_t bad = 0;
+
+    for (size_t i = 0; i < applier_count_; ++i) {
+        if (appliers_[i].apply(data_)) ++ok;
+        else                           ++bad;
+    }
+
+    if (applied != nullptr) *applied = ok;
+    if (failed != nullptr)  *failed = bad;
+}
+
+const char* RobotSettings::apply_result_text(ApplyResult result) {
+    switch (result) {
+        case ApplyResult::Applied:       return "applied";
+        case ApplyResult::Failed:        return "failed";
+        case ApplyResult::NoApplier:     return "requires a reboot";
+        case ApplyResult::UnknownModule: return "unknown module";
+    }
+    return "unknown";
+}
+
+bool RobotSettings::diff(SDCard& card, std::string& out) const {
+    // Parsed into a scratch copy that starts from the compiled-in defaults,
+    // exactly like a fresh boot would: a key missing from the file therefore
+    // compares as its default, which is what the next boot would actually
+    // use.
+    SettingsData on_card;
+    if (!parse_file(card, on_card, nullptr)) return false;
+
+    size_t differences = 0;
+    for (size_t i = 0; i < kTableCount; ++i) {
+        std::string memory_value;
+        std::string file_value;
+        if (!format_entry(data_, kTable[i], memory_value)) continue;
+        if (!format_entry(on_card, kTable[i], file_value)) continue;
+        if (memory_value == file_value) continue;
+
+        out += kTable[i].module;
+        out += '.';
+        out += kTable[i].key;
+        out += " memory=";
+        out += memory_value;
+        out += " file=";
+        out += file_value;
+        out += '\n';
+        ++differences;
+    }
+
+    out += "differences=";
+    out += std::to_string(differences);
+    return true;
+}
+
+// ============================================================================
 // Shell commands
 // ============================================================================
 
 void RobotSettings::register_shell_commands(TinyShell& shell, Logger& logger, SDCard& sd_card,
                                             std::function<void()> mark_direct_output) {
     shell.create_module("settings", "Runtime robot settings backed by settings.conf");
+
+    shell.add([this, &logger](std::string module) -> uint8_t {
+        const ApplyResult result = apply(module.c_str());
+        if (result == ApplyResult::Applied) {
+            logger.insert_logf(logType::INFO, "module=%s applied=1", module.c_str());
+            return RESULT_OK;
+        }
+        // NoApplier is the honest answer for every pins_* group and for
+        // "sensor": say which, instead of the silence this command replaces.
+        logger.insert_logf(logType::ERRO, "module=%s applied=0 reason=%s",
+                           module.c_str(), apply_result_text(result));
+        return RESULT_ERROR;
+    }, "apply", "Push one module's in-memory values into the running system", "settings");
+
+    shell.add([this, &logger]() -> uint8_t {
+        size_t applied = 0;
+        size_t failed = 0;
+        apply_all(&applied, &failed);
+        logger.insert_logf(logType::INFO, "applied=%u failed=%u",
+                           static_cast<unsigned>(applied),
+                           static_cast<unsigned>(failed));
+        return (failed == 0) ? RESULT_OK : RESULT_ERROR;
+    }, "apply_all", "Run every registered applier", "settings");
+
+    shell.add([this, &logger, &sd_card]() -> uint8_t {
+        std::string report;
+        if (!diff(sd_card, report)) {
+            logger.insert_log(logType::ERRO,
+                              "cannot read settings.conf (card not mounted or file missing)");
+            return RESULT_ERROR;
+        }
+        logger.insert_log(logType::INFO, report.c_str());
+        return RESULT_OK;
+    }, "diff", "Show settings that differ between memory and settings.conf", "settings");
 
     shell.add([this, &logger](std::string module, std::string key) -> uint8_t {
         std::string value;
@@ -380,8 +527,9 @@ void RobotSettings::register_shell_commands(TinyShell& shell, Logger& logger, SD
 
         logger.insert_logf(
             logType::INFO,
-            "%s.%s set in memory; run 'settings save' to persist, reboot to apply",
-            module.c_str(), key.c_str());
+            "%s.%s set in memory; run 'settings save' to persist, "
+            "'settings apply %s' to take effect now (some modules require a reboot)",
+            module.c_str(), key.c_str(), module.c_str());
         return RESULT_OK;
     }, "set", "Change one setting in memory: module,key,value", "settings");
 

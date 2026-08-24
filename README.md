@@ -32,7 +32,7 @@ Este projeto implementa o controle de um robô baseado em ESP32-S3, utilizando a
 - **Logger**: Ring de eventos em PSRAM; emite exclusivamente frames `LOG` BTP de tamanho real via ESP-NOW.
 - **TelemetryPublisher**: Fila SPSC estática e não bloqueante para amostras `PACKED_LE`; publica `protocol.test` a 50 Hz e `robot.state` nas transições, preservando o timestamp da coleta.
 - **OTAUpdater**: Atualização de firmware sem fio a partir do estado DEBUG — conecta a uma rede Wi-Fi cadastrada no cartão SD, anuncia `<hostname>.local` via mDNS e recebe o novo binário via HTTP (`POST /update`). `GET /status` (JSON: `device`, `online`, `firmware`, `ota_ready`) deixa uma ferramenta externa checar se o robô está pronto para receber o upload antes de mandá-lo.
-- **RobotSettings**: Armazena e persiste (`settings.conf` no SD) todos os parâmetros configuráveis em runtime.
+- **RobotSettings**: Armazena e persiste (`settings.conf` no SD) todos os parâmetros configuráveis em runtime. `settings -set` só muda a memória; `settings -apply <module>` empurra a mudança para o subsistema que já a consumiu no boot, sem reiniciar — ver "Aplicar configuração sem reboot" abaixo.
 - **SDCard** / **USBMassStorage**: Acesso ao cartão SD e transferência de propriedade exclusiva do FAT entre o robô e um host USB.
 - **StateMachine**: Máquina de estados do robô, com transições e *callbacks* configuráveis. Além do estado atual, guarda pedido de transição (`state -set`), trava (`state -lock`) e um anel com as últimas 8 transições.
 - **JobScheduler**: Comandos de shell disparados por tempo (`every`/`once`) ou por entrada em estado (`at`). C++ puro, sem FreeRTOS/SD/TinyShell — o relógio chega por parâmetro e a execução por *callback*, o que deixa a lib inteira coberta por `test/test_job_scheduler` no `env:native`. Um *job* é agendamento, não garantia de entrega: ocorrência que não coube na fila é contada e descartada, e atraso maior que um intervalo inteiro é descartado em vez de virar rajada.
@@ -62,6 +62,30 @@ Um arquivo de comandos no cartão roda com `job -run_file <path>`, e o arquivo `
 
 Duas recusas deliberadas: **um job não agenda jobs** e **um script não roda comandos `job`** — as duas coisas se auto-replicam sem limite e encheriam as 8 vagas em poucas passagens.
 
+### Aplicar configuração sem reboot
+
+Antes, `settings -set` só mudava a cópia em memória — quase nada era relido depois do boot, então uma edição remota parecia ter funcionado e não tinha efeito nenhum. `settings -apply <module>` é a metade que faltava: o pedaço de código que sabe empurrar os valores de um módulo para o subsistema que já os consumiu na inicialização.
+
+```
+settings -set ekf_noise gyro_noise 0.01
+settings -apply ekf_noise      # reconstrói o filtro agora, sem reboot
+settings -apply_all            # roda todo aplicador registrado
+settings -diff                 # o que difere entre memória e settings.conf
+```
+
+`RobotSettings` continua sem depender de nenhum outro módulo (ver a regra de acoplamento acima): quem sabe aplicar um módulo se registra nela via `register_applier`, ela não conhece EKF, OTA ou Logger por si.
+
+Nem todo módulo pode ser aplicado em runtime, e `settings -apply` diz honestamente qual é o caso:
+
+| Módulo | O que acontece em `settings -apply` |
+|---|---|
+| `timers` | Reinicia o timer do EKF com o novo `sample_micros` (`esp_timer_restart`, sem perder a periodicidade) e aplica `timezone` via `setenv`/`tzset` na hora, sem esperar o próximo `logger -set_datetime`. |
+| `logger` | `set_flush_limits(max_chunks_per_flush, block_size)`. |
+| `ota` | `OTAUpdater::configure()` de novo — muda os tempos, o *hostname* mDNS e a senha. **Não** move o canal ESP-NOW que já está no ar: `espnow_channel` aqui só muda para onde o `ota -cancel` restaura o rádio depois. |
+| `ekf_noise` | Reconstrói o filtro inteiro (`Q`/`R` são `const` para a vida do `TinyEKF`), com a task do EKF suspensa durante a janela — é a única reconstrução deste tipo no firmware, documentada como tal. |
+| `kinematics`, `error` | Não fazem nada porque já não precisam: `encoder_ppr`/`wheel_radius`/`error_blink_ms` são lidos direto de `settings.data()` a cada uso. Registrados como *no-op* só para a resposta ser "applied" em vez de "requires a reboot". |
+| `sensor`, `pins_*` (7 grupos) | **Sem aplicador**: `settings -apply` responde `requires a reboot`. `ArraySensor` reconfigura ADC/GPIO no construtor e os grupos de pino dimensionam periféricos já energizados — não há caminho de reconfiguração viva para nenhum dos dois. |
+
 ### Outras Pastas
 - **robot/**: Implementação dos estados (Setup, Wait, Calibrate, Debug, Run, Finish, Telemetry, Error).
 - **include/**: Definições globais necessárias para configurar o robô.
@@ -82,6 +106,15 @@ Alguns módulos de shell moram no próprio `ROBOT` (`registerSystemCommands`/`re
 - **`debug`** (`test_arr_sensor`/`test_encoder`): o agendamento e o *gate* (estado DEBUG + USB ocioso) são aplicados uniformemente sobre vários sensores a partir de estado privado do `ROBOT`, não pertencem a nenhum sensor individual.
 - **`sys`** (identidade, saúde e ciclo de vida): cruza `esp_system`, `esp_ota_ops`, `BtpEndpoint`, `SystemMonitor` e `StateMachine` de uma vez; nenhuma lib isolada responde "quem sou eu e como estou".
 - **`job`** (comandos agendados + script do SD): o `JobScheduler` é propositalmente livre de TinyShell para ser testável no host, e o executor de script precisa do cartão SD e da fila de comandos, que são do `ROBOT`.
+- **`link`/`telemetry`/`sec`** (rádio, protocolo e chaves): todas as libs que eles leem — `TxScheduler`, `RxRouter`, `CommandProcessor`, `TelemetryPublisher`, `KeyStore` — são compiladas pelo `env:native`, onde o TinyShell não existe. Registrar do lado do `ROBOT` é o que mantém `pio test -e native` de pé.
+
+Sobre `motion`: o `drive` recebe **comando normalizado (-100..100), não m/s**. Este firmware não tem modelo de motor calibrado — `EKF_K_R`/`EKF_K_L` são 1.0 de placeholder e `control_input[]` é PWM cru (ver `sampleEKF`), então converter metro por segundo em duty seria unidade inventada. A mistura diferencial é real; só a escala não é calibrada, e `motion -limits` diz isso no output.
+
+`motion -disarm` é aplicado dentro do `setOutputs()`, não só onde o comando é aceito: enquanto desarmado a saída é zero a cada passagem, esteja o que estiver nas flags de PWM. É o que faz dele chave geral em vez de pedido educado. Nasce armado, para não mudar o fluxo de bancada.
+
+`motion -coast` precisa de um *latch* porque o `setOutputs()` reaplica as flags a cada passagem e `HBridge::applyPWM(0)` é **freio ativo** — um `coast()` solto seria desfeito em menos de um milissegundo. Qualquer PWM comandado vence o coast pendente.
+
+Sobre `link -reset_stats`: ele **não zera contador nenhum**. Os contadores do `CONTROL/STATUS` são normativamente monotônicos desde o boot (commands.md seção 5), e zerá-los faria qualquer consumidor que calcula delta ver um valor negativo. O comando marca um ponto zero e o `link -delta` mostra a diferença desde ele.
 
 Além disso, `BallyRobotShell.cpp` é **o único lugar** onde podem ser registrados comandos que operam sobre as bibliotecas compiladas pelo `env:native` (`BtpTransport`, `CommandProcessor`, `Format`, `KeyStore`, `ManifestResponder`, `RxRouter`, `StatusReporter`, `SubscriptionResponder`, `TelemetryPublisher`, `TxScheduler`): nenhuma delas pode incluir `TinyShell.h`, que não existe no build de host. Ver `CONTRIBUTING.md` e o comentário de cabeçalho do próprio arquivo.
 

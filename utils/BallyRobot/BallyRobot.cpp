@@ -404,9 +404,54 @@ void ROBOT::resetFlags() {
     motors.checkFlagsDuration();
 }
 
+void ROBOT::setCoast(uint32_t duration_ms) {
+    const uint32_t now_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
+    uint32_t deadline = now_ms + duration_ms;
+    // 0 is the "not coasting" sentinel, so never land on it by accident.
+    if (deadline == 0U) deadline = 1U;
+    motors_coast_until_ms_.store(deadline, std::memory_order_release);
+}
+
+void ROBOT::clearCoast() {
+    motors_coast_until_ms_.store(0U, std::memory_order_release);
+}
+
 void ROBOT::setOutputs() {
-    motor_left->applyPWM(motors.getValue(MOTOR_LEFT_idx));
-    motor_right->applyPWM(motors.getValue(MOTOR_RIGHT_idx));
+    int16_t left_pwm  = motors.getValue(MOTOR_LEFT_idx);
+    int16_t right_pwm = motors.getValue(MOTOR_RIGHT_idx);
+
+    // Arming is enforced here, not only where a command is accepted: whatever
+    // is in the PWM flags, a disarmed robot outputs zero.
+    if (!motors_armed_.load(std::memory_order_acquire)) {
+        left_pwm  = 0;
+        right_pwm = 0;
+        clearCoast();
+    }
+
+    // Coast (both inputs low) is a third state PWM cannot express: applyPWM(0)
+    // is an active brake. Honour the latch only while nothing is being driven
+    // -- a real PWM command always wins -- and let it expire on its own.
+    bool coasting = false;
+    const uint32_t coast_until = motors_coast_until_ms_.load(std::memory_order_acquire);
+    if (coast_until != 0U && left_pwm == 0 && right_pwm == 0) {
+        const uint32_t now_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
+        // Signed subtraction keeps this valid across the 32-bit ms wrap, the
+        // same way ScheduledDebugTest::poll() does it.
+        if (static_cast<int32_t>(now_ms - coast_until) < 0) {
+            coasting = true;
+        } else {
+            clearCoast();
+        }
+    }
+
+    if (coasting) {
+        motor_left->coast();
+        motor_right->coast();
+    } else {
+        motor_left->applyPWM(left_pwm);
+        motor_right->applyPWM(right_pwm);
+    }
+
     // turn on the leds according to the BITS of the arr_stats variable
     uint8_t arr_stats = leds.getFlags();
     const SettingsData& cfg = settings.data();
@@ -807,8 +852,11 @@ void ROBOT::initEKF() {
         {0.0f, 0.0f, cfg.initial_p}
     };
     // Q and R are handed to TinyEKF's constructor and become const for the
-    // filter's lifetime (see TinyEKF.h) — changing ekf_noise.* settings only
-    // takes effect after the next reboot re-runs this function.
+    // filter's lifetime (see TinyEKF.h): the only way to change ekf_noise.*
+    // is to reconstruct the whole filter, which is what re-running this
+    // function does. "settings -apply ekf_noise" calls this live (see
+    // registerSettingsAppliers()), with the EKF task suspended for the
+    // duration -- state resets to zero (x0 above) either way, at boot or live.
     const TinyEKF::StateMat Q{{
         {cfg.v_noise, 0.0f,  0.0f},
         {0.0f,  cfg.w_noise, 0.0f},
@@ -823,6 +871,92 @@ void ROBOT::initEKF() {
     }};
 
     EKF.emplace(x0, P0, Q, R);
+}
+
+void ROBOT::registerSettingsAppliers() {
+    // "timers": sample_micros needs the running EKF timer restarted with the
+    // new period; timezone needs setenv/tzset applied directly rather than
+    // waiting for the next "logger -set_datetime" to happen to read it.
+    // delay_flags and sysmon_freq_ms need nothing here -- checkStateMachine()
+    // and the system-monitor task in main.cpp already read settings.data()
+    // fresh on every pass, so they are live already.
+    settings.register_applier("timers", [this](const SettingsData& cfg) -> bool {
+        bool ok = true;
+        if (ekf_timer_handle_ != nullptr) {
+            if (esp_timer_restart(ekf_timer_handle_, cfg.sample_micros) != ESP_OK) {
+                ok = false;
+            }
+        }
+        // Empty is a real, if unusual, value here: setenv() would happily
+        // clear TZ to "", which tzset() then reads as UTC. That silently
+        // changes every future log timestamp's zone, so refuse it instead.
+        if (cfg.timezone[0] != '\0') {
+            setenv("TZ", cfg.timezone, 1);
+            tzset();
+        } else {
+            ok = false;
+        }
+        return ok;
+    });
+
+    // "logger": mutex timeout is documented as unused (Logger hardcodes its
+    // own in wait_for_mutex()), so only the flush pacing needs pushing in.
+    settings.register_applier("logger", [this](const SettingsData& cfg) -> bool {
+        logger.set_flush_limits(cfg.max_chunks_per_flush, cfg.block_size);
+        return true;
+    });
+
+    // "ota": configure() is documented safe to call any time after begin()
+    // (OTAUpdater.h) -- it only re-copies the tuning struct and re-snprintf's
+    // the three string fields. One real subtlety: espnow_channel here only
+    // changes what OTA restores the radio TO on cancel(); the channel
+    // ESP-NOW is actually running on right now was fixed at boot by
+    // configureCommunication() and does not move without a reboot.
+    settings.register_applier("ota", [this](const SettingsData& cfg) -> bool {
+        ota.configure(OtaTuning{
+            .led_step_ms        = cfg.ota_led_step_ms,
+            .led_hold_ms        = cfg.ota_led_hold_ms,
+            .led_fail_hold_ms   = cfg.ota_led_fail_hold_ms,
+            .connect_timeout_ms = cfg.ota_connect_timeout_ms,
+            .retry_scan_ms      = cfg.ota_retry_scan_ms,
+            .espnow_channel     = cfg.espnow_channel,
+            .hostname           = cfg.ota_hostname,
+            .instance_name      = cfg.ota_instance_name,
+            .password           = cfg.ota_password,
+        });
+        return true;
+    });
+
+    // "ekf_noise": Q/R are const for TinyEKF's lifetime (see initEKF()), so
+    // the only way to apply a change is to reconstruct the whole filter. The
+    // EKF task is suspended for that window -- it only ever touches EKF from
+    // inside runEKF(), so this is the one point of exclusion that matters.
+    // A notification that arrives from sampleEKF() while suspended is not
+    // lost (FreeRTOS records it against the task, not the ready queue), so
+    // at worst one predict/update right after resume runs against the
+    // instant the state reset to zero -- not a crash, one stale-looking
+    // sample.
+    settings.register_applier("ekf_noise", [this](const SettingsData&) -> bool {
+        if (ekf_task_handle == nullptr) return false;
+        vTaskSuspend(ekf_task_handle);
+        initEKF();
+        vTaskResume(ekf_task_handle);
+        return true;
+    });
+
+    // "kinematics": encoder_ppr/wheel_radius are already read fresh on every
+    // call (getVelocitiesFromEncoders(), "motion -limits") -- registered as a
+    // no-op so "settings -apply kinematics" answers "applied", not the
+    // misleading "requires a reboot" it would get with no applier at all.
+    settings.register_applier("kinematics", [](const SettingsData&) -> bool {
+        return true;
+    });
+
+    // "error": error_blink_ms is read fresh on every blinkErrorLeds() call.
+    // Same no-op reasoning as "kinematics" above.
+    settings.register_applier("error", [](const SettingsData&) -> bool {
+        return true;
+    });
 }
 
 void ROBOT::getVelocitiesFromEncoders(float& linear_speed, float& angular_speed) {
@@ -1863,6 +1997,7 @@ bool ROBOT::init() {
     setTimeLimit();
     startWrappers();
     initEKF();
+    registerSettingsAppliers();
 
     ROBOT::logger.insert_log(logType::INFO, "Welcome! the car is starting...");
 

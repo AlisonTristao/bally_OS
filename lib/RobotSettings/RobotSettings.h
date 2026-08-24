@@ -185,6 +185,61 @@ public:
 
     const SettingsData& data() const { return data_; }
 
+    // ---------------- applying changes without a reboot ----------------
+    //
+    // "settings -set" only ever changed the in-memory copy, and almost
+    // nothing read it again until the next boot -- so a remote edit looked
+    // like it had worked and had no effect. An applier is the missing half:
+    // the piece of code that knows how to push one module's values into the
+    // subsystem that already consumed them at startup.
+    //
+    // This class deliberately does not know any of those subsystems (see the
+    // README's coupling rule: RobotSettings depends on nothing). Whoever owns
+    // them registers a callback here instead.
+
+    /// Returns false and does nothing when the callback should fail; the
+    /// module name is reported back to the caller as Failed.
+    using ApplyFn = std::function<bool(const SettingsData&)>;
+
+    enum class ApplyResult : uint8_t {
+        Applied,        ///< the applier ran and reported success
+        Failed,         ///< the applier ran and reported failure
+        NoApplier,      ///< real module, but nothing can apply it live
+        UnknownModule   ///< no such module in the settings table
+    };
+
+    /**
+     * @brief Bind the code that applies one module's values live.
+     * @return false when the table is full or the module name is unknown.
+     */
+    bool register_applier(const char* module, ApplyFn apply);
+
+    /** @brief Run one module's applier against the current in-memory values. */
+    ApplyResult apply(const char* module);
+
+    /**
+     * @brief Run every registered applier.
+     * @param applied/failed Optional counts; modules with no applier are
+     * simply skipped, since "requires a reboot" is not a failure.
+     */
+    void apply_all(size_t* applied, size_t* failed);
+
+    /**
+     * @brief Append the settings that differ between memory and the file on
+     * the card, one "module.key memory=X file=Y" line each.
+     *
+     * Exists to kill a specific recurring mistake: editing values, not
+     * saving, and later wondering why a reboot lost them.
+     *
+     * @return false when the card is not mounted or the file cannot be read.
+     */
+    bool diff(SDCard& card, std::string& out) const;
+
+    /// Whether a module name appears anywhere in the settings table.
+    static bool module_exists(const char* module);
+
+    static const char* apply_result_text(ApplyResult result);
+
     /// Derived from sample_micros; replaces the old FREQ_EKF macro.
     float freq_ekf() const;
 
@@ -203,6 +258,23 @@ private:
 
     static const SettingEntry kTable[];
     static const size_t kTableCount;
+
+    // Room for one per module that can meaningfully be applied live; the
+    // pins_* groups never can (see ROBOT::registerSettingsAppliers).
+    static constexpr size_t kMaxAppliers = 8;
+
+    struct ApplierEntry {
+        const char* module = nullptr;
+        ApplyFn     apply;
+    };
+    ApplierEntry appliers_[kMaxAppliers]{};
+    size_t applier_count_ = 0;
+
+    /// Shared file reader/parser behind load() and diff(): fills `out`
+    /// without touching data_. Returns false when the card is not mounted or
+    /// the file cannot be read.
+    bool parse_file(SDCard& card, SettingsData& out,
+                    uint16_t* skipped_lines) const;
 
     static bool format_entry(const SettingsData& d, const SettingEntry& e, std::string& out);
     static bool parse_into(SettingsData& d, const SettingEntry& e, const char* value);

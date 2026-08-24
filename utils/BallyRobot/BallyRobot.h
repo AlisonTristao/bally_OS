@@ -192,6 +192,25 @@ public:
     void processDebug();
     void cancelDebugTests();
 
+    // Motor arming, enforced in setOutputs() and not merely checked by the
+    // shell commands: while disarmed the outputs are forced to zero on every
+    // pass, whatever is left in the PWM flags. That is what makes
+    // "motion -disarm" a kill switch rather than a polite request.
+    //
+    // Armed at boot so the existing bench flow (robot -set_pwm, the state
+    // machine) behaves exactly as before this existed.
+    std::atomic<bool> motors_armed_{true};
+
+    // Deadline for "motion -coast", in ms since boot; 0 means "not coasting".
+    //
+    // A latch is needed because setOutputs() re-applies the PWM flags every
+    // routine pass and HBridge::applyPWM(0) is an ACTIVE BRAKE -- a bare
+    // coast() call would be undone within a millisecond. Any non-zero PWM
+    // command wins over a pending coast; see setOutputs().
+    std::atomic<uint32_t> motors_coast_until_ms_{0U};
+    void setCoast(uint32_t duration_ms);
+    void clearCoast();
+
     // Force both motors to zero immediately. Belt-and-suspenders on top of
     // the flags' own timeout-based auto shutoff (see Flags_pwm) — used by
     // DEBUG (processDebug) and ERROR (error_function), where "keep the
@@ -320,6 +339,18 @@ private:
 
     void initEKF();
 
+    // Bind one RobotSettings::ApplyFn per module that can meaningfully take
+    // effect without a reboot ("timers", "logger", "ota", "ekf_noise",
+    // "kinematics", "error"). Called once from init(), after startWrappers()
+    // so the "settings" shell module already exists.
+    //
+    // Deliberately NOT registered for "sensor" or any pins_* group: ArraySensor
+    // reconfigures ADC/GPIO from its constructor with no live reconfiguration
+    // path, and the pin groups size hardware that is already wired up.
+    // RobotSettings::apply() reports NoApplier ("requires a reboot") for those
+    // on its own -- nothing to do here for them.
+    void registerSettingsAppliers();
+
     // Shared gate for every "debug" module test: only in the DEBUG state,
     // and never while the SD card belongs to the USB host.
     bool canScheduleDebugTest() const;
@@ -390,6 +421,17 @@ private:
     // shared state span multiple private members with no single owning
     // subsystem.
     void startWrappers();
+
+    // "motion": movement in the robot's own terms (arm/disarm/drive/stop/
+    // brake/coast/limits). Stays here for the same reason "robot" does: it
+    // drives the Flags_pwm/HBridge pair this composition owns, and the arming
+    // gate is enforced in setOutputs(), which is also this class's.
+    void registerMotionCommands();
+
+    // Fase 4 coverage: commands added into modules the subsystems already
+    // own (sensor/storage/ota/junkebox/debug/help), for capabilities whose
+    // gate or context the owning library cannot see by itself.
+    void registerCoverageCommands();
 
     // "link"/"telemetry"/"sec": the radio, the protocol and the keys, read
     // from the shell. All three stay here for one reason: every library they
