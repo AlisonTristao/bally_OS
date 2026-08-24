@@ -165,8 +165,28 @@ public:
     /**
      * @brief Serialize the current in-memory values to ROBOT_SETTINGS_FILE,
      * overwriting any previous content.
+     *
+     * A successful call also advances save_revision() by one -- see its own
+     * comment for what that is for.
      */
     bool save(SDCard& card) const;
+
+    /**
+     * @brief How many times save() has written the file successfully during
+     * this boot. Starts at 0 on every boot, load() does not touch it.
+     *
+     * Exists so a remote client can tell "has this robot's configuration
+     * changed since I last looked" without re-reading all ~55 keys of
+     * "settings -list_all" to diff them itself. Deliberately NOT wired into
+     * ManifestResponder::kConfigRevision: that field's documented meaning is
+     * "has the published topic/schema catalog changed" (BTP/docs/commands.md
+     * section 3), which is genuinely fixed at compile time in this firmware
+     * -- repurposing a wire field to mean something else would be a protocol
+     * contract change made unilaterally from this side, the same class of
+     * problem include/bally_channels.h exists to prevent. This counter is a
+     * shell-only convenience instead.
+     */
+    uint32_t save_revision() const noexcept { return save_revision_; }
 
     /// Revert every field to its compiled-in default (in memory only).
     void reset_all();
@@ -255,6 +275,11 @@ public:
 
 private:
     SettingsData data_;
+
+    // See save_revision()'s comment. mutable because save() is logically a
+    // const operation on data_ (it only serializes it) and this counter is
+    // bookkeeping about the operation, not part of what data() returns.
+    mutable uint32_t save_revision_ = 0U;
 
     static const SettingEntry kTable[];
     static const size_t kTableCount;

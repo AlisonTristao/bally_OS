@@ -340,6 +340,40 @@ bool OTAUpdater::start() {
     return true;
 }
 
+bool OTAUpdater::survey() {
+    if (phase_.load(std::memory_order_acquire) != Phase::IDLE) return false;
+
+    scan_done_.store(false, std::memory_order_relaxed);
+    survey_only_ = true;
+
+    wifi_scan_config_t scan_config{};
+    scan_in_flight_ = esp_wifi_scan_start(&scan_config, false) == ESP_OK;
+    next_scan_ms_ = now_ms() + tuning_.retry_scan_ms;
+
+    // Same "committed to SCANNING regardless of the synchronous result"
+    // reasoning as start() -- process()'s SCANNING case retries the
+    // esp_wifi_scan_start() call on its own if this one did not land.
+    phase_.store(Phase::SCANNING, std::memory_order_release);
+
+    log(logType::INFO, "OTA: scanning for visible networks%s",
+        scan_in_flight_ ? "" : " (initial scan failed to start, retrying)");
+
+    return true;
+}
+
+bool OTAUpdater::get_scan_result(uint16_t index, char* ssid_out,
+                                 size_t ssid_capacity, int8_t* rssi_out,
+                                 bool* open_out) const {
+    if (ssid_out == nullptr || ssid_capacity == 0 ||
+        index >= last_scan_count_) {
+        return false;
+    }
+    snprintf(ssid_out, ssid_capacity, "%s", last_scan_ssid_[index]);
+    if (rssi_out != nullptr) *rssi_out = last_scan_rssi_[index];
+    if (open_out != nullptr) *open_out = last_scan_open_[index];
+    return true;
+}
+
 void OTAUpdater::handle_scan_done() {
     scan_in_flight_ = false;
 
@@ -349,6 +383,25 @@ void OTAUpdater::handle_scan_done() {
 
     wifi_ap_record_t records[OTA_MAX_SCAN_RESULTS];
     if (ap_count > 0) esp_wifi_scan_get_ap_records(&ap_count, records);
+
+    last_scan_count_ = ap_count;
+    for (uint16_t i = 0; i < ap_count; ++i) {
+        snprintf(last_scan_ssid_[i], OTA_SSID_MAX_LEN, "%s",
+                 reinterpret_cast<const char*>(records[i].ssid));
+        last_scan_rssi_[i] = records[i].rssi;
+        last_scan_open_[i] = records[i].authmode == WIFI_AUTH_OPEN;
+    }
+
+    if (survey_only_) {
+        // "what's out there", not "find one of mine" -- never touches
+        // candidate_index_/candidate_count_, so a start() begun later still
+        // sees them exactly as load_candidates() left them.
+        survey_only_ = false;
+        log(logType::INFO, "OTA: scan complete, %u network(s) visible",
+            static_cast<unsigned>(last_scan_count_));
+        phase_.store(Phase::IDLE, std::memory_order_release);
+        return;
+    }
 
     // Keep the matching scan record, not just a visible/not-visible bit: its
     // channel + BSSID let esp_wifi_connect() go straight to the right AP
@@ -532,6 +585,7 @@ void OTAUpdater::cancel() {
     candidate_count_ = 0;
     candidate_index_ = 0;
     scan_in_flight_ = false;
+    survey_only_ = false;
 
     phase_.store(Phase::IDLE, std::memory_order_release);
 }
@@ -895,4 +949,35 @@ void OTAUpdater::register_shell_commands(TinyShell& shell, Logger& logger, SDCar
 
         return RESULT_OK;
     }, "wifi_list", "List Wi-Fi networks stored for OTA (SSID only)", "ota");
+
+    shell.add([this, &logger]() -> uint8_t {
+        if (!survey()) {
+            logger.insert_log(
+                logType::ERRO,
+                "OTA busy: another scan/connect/serve cycle is already active");
+            return RESULT_ERROR;
+        }
+        logger.insert_log(logType::INFO,
+                          "Scanning for visible networks, see 'ota scan_results' shortly");
+        return RESULT_OK;
+    }, "scan", "Scan for visible Wi-Fi networks (no stored network needed)", "ota");
+
+    shell.add([this, &logger]() -> uint8_t {
+        const uint16_t count = last_scan_count();
+        logger.insert_logf(logType::INFO, "visible=%u", count);
+
+        for (uint16_t index = 0; index < count; ++index) {
+            char ssid[OTA_SSID_MAX_LEN];
+            int8_t rssi = 0;
+            bool open = false;
+            if (!get_scan_result(index, ssid, sizeof(ssid), &rssi, &open)) {
+                continue;
+            }
+            logger.insert_logf(logType::INFO, "[%u] ssid=%s rssi=%d open=%u",
+                               index, ssid, static_cast<int>(rssi),
+                               open ? 1U : 0U);
+        }
+
+        return RESULT_OK;
+    }, "scan_results", "Last 'ota scan' results: SSID, RSSI and open/secured", "ota");
 }

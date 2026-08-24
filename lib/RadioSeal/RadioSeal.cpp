@@ -41,4 +41,28 @@ bool open(const btp::Header& header, std::uint16_t ciphertext_size,
            btp::AeadError::Ok;
 }
 
+bool seal_e(void* /*context*/, const btp::Header& header,
+           std::uint16_t payload_size, const std::uint8_t* plaintext,
+           std::uint8_t* out) noexcept {
+    if (g_store == nullptr || !g_store->loaded()) return false;
+
+    const btp::AeadKey key{g_store->key_e(), KeyStore::kKeyLength};
+    return btp::aead_seal_aes_gcm(key, header, payload_size, plaintext, out) ==
+           btp::AeadError::Ok;
+}
+
+bool open_e(const btp::Header& header, std::uint16_t ciphertext_size,
+           const std::uint8_t* ciphertext_and_tag,
+           std::uint8_t* out_plaintext) noexcept {
+    if (g_store == nullptr || !g_store->loaded()) return false;
+
+    if ((header.flags & btp::kFlagEncrypted) == 0U) return false;
+    if (btp::cipher_id(header.flags) != btp::CipherId::AesGcm) return false;
+
+    const btp::AeadKey key{g_store->key_e(), KeyStore::kKeyLength};
+    return btp::aead_open_aes_gcm(key, header, ciphertext_size,
+                                  ciphertext_and_tag, out_plaintext) ==
+           btp::AeadError::Ok;
+}
+
 }  // namespace RadioSeal

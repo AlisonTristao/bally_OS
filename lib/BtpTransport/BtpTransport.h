@@ -31,10 +31,13 @@
 // fails. Every send path then transmits NOTHING AT ALL -- fail-closed: an
 // unsealed frame must never reach the radio as a fallback.
 //
-// nullptr (the default everywhere below) means "do not seal" -- today's
-// channel B content (TraceView<->robot), which has no key yet (topico 31).
-// Passing a real SealFn is what channel C call sites (StatusReporter,
-// CommandProcessor::send_result) do instead.
+// nullptr (the default everywhere below) means "do not seal" -- the state
+// every send path is in before it is configured, and the mode the native
+// unit tests exercise deliberately (cleartext BTP framing). Real firmware
+// always passes a real SealFn: RadioSeal::seal (key L, channel C) for
+// StatusReporter and CommandProcessor::send_result's channel-C replies,
+// RadioSeal::seal_e (key E, channel B) for CommandProcessor::send_result's
+// channel-B replies.
 using BtpSealFn = bool (*)(void* context, const btp::Header& header,
                            std::uint16_t payload_size,
                            const std::uint8_t* plaintext, std::uint8_t* out);

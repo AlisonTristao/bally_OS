@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <string>
 #include <vector>
 
@@ -33,6 +34,7 @@
 #include "esp_chip_info.h"
 #include "esp_flash.h"
 #include "esp_mac.h"
+#include "esp_netif_sntp.h"
 #include "esp_ota_ops.h"
 #include "esp_system.h"
 #include "esp_timer.h"
@@ -930,22 +932,26 @@ void ROBOT::registerSecurityCommands() {
     }, "reload", "Re-read bally.key from the SD card without rebooting", "sec");
 
     shell.add([]() -> uint8_t {
-        // Reports the gap as much as the state: key E is loaded and unused,
-        // because channel B has no path into this firmware yet. That is the
-        // single most important thing an operator can know about this build's
-        // security posture, so it is printed, not left to documentation.
+        // Reports the gap as much as the state: both channels are sealed
+        // (topico 31 closed CommandProcessor's reply path being channel-C-
+        // only), but there is still no per-channel command policy -- a
+        // channel B request (TraceView, key E) and a channel C request
+        // (dongle, key L) are equally authorized to run anything, motors
+        // included. That is the single most important thing an operator can
+        // know about this build's security posture, so it is printed, not
+        // left to documentation.
         const bool loaded = instance_->key_store.loaded();
         ROBOT::logger.insert_logf(
             logType::INFO,
             "contract_version=%u channel_a=console_cleartext "
-            "channel_b=endpoint_key_e sealed=0 key_e_loaded=%d "
+            "channel_b=endpoint_key_e sealed=1 key_e_loaded=%d "
             "channel_c=link_key_l sealed=1 key_l_loaded=%d",
             static_cast<unsigned>(bally::kChannelContractVersion),
             loaded ? 1 : 0, loaded ? 1 : 0);
         ROBOT::logger.insert_log(
             logType::WARN,
-            "channel B is not implemented in this firmware: any peer holding "
-            "the fleet key L can run every command, motors included");
+            "no per-channel command policy yet: a request sealed with EITHER "
+            "key can run every command, motors included");
         return RESULT_OK;
     }, "channels", "Which channel each key protects, and which are sealed today", "sec");
 }
@@ -1117,6 +1123,17 @@ void ROBOT::registerJobCommands() {
         ROBOT::logger.insert_logf(logType::INFO, "script=%s started", path.c_str());
         return RESULT_OK;
     }, "run_file", "Run a file of shell commands from the SD card, one line per pass", "job");
+
+    shell.add([]() -> uint8_t {
+        if (!instance_->saveJobs()) {
+            ROBOT::logger.insert_log(logType::ERRO,
+                                     "cannot save jobs: SD card not mounted or write failed");
+            return RESULT_ERROR;
+        }
+        return RESULT_OK;
+    }, "save", "Persist every 'every'/'at' job to " JOB_SAVE_FILE
+             " (restored automatically at next boot; 'once' jobs are not saved)",
+       "job");
 
     shell.add([]() -> uint8_t {
         const JobScheduler::Stats stats = instance_->jobs.stats();
@@ -1301,6 +1318,122 @@ void ROBOT::registerSystemCommands() {
         scheduleRestart();
         return RESULT_OK;
     }, "factory_reset", "Restore compiled-in defaults and reboot: pass CONFIRMA", "sys");
+
+    shell.add([]() -> uint8_t {
+        // Every module and command this firmware's shell answers to, so a
+        // new client can discover the catalog instead of shipping a
+        // hand-copied list that drifts. Built from complete_line() because it
+        // is the ONLY introspection TinyShell exposes publicly -- get_help()
+        // and get_expected_types() are both private to the library, so this
+        // cannot include descriptions or argument types. Pair with
+        // "help -complete" while typing and with each module's own command
+        // descriptions (visible in the log when a command is misused) for
+        // the rest.
+        static constexpr size_t kMaxModules = 32U;
+        static constexpr size_t kMaxCommandsPerModule = 64U;
+
+        const std::vector<std::string> modules =
+            instance_->shell.complete_line("", kMaxModules);
+
+        std::string out;
+        char header[64];
+        size_t total_commands = 0;
+
+        for (const std::string& module_entry : modules) {
+            // complete_line's module candidates carry a trailing space
+            // (it is what a real line editor would insert next).
+            std::string module_name = module_entry;
+            if (!module_name.empty() && module_name.back() == ' ') {
+                module_name.pop_back();
+            }
+
+            const std::vector<std::string> commands = instance_->shell.complete_line(
+                module_name + " ", kMaxCommandsPerModule);
+
+            std::snprintf(header, sizeof(header), "module=%s commands=%u\n",
+                          module_name.c_str(),
+                          static_cast<unsigned>(commands.size()));
+            out += header;
+            for (const std::string& command_entry : commands) {
+                out += command_entry;
+                out += '\n';
+            }
+            total_commands += commands.size();
+        }
+
+        out += "modules=" + std::to_string(modules.size()) +
+              " total_commands=" + std::to_string(total_commands) +
+              " cap_per_module=" + std::to_string(kMaxCommandsPerModule);
+
+        ROBOT::logger.insert_log(logType::INFO, out.c_str());
+        return RESULT_OK;
+    }, "manifest", "Every module and command this shell answers to (names only)", "sys");
+
+    shell.add([](uint32_t timeout_ms) -> uint8_t {
+        // This robot's only Wi-Fi STA connection today is the one OTA makes
+        // to reach the update server -- ESP-NOW, the normal radio, has no
+        // route to an NTP server at all. So this only works while that
+        // sub-mode is up, and only reports "how", not "why not": "ota start"
+        // gets a real network first.
+        if (!instance_->ota.is_active()) {
+            ROBOT::logger.insert_log(
+                logType::ERRO,
+                "refused: no Wi-Fi connection; run 'ota start' first (ESP-NOW has no route to an NTP server)");
+            return RESULT_ERROR;
+        }
+        const char* ip = instance_->ota.connected_ip();
+        if (ip == nullptr || ip[0] == '\0') {
+            ROBOT::logger.insert_log(
+                logType::ERRO,
+                "refused: OTA is still scanning/connecting; check 'ota status'");
+            return RESULT_ERROR;
+        }
+
+        // CONFIG_LWIP_SNTP_STARTUP_DELAY randomizes the first request over up
+        // to 5s (anti-flood jitter, RFC 4330) before it even goes out -- a
+        // short wait here would time out before that delay elapses, not
+        // because the server is unreachable. 10s covers jitter plus a normal
+        // round trip; 0 selects that default.
+        const uint32_t wait_ms = (timeout_ms == 0U) ? 10000U : timeout_ms;
+
+        esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
+        if (esp_netif_sntp_init(&config) != ESP_OK) {
+            ROBOT::logger.insert_log(logType::ERRO, "sntp_init failed");
+            return RESULT_ERROR;
+        }
+
+        // Blocks the shell task only -- routine()/the state machine/EKF run on
+        // their own tasks and are unaffected, same as any other slow shell
+        // command (e.g. "storage -cat" of a large file).
+        const esp_err_t sync_result =
+            esp_netif_sntp_sync_wait(pdMS_TO_TICKS(wait_ms));
+        esp_netif_sntp_deinit();
+
+        if (sync_result != ESP_OK) {
+            ROBOT::logger.insert_logf(logType::ERRO,
+                                      "sync timed out after %lu ms; try a longer timeout_ms",
+                                      static_cast<unsigned long>(wait_ms));
+            return RESULT_ERROR;
+        }
+
+        // gettimeofday()'s wall clock now reflects the network's time; this
+        // does NOT survive a reboot (there is no battery-backed RTC on this
+        // board -- see include/Settings.h's pinout, no RTC pins are wired),
+        // so the next boot starts back at zero and needs its own sync.
+        // Reported against whatever timers.timezone currently is; run
+        // "settings -apply timers" first if it was just changed.
+        const time_t now = time(nullptr);
+        struct tm local_time{};
+        localtime_r(&now, &local_time);
+        char formatted[32];
+        std::strftime(formatted, sizeof(formatted), "%Y-%m-%d %H:%M:%S", &local_time);
+
+        ROBOT::logger.insert_logf(
+            logType::INFO, "synced=1 epoch=%lld local=%s tz=%s persists_across_reboot=0",
+            static_cast<long long>(now), formatted,
+            instance_->settings.data().timezone);
+        return RESULT_OK;
+    }, "time_sync", "Sync the clock via SNTP over the OTA Wi-Fi link: timeout_ms (0 = 10000)", "sys");
 }
 
 void ROBOT::registerRobotIOCommands() {

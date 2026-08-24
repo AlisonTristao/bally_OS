@@ -86,6 +86,34 @@ Nem todo módulo pode ser aplicado em runtime, e `settings -apply` diz honestame
 | `kinematics`, `error` | Não fazem nada porque já não precisam: `encoder_ppr`/`wheel_radius`/`error_blink_ms` são lidos direto de `settings.data()` a cada uso. Registrados como *no-op* só para a resposta ser "applied" em vez de "requires a reboot". |
 | `sensor`, `pins_*` (7 grupos) | **Sem aplicador**: `settings -apply` responde `requires a reboot`. `ArraySensor` reconfigura ADC/GPIO no construtor e os grupos de pino dimensionam periféricos já energizados — não há caminho de reconfiguração viva para nenhum dos dois. |
 
+`settings -revision` conta quantas vezes `save()` gravou o arquivo com sucesso **nesta sessão de boot** (zera a cada reboot, `load()` não mexe nele). É a forma barata de um cliente remoto perceber "a configuração mudou desde a última vez que eu olhei", sem reler as ~55 chaves de `settings -list_all` para comparar. Deliberadamente **não** foi enxertado em `ManifestResponder::kConfigRevision`: aquele campo do protocolo (BTP/docs/commands.md seção 3) documenta "o catálogo de tópicos/schemas mudou", que neste firmware é genuinamente fixo em tempo de compilação — reaproveitá-lo para outra coisa seria mudar unilateralmente a semântica de um campo do protocolo, a mesma classe de problema que `include/bally_channels.h` existe para evitar entre os três repositórios.
+
+### Descoberta e diagnóstico
+
+`sys -manifest` lista todo módulo e comando que o shell deste firmware conhece, para um cliente novo descobrir o catálogo em vez de embarcar uma lista copiada à mão que desatualiza. Construído em cima de `TinyShell::complete_line()` — a única introspecção **pública** que a biblioteca vendorizada expõe (`get_help()` e `get_expected_types()` são privados). Por isso o manifesto lista só nomes de módulo/comando, sem descrição nem tipo de argumento; combine com `help -complete` durante a digitação para o resto.
+
+`sys -time_sync` sincroniza o relógio por SNTP (`pool.ntp.org`) **enquanto o OTA estiver conectado a uma rede Wi-Fi** — é a única rota deste firmware até um servidor NTP, já que o ESP-NOW não tem caminho até a internet. O horário sincronizado **não sobrevive a um reboot**: esta placa não tem RTC com bateria (ver o pinout em `include/Settings.h`), então cada boot começa do zero e precisa da sua própria sincronização.
+
+Um `esp_register_shutdown_handler()` grava o *ring* de PSRAM retido no cartão antes de todo reboot **ordenado** (`sys -reboot`, `factory_reset`, o restart pós-upload do OTA) — mesmo raciocínio que já existia só para a transição TELEMETRY: o que ainda não saiu pelo rádio (possivelmente sem alcance) seria perdido quando o *ring* é limpo. **Isso não cobre uma queda (panic/abort)** — `esp_restart()` pula os *shutdown handlers* nesse caso, e cobrir essa metade exigiria uma partição de coredump, que este firmware ainda não tem (ver "O que ficou de fora" abaixo).
+
+### Canal B (chave E) agora existe de ponta a ponta
+
+O gap original ("canal B decifra mas a resposta sempre sela com a chave L, então quem mandou pelo canal B nunca consegue abrir a própria resposta") foi fechado, não só contornado:
+
+- `RadioSeal::seal_e()`/`open_e()` espelham `seal()`/`open()`, lendo `key_e()` em vez de `key_l()`.
+- `ROBOT::handleReceiveStatic` classifica todo `COMMAND` recebido com `bally::channel_of_peer(Vantage::Robot, header.source_id, dongle_source_id_)` **antes** de decifrar — `source_id` viaja em claro mesmo dentro de um frame selado — e escolhe `open()` ou `open_e()` de acordo. `dongle_source_id_` é derivado uma vez de `MAC_ADDR` (o mesmo build flag que já identifica a dongle) com a mesma conversão MAC→source_id que o robô já usa para a própria identidade — não é um `RobotSettings` novo.
+- `CommandProcessor` agora sabe de qual canal cada requisição veio (`ResultView::channel`, guardado por pedido no cache de deduplicação) e `send_result()` sela a resposta com a chave **daquele** canal. Se a chave do canal específico não estiver configurada mas a do outro canal estiver, a resposta é **descartada**, nunca sai em claro nem selada com a chave errada — testado em `test/btp_integration` (`test_channel_b_reply_is_sealed_with_endpoint_key_not_link_key`, `test_channel_b_reply_without_endpoint_key_configured_is_dropped`).
+- Deliberadamente **não** estendido a MANIFEST_REQUEST/SUBSCRIBE/UNSUBSCRIBE: essas respostas ainda saem sempre com a chave L. Alargar o canal B até elas exige o mesmo tratamento em `ManifestResponder`/`SubscriptionResponder`, não feito aqui.
+
+`ota -scan` dispara uma varredura Wi-Fi de redes visíveis sem exigir nenhuma rede já cadastrada (ao contrário de `ota -start`, que precisa de pelo menos uma); `ota -scan_results` lista o que a última varredura viu (SSID, RSSI, aberta ou não). `job -save` grava todo job `every`/`at` ativo em `jobs.conf`, restaurado automaticamente no próximo boot (depois de `autoexec.job`); um job `once` nunca é salvo, porque seu atraso é relativo ao momento em que foi agendado — persisti-lo faria a mesma linha significar outra coisa depois de um reboot.
+
+### O que ainda ficou de fora, e por quê
+
+- **Política de autorização por canal (READ/CONFIG/ACT).** `bally_channels.h` documenta que a chave L (canal C, dongle) "só administra o link" — não é a chave "de administrador geral" que eu ia assumir por padrão. Isso inverte a suposição óbvia (canal C = confiável, canal B = restrito) o suficiente para que eu não adivinhasse a direção: perguntei, e a decisão foi **não implementar nenhuma política agora** e manter os dois canais com acesso igual, documentado explicitamente em vez de deixado implícito (ver `sec -channels`) — uma escolha deliberada de não fazer nada agora, não um esquecimento.
+- **Coredump em flash + partição dedicada.** Mudar `partitions.csv` é a categoria de mudança mais arriscada que existe neste firmware — quem estiver rodando a tabela de partições antiga precisaria de um flash por cabo antes de aceitar qualquer OTA futuro. Sem acesso a hardware para validar isso de ponta a ponta, e sem pedido explícito para assumir esse risco às cegas, essa mudança continua fora.
+
+Consequência prática: `sec -channels` reporta os dois canais como selados (`sealed=1`), mas avisa que uma requisição com **qualquer uma** das duas chaves executa qualquer comando, motores inclusive — essa lacuna de autorização **persiste**, por decisão, não por lacuna técnica.
+
 ### Outras Pastas
 - **robot/**: Implementação dos estados (Setup, Wait, Calibrate, Debug, Run, Finish, Telemetry, Error).
 - **include/**: Definições globais necessárias para configurar o robô.

@@ -128,6 +128,31 @@ public:
     bool start();
 
     /**
+     * @brief Scan for every visible network and retain the results (see
+     * last_scan_count()/get_scan_result()), without attempting to connect to
+     * any of them -- unlike start(), this needs neither a mounted SD card nor
+     * a single stored network, since it answers "what's out there", not
+     * "which of mine is in range". Entry point for "ota -scan".
+     * @return false only when OTA is already active (SCANNING/CONNECTING/
+     * SERVING, including a scan started by start()); true once this scan is
+     * scheduled.
+     */
+    bool survey();
+
+    /**
+     * @brief Networks found by the most recently COMPLETED scan (start() or
+     * survey()). 0 until the first one finishes.
+     */
+    uint16_t last_scan_count() const { return last_scan_count_; }
+
+    /**
+     * @brief Read one result of the most recent scan by index.
+     * @return true when index is valid; ssid_out is always null-terminated.
+     */
+    bool get_scan_result(uint16_t index, char* ssid_out, size_t ssid_capacity,
+                         int8_t* rssi_out, bool* open_out) const;
+
+    /**
      * @brief Non-blocking tick: drives scanning/connecting, the LED
      * carousel and button-triggered cancellation. Call every DEBUG pass.
      * @param button_flags Current button flags; any bit set cancels OTA.
@@ -219,9 +244,24 @@ private:
     std::atomic<bool> disconnected_{false};
     std::atomic<uint8_t> disconnect_reason_{0}; // WIFI_REASON_*, valid when disconnected_ is set
     bool scan_in_flight_ = false;
+    // Set by survey(), consumed once by handle_scan_done(): true means this
+    // scan is "what's visible", not "find one of my stored networks", so no
+    // connect attempt follows and the state machine returns straight to
+    // IDLE once the results are retained below.
+    bool survey_only_ = false;
     uint32_t next_scan_ms_ = 0;
     uint32_t connect_deadline_ms_ = 0;
     uint32_t retry_at_ms_ = 0; // Phase::CONNECT_FAILED: when to try the next candidate
+
+    // Every completed scan's results, regardless of whether it was started by
+    // start() (looking for a known network) or survey() (just looking) --
+    // handle_scan_done() populates this before either one decides what to do
+    // next. OTA_MAX_SCAN_RESULTS is the same cap esp_wifi_scan_get_ap_records
+    // itself is bounded to below.
+    char last_scan_ssid_[OTA_MAX_SCAN_RESULTS][OTA_SSID_MAX_LEN] = {};
+    int8_t last_scan_rssi_[OTA_MAX_SCAN_RESULTS] = {};
+    bool last_scan_open_[OTA_MAX_SCAN_RESULTS] = {};
+    uint16_t last_scan_count_ = 0;
 
     // Networks loaded from OTA_WIFI_LIST_FILE for the active connect attempt.
     Credential candidates_[OTA_MAX_NETWORKS];

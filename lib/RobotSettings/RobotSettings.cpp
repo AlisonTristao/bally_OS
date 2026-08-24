@@ -294,7 +294,9 @@ bool RobotSettings::save(SDCard& card) const {
         buffer += '\n';
     }
 
-    return card.write_file(ROBOT_SETTINGS_FILE, buffer.data(), buffer.size());
+    const bool written = card.write_file(ROBOT_SETTINGS_FILE, buffer.data(), buffer.size());
+    if (written) ++save_revision_;
+    return written;
 }
 
 bool RobotSettings::load(SDCard& card, uint16_t* skipped_lines) {
@@ -553,6 +555,15 @@ void RobotSettings::register_shell_commands(TinyShell& shell, Logger& logger, SD
         logger.insert_log(logType::INFO, out.c_str());
         return RESULT_OK;
     }, "list_all", "List every setting in every module", "settings");
+
+    shell.add([this, &logger]() -> uint8_t {
+        // A cheap "has anything changed" check for a remote client -- see
+        // save_revision()'s comment for why this exists instead of extending
+        // MANIFEST_DATA's config_revision.
+        logger.insert_logf(logType::INFO, "revision=%lu",
+                           static_cast<unsigned long>(save_revision()));
+        return RESULT_OK;
+    }, "revision", "How many times settings were saved since boot", "settings");
 
     shell.add([this, &logger, &sd_card, mark_direct_output]() -> uint8_t {
         if (!save(sd_card)) {

@@ -33,6 +33,7 @@
 #include <TelemetryPublisher.h>
 #include <TxScheduler.h>
 #include <RxRouter.h>
+#include <bally_channels.h>
 #include <OTAUpdater.h>
 #include <RobotSettings.h>
 #include <SDCard.h>
@@ -47,6 +48,15 @@
 // KEY_STORE_FILE: plain text, relative to the SDCard mount point. One shell
 // command per line; blank lines and lines starting with '#' are ignored.
 #define JOB_AUTOEXEC_FILE "autoexec.job"
+
+// SD card root file "job -save" writes and loadJobs() reads back once at
+// boot, after JOB_AUTOEXEC_FILE runs. NOT a script -- its lines are never fed
+// through pollScript()/run_command_line(), on purpose: JobScheduler::
+// is_job_command() forbids a script line from being a "job" command (a
+// script that reschedules itself has no bound), and every restorable job here
+// IS one. Its own tiny format (kind,params,command) is parsed directly by
+// loadJobs() into JobScheduler::schedule_interval/schedule_on_state calls.
+#define JOB_SAVE_FILE "jobs.conf"
 
 #include <SystemMonitor.h>
 
@@ -236,6 +246,13 @@ public:
     // Keep selected shell responses out of the retained PSRAM log.
     void sendNextShellOutputDirect();
     bool consumeDirectShellOutputRequest();
+
+    // Bound to esp_register_shutdown_handler() in init(): esp_restart()'s
+    // shutdown_handler_t is a plain void(*)(void), no context parameter, so
+    // this cannot be a capturing lambda or a non-static member -- it reaches
+    // the singleton itself. Public only because esp_register_shutdown_handler
+    // needs a pointer to it from init(); nothing else should call it.
+    static void flushLogsOnShutdown();
 private:
     // default constructor
     ROBOT() :   machine(NONE, NULL, NULL),
@@ -401,7 +418,7 @@ private:
     bool configureCommunication();
     bool configureProtocolIdentity();
     void processCommandRequest(const btp::Header& header,
-                               btp::ByteView payload);
+                               btp::ByteView payload, bally::Channel channel);
     void processManifestRequest(const btp::Header& header,
                                 btp::ByteView payload);
     // Topico 17: CONTROL/SUBSCRIBE and CONTROL/UNSUBSCRIBE, routed the same
@@ -411,7 +428,8 @@ private:
                                  btp::ByteView payload);
     void processUnsubscribeRequest(const btp::Header& header,
                                    btp::ByteView payload);
-    void dispatchDecoded(const btp::Header& header, btp::ByteView payload);
+    void dispatchDecoded(const btp::Header& header, btp::ByteView payload,
+                        bally::Channel channel);
     void sampleTelemetry();
 
     // Register every shell module. Most modules are owned by the subsystem
@@ -546,6 +564,22 @@ private:
     /** @brief Drive JobScheduler from routine(); once per pass. */
     void pollJobs();
 
+    // ---- Job persistence (JOB_SAVE_FILE) ----
+    //
+    // Interval and OnStateEnter jobs only. A Once job's delay_ms is relative
+    // to the moment it was scheduled -- a reboot erases that reference point,
+    // so restoring it after one would fire delay_ms after the NEW boot
+    // instead, a silently different job. Skipped, not approximated.
+    /** @brief Write every active Interval/OnStateEnter job to JOB_SAVE_FILE.
+     *  @return false when the SD card is not mounted or the write failed. */
+    bool saveJobs();
+    /** @brief Re-schedule whatever JOB_SAVE_FILE holds, straight into
+     *  JobScheduler -- never through TinyShell::run_command_line(), since
+     *  these lines are not shell command text.
+     *  @return false when the card is not mounted or there is no such file
+     *  (both are normal: nothing was ever saved). */
+    bool loadJobs();
+
     static constexpr size_t kCommandQueueLength = 10U;
     QueueHandle_t receivedDataQueue = nullptr;
     StaticQueue_t received_data_queue_control_{};
@@ -577,6 +611,21 @@ private:
     // itself (not a stack buffer -- see its comment) and the same
     // single-writer/single-reader rule.
     uint8_t rx_plaintext_[RxRouter::kMaxPayloadSize]{};
+
+    // The dongle's BTP source_id, derived once in configureProtocolIdentity()
+    // from the same MAC_ADDR build flag handleReceiveStatic's radio prefilter
+    // already uses, via the identical btp_command::source_id_from_mac() the
+    // robot uses for its OWN identity. Never persisted, never a RobotSettings
+    // field -- MAC_ADDR is already the one place this robot's build records
+    // "who is my dongle". Stays 0U (a value intake() already rejects as an
+    // invalid header field) when MAC_ADDR is not defined for this build.
+    //
+    // This is the only thing bally_channels.h::channel_of_peer(Vantage::Robot,
+    // ...) needs beyond the header's own cleartext source_id, and is what
+    // finally lets a COMMAND's plaintext be classified as channel B
+    // (TraceView, key E) or channel C (dongle, key L) BEFORE RadioSeal::open
+    // vs open_e is chosen -- see handleReceiveStatic.
+    uint32_t dongle_source_id_ = 0U;
 
     // The state-machine task is the sole telemetry producer. The routine task
     // only consumes the publisher's bounded SPSC queue. The publish period is

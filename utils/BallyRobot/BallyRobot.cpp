@@ -278,11 +278,26 @@ bool ROBOT::configureProtocolIdentity() {
     // key_store.load_from_card() runs later in init().
     RadioSeal::configure(key_store);
 
+    // Same MAC->source_id conversion as this robot's own identity two lines
+    // above, applied to the dongle's known MAC (MAC_ADDR, the same build
+    // flag handleReceiveStatic's radio prefilter reads) instead of this
+    // device's efuse MAC. Left 0U -- an invalid source_id intake() already
+    // rejects -- when this build has no MAC_ADDR at all, matching
+    // handleReceiveStatic's own "no MAC_ADDR -> reject everything" branch.
+#ifdef MAC_ADDR
+    {
+        static constexpr uint8_t kDongleMac[6] = {MAC_ADDR};
+        dongle_source_id_ = btp_command::source_id_from_mac(kDongleMac);
+    }
+#endif
+
     logger.configure_btp(protocol);
-    // COMMAND_RESULT always replies to a channel C request today (COMMAND
-    // has no path from TraceView into this firmware yet, topico 31), so it
-    // seals for real.
-    command_processor.configure(protocol, RadioSeal::seal, nullptr);
+    // COMMAND_RESULT is sealed with whichever channel's key opened the
+    // request it answers (see CommandProcessor::configure's comment):
+    // seal_link for channel C (dongle, key L), seal_endpoint for channel B
+    // (TraceView, key E, topico 31).
+    command_processor.configure(protocol, RadioSeal::seal, nullptr,
+                                RadioSeal::seal_e, nullptr);
     manifest_responder.configure(protocol, protocol_uuid_);
     telemetry.configure(protocol);
     subscription_responder.configure(protocol, telemetry);
@@ -557,6 +572,21 @@ bool ROBOT::consumeDirectShellOutputRequest() {
                                              std::memory_order_acq_rel);
 }
 
+void ROBOT::flushLogsOnShutdown() {
+    // instance_ is set at construction (well before app_main runs) and
+    // esp_restart() can only be reached after that, so this is never null in
+    // practice; the check is defensive, not load-bearing.
+    if (instance_ == nullptr) return;
+
+    // Best effort: there is nobody left to report a failure to by the time a
+    // shutdown handler runs, and flush_to_sd() already declines safely on its
+    // own (card not mounted, or currently owned by the USB host) -- see the
+    // call site in init() for why that is enough here.
+    char filename[SDFileInfo::MAX_NAME_LENGTH] = {};
+    instance_->logger.flush_to_sd(instance_->sd_card, false, filename,
+                                  sizeof(filename));
+}
+
 void ROBOT::checkStateMachine() {
     if ((uint32_t)(esp_timer_get_time() / 1000ULL) - instance_->stateMachineTimer > instance_->settings.data().delay_flags) {
         ROBOT::machine.next(ROBOT::buttons.getFlags());
@@ -713,25 +743,43 @@ void ROBOT::handleReceiveStatic(const esp_now_recv_info_t *recv_info, const uint
         instance_->link_reassembly_completed_.fetch_add(1U, std::memory_order_relaxed);
     }
 
-    // Stage two: open. Everything that reaches this point today is channel C
-    // (dongle<->robot, key L) -- the dongle already seals every frame it
-    // originates this way (bally_dongle's RadioSeal, topico 30), and channel
-    // B (key E, TraceView<->robot) has no path into this firmware yet,
-    // topico 31. This is the robot's REAL authorization now (see the long
-    // comment on btp_command::authorized_source): the MAC check above is a
-    // cheap radio prefilter a forged sender clears in one line, this tag is
-    // not -- it needs key L. RadioSeal::open() fails closed on every branch
-    // (no key loaded, ENCRYPTED not set, a cipher other than AES-128-GCM, or
-    // a tag that does not verify); there is no fallback to reading the
-    // still-sealed bytes as plaintext.
+    // Stage two: classify, then open. header.source_id sits in the clear at
+    // a fixed offset even inside a sealed frame (bally_channels.h), so which
+    // key opens this frame can be decided before opening it. Only COMMAND is
+    // classified today -- the switch below still restricts every other
+    // MessageType to channel C, so CONTROL (MANIFEST_REQUEST/SUBSCRIBE/
+    // UNSUBSCRIBE) keeps exactly its old behavior. Widening those to channel
+    // B needs ManifestResponder/SubscriptionResponder's own replies made
+    // channel-aware too (they still seal with key L unconditionally, the
+    // same gap CommandProcessor had before topico 31) -- a separate change,
+    // not done here.
+    //
+    // This is the robot's REAL authorization now (see the long comment on
+    // btp_command::authorized_source): the MAC check above is a cheap radio
+    // prefilter a forged sender clears in one line, an AEAD tag is not.
+    // RadioSeal::open()/open_e() fail closed on every branch (no key loaded,
+    // ENCRYPTED not set, a cipher other than AES-128-GCM, or a tag that does
+    // not verify); there is no fallback to reading the still-sealed bytes as
+    // plaintext.
     const btp::Header& header = instance_->rx_routed_.header;
     const std::size_t ciphertext_size = instance_->rx_routed_.payload_size;
-    const bool opened =
+    const bally::Channel channel =
+        header.type == btp::MessageType::Command
+            ? bally::channel_of_peer(bally::Vantage::Robot, header.source_id,
+                                     instance_->dongle_source_id_)
+            : bally::Channel::C_Link;
+    const bool size_ok =
         ciphertext_size >= RadioSeal::kTagSize &&
-        ciphertext_size - RadioSeal::kTagSize <= sizeof(instance_->rx_plaintext_) &&
-        RadioSeal::open(header, static_cast<uint16_t>(ciphertext_size),
-                        instance_->rx_routed_.payload,
-                        instance_->rx_plaintext_);
+        ciphertext_size - RadioSeal::kTagSize <= sizeof(instance_->rx_plaintext_);
+    const bool opened =
+        size_ok &&
+        (channel == bally::Channel::B_Endpoint
+             ? RadioSeal::open_e(header, static_cast<uint16_t>(ciphertext_size),
+                                 instance_->rx_routed_.payload,
+                                 instance_->rx_plaintext_)
+             : RadioSeal::open(header, static_cast<uint16_t>(ciphertext_size),
+                               instance_->rx_routed_.payload,
+                               instance_->rx_plaintext_));
     if (!opened) {
         instance_->command_processor.note_unauthorized();
         return;
@@ -769,14 +817,16 @@ void ROBOT::handleReceiveStatic(const esp_now_recv_info_t *recv_info, const uint
     }
 
     instance_->dispatchDecoded(
-        header, btp::ByteView{instance_->rx_plaintext_, plaintext_size});
+        header, btp::ByteView{instance_->rx_plaintext_, plaintext_size},
+        channel);
 }
 
 // Stage three of the pipeline above: hands one complete Command/Control
 // message to the matching handler by object_id. handleReceiveStatic's switch
 // already rejected any object_id not listed here, so the final else is
 // unreachable in practice but kept as a safe no-op rather than an assert.
-void ROBOT::dispatchDecoded(const btp::Header& header, btp::ByteView payload) {
+void ROBOT::dispatchDecoded(const btp::Header& header, btp::ByteView payload,
+                           bally::Channel channel) {
     if (header.type == btp::MessageType::Control) {
         if (header.object_id == ManifestResponder::kManifestRequestObjectId) {
             processManifestRequest(header, payload);
@@ -786,15 +836,16 @@ void ROBOT::dispatchDecoded(const btp::Header& header, btp::ByteView payload) {
             processUnsubscribeRequest(header, payload);
         }
     } else {
-        processCommandRequest(header, payload);
+        processCommandRequest(header, payload, channel);
     }
 }
 
 void ROBOT::processCommandRequest(const btp::Header& header,
-                                  btp::ByteView payload) {
+                                  btp::ByteView payload,
+                                  bally::Channel channel) {
     const uint64_t now_us = static_cast<uint64_t>(esp_timer_get_time());
     const CommandProcessor::Intake intake =
-        command_processor.intake(header, payload, now_us);
+        command_processor.intake(header, payload, now_us, channel);
     if (intake.kind == CommandProcessor::IntakeKind::ResultReady) {
         command_processor.send_result(intake.result);
         return;
@@ -1072,6 +1123,115 @@ bool ROBOT::submitLocalCommandStatic(void* context, const char* command_line) {
 void ROBOT::pollJobs() {
     jobs.poll(static_cast<uint64_t>(esp_timer_get_time() / 1000ULL),
               StateMachine::current_state.load(std::memory_order_acquire));
+}
+
+// Generous per-line estimate ("interval," + two uint32 fields + comma +
+// kMaxCommandLength + newline), times the largest possible job count.
+static constexpr size_t kJobSaveBufferBytes =
+    JobScheduler::kMaxJobs * (JobScheduler::kMaxCommandLength + 48U);
+
+bool ROBOT::saveJobs() {
+    if (!sd_card.is_mounted()) return false;
+
+    JobScheduler::JobView views[JobScheduler::kMaxJobs];
+    const size_t count = jobs.list(views, JobScheduler::kMaxJobs);
+
+    char buffer[kJobSaveBufferBytes];
+    size_t offset = 0U;
+    size_t persisted = 0U;
+
+    for (size_t i = 0; i < count; ++i) {
+        const JobScheduler::JobView& view = views[i];
+        int written = 0;
+        if (view.kind == JobScheduler::Kind::Interval) {
+            written = snprintf(buffer + offset, sizeof(buffer) - offset,
+                               "interval,%lu,%lu,%s\n",
+                               static_cast<unsigned long>(view.interval_ms),
+                               static_cast<unsigned long>(view.remaining),
+                               view.command);
+        } else if (view.kind == JobScheduler::Kind::OnStateEnter) {
+            written = snprintf(buffer + offset, sizeof(buffer) - offset,
+                               "on_state,%s,%s\n",
+                               StateMachine::stateToString(view.state),
+                               view.command);
+        } else {
+            // Kind::Once: see JOB_SAVE_FILE's comment in BallyRobot.h.
+            continue;
+        }
+        if (written <= 0 ||
+            static_cast<size_t>(written) >= sizeof(buffer) - offset) {
+            break;  // Out of room: keep what already fit, not a torn line.
+        }
+        offset += static_cast<size_t>(written);
+        ++persisted;
+    }
+
+    if (!sd_card.write_file(JOB_SAVE_FILE, buffer, offset)) return false;
+    logger.insert_logf(logType::INFO, "saved %u/%u job(s) to " JOB_SAVE_FILE,
+                       static_cast<unsigned>(persisted),
+                       static_cast<unsigned>(count));
+    return true;
+}
+
+bool ROBOT::loadJobs() {
+    if (!sd_card.is_mounted() || !sd_card.file_exists(JOB_SAVE_FILE)) {
+        return false;
+    }
+
+    char buffer[kJobSaveBufferBytes + 1U];
+    size_t read_bytes = 0U;
+    if (!sd_card.read_file(JOB_SAVE_FILE, buffer, sizeof(buffer) - 1U,
+                           &read_bytes)) {
+        return false;
+    }
+    buffer[read_bytes] = '\0';
+
+    size_t restored = 0U;
+    size_t cursor = 0U;
+    while (cursor < read_bytes) {
+        size_t end = cursor;
+        while (end < read_bytes && buffer[end] != '\n' && buffer[end] != '\r') {
+            ++end;
+        }
+        buffer[end] = '\0';
+        char* line = buffer + cursor;
+        cursor = end + 1U;
+        if (line[0] == '\0') continue;
+
+        uint8_t id = 0U;
+        if (std::strncmp(line, "interval,", 9U) == 0) {
+            char* rest = line + 9U;
+            char* comma1 = std::strchr(rest, ',');
+            char* comma2 = comma1 != nullptr ? std::strchr(comma1 + 1, ',') : nullptr;
+            if (comma1 == nullptr || comma2 == nullptr) continue;
+            *comma1 = '\0';
+            *comma2 = '\0';
+            const uint32_t interval_ms =
+                static_cast<uint32_t>(std::strtoul(rest, nullptr, 10));
+            const uint32_t remaining =
+                static_cast<uint32_t>(std::strtoul(comma1 + 1, nullptr, 10));
+            if (jobs.schedule_interval(interval_ms, remaining, comma2 + 1,
+                                       &id) == JobScheduler::Error::Ok) {
+                ++restored;
+            }
+        } else if (std::strncmp(line, "on_state,", 9U) == 0) {
+            char* rest = line + 9U;
+            char* comma = std::strchr(rest, ',');
+            if (comma == nullptr) continue;
+            *comma = '\0';
+            const uint8_t state = StateMachine::stateFromString(rest);
+            if (jobs.schedule_on_state(state, comma + 1, &id) ==
+                JobScheduler::Error::Ok) {
+                ++restored;
+            }
+        }
+    }
+
+    if (restored > 0U) {
+        logger.insert_logf(logType::INFO, "restored %u job(s) from " JOB_SAVE_FILE,
+                           static_cast<unsigned>(restored));
+    }
+    return true;
 }
 
 bool ROBOT::startScript(const char* path) {
@@ -1377,6 +1537,11 @@ void ROBOT::routine(void *param){
         if (instance_->startScript(JOB_AUTOEXEC_FILE)) {
             ROBOT::logger.insert_logf(logType::INFO, "running %s", JOB_AUTOEXEC_FILE);
         }
+        // After the script, not before: JOB_SAVE_FILE holds jobs that were
+        // ACTIVE at some past "job -save", and a fresh autoexec run is free
+        // to schedule its own without the two colliding over job table slots
+        // in an order that would depend on load timing.
+        instance_->loadJobs();
     }
 
     // excute the loop to menage the robot
@@ -1776,6 +1941,28 @@ bool ROBOT::init() {
 
     logger.begin();
     shell.begin();
+
+    // Persist whatever the retained PSRAM ring holds before an ORDERLY
+    // restart wipes it -- esp_restart() (sys -reboot, factory_reset, the
+    // post-OTA-upload restart) calls every registered shutdown handler first.
+    // Same rationale as the one-shot flush TELEMETRY already does on its own
+    // transition (src/robot/07_Telemetry.cpp): whatever has not yet made it
+    // out over a possibly lossy/out-of-range radio link would otherwise be
+    // lost the moment the ring is wiped.
+    //
+    // This deliberately does NOT run on a crash: esp_restart()'s shutdown
+    // handlers are skipped entirely by a panic/abort, so a firmware fault
+    // still loses this boot's unflushed log. Catching that case needs a
+    // coredump partition and CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH, which is a
+    // flash-layout change this firmware does not make yet -- it can only be
+    // applied together with a planned cable reflash, never delivered by OTA,
+    // so it is intentionally left for that occasion rather than folded in
+    // here.
+    //
+    // Registered this early so it is armed for the rest of boot;
+    // flush_to_sd() itself already refuses safely if the card never mounts,
+    // or if USB currently owns it (SDCard::is_mounted() reports false then).
+    esp_register_shutdown_handler(&ROBOT::flushLogsOnShutdown);
 
     if (!configureProtocolIdentity()) {
         ESP_LOGE("ROBOT_INIT", "Failed to configure BTP identity");

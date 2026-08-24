@@ -6,6 +6,7 @@
 #include <SubscriptionResponder.h>
 #include <TelemetryPublisher.h>
 #include <TxScheduler.h>
+#include <bally_channels.h>
 #include <btp/codec.hpp>
 
 #include <cstdint>
@@ -96,6 +97,26 @@ btp::Header command_header(std::uint32_t sequence) {
 
 bool capture_radio(void*, const std::uint8_t* data, std::size_t size) {
     return capture_send(data, size);
+}
+
+// Fake seal functions distinguishable by their tag byte, standing in for
+// RadioSeal::seal (key L) and RadioSeal::seal_e (key E): neither actually
+// runs AEAD, they only prove WHICH function CommandProcessor::send_result
+// picked for a given ResultView::channel. Real cryptographic sealing is
+// RadioSeal's own concern and out of reach for env:native (see RadioSeal.h's
+// class comment on why it is never linked here).
+bool fake_seal_link(void*, const btp::Header&, std::uint16_t payload_size,
+                    const std::uint8_t* plaintext, std::uint8_t* out) {
+    std::memcpy(out, plaintext, payload_size);
+    std::memset(out + payload_size, 0x11, BtpEndpoint::kAeadTagSize);
+    return true;
+}
+
+bool fake_seal_endpoint(void*, const btp::Header&, std::uint16_t payload_size,
+                        const std::uint8_t* plaintext, std::uint8_t* out) {
+    std::memcpy(out, plaintext, payload_size);
+    std::memset(out + payload_size, 0x22, BtpEndpoint::kAeadTagSize);
+    return true;
 }
 
 void test_canonical_command_request_is_fully_parsed() {
@@ -362,6 +383,83 @@ void test_duplicate_command_executes_once_and_replays_exact_result() {
                             (static_cast<std::uint32_t>(decoded.payload.data[2]) << 16U) |
                             (static_cast<std::uint32_t>(decoded.payload.data[3]) << 24U));
     TEST_ASSERT_EQUAL_HEX8(0U, decoded.payload.data[16U]);
+}
+
+void test_channel_b_reply_is_sealed_with_endpoint_key_not_link_key() {
+    sent_count = 0U;
+    BtpEndpoint endpoint;
+    TEST_ASSERT_TRUE(endpoint.configure(0x11223344U, 0xA1B2C3D4U));
+    endpoint.set_send_callback(capture_send);
+    CommandProcessor processor;
+    processor.configure(endpoint, fake_seal_link, nullptr, fake_seal_endpoint,
+                        nullptr);
+
+    const auto payload = shell_request_payload(endpoint.source_id(),
+                                               endpoint.boot_id(),
+                                               "sys -manifest");
+    const btp::Header header = command_header(201U);
+    const btp::ByteView bytes{payload.data(), payload.size()};
+    const auto accepted =
+        processor.intake(header, bytes, 5000U, bally::Channel::B_Endpoint);
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<std::uint8_t>(CommandProcessor::IntakeKind::Ready),
+        static_cast<std::uint8_t>(accepted.kind));
+
+    CommandProcessor::ResultView completed{};
+    TEST_ASSERT_TRUE(processor.complete(accepted.work.cache_slot, 0U, 5100U,
+                                        &completed));
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<std::uint8_t>(bally::Channel::B_Endpoint),
+        static_cast<std::uint8_t>(completed.channel));
+
+    TEST_ASSERT_TRUE(processor.send_result(completed));
+    TEST_ASSERT_EQUAL_UINT32(1U, sent_count);
+
+    btp::DecodedFrame decoded{};
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<std::uint8_t>(btp::Error::Ok),
+        static_cast<std::uint8_t>(btp::decode(
+            sent_frames[0], sent_sizes[0], btp::TransportProfile::EspNow,
+            &decoded)));
+    TEST_ASSERT_TRUE((decoded.header.flags & btp::kFlagEncrypted) != 0U);
+    // The whole tag is 0x22 (fake_seal_endpoint's marker); 0x11 here would
+    // mean the reply went out sealed with the CHANNEL-C key instead -- a
+    // key whoever sent this channel-B request does not hold.
+    TEST_ASSERT_EQUAL_HEX8(0x22U,
+                          decoded.payload.data[decoded.payload.size - 1U]);
+}
+
+void test_channel_b_reply_without_endpoint_key_configured_is_dropped() {
+    sent_count = 0U;
+    BtpEndpoint endpoint;
+    TEST_ASSERT_TRUE(endpoint.configure(0x11223344U, 0xA1B2C3D4U));
+    endpoint.set_send_callback(capture_send);
+    CommandProcessor processor;
+    // Channel C is keyed, channel B is not -- the gap this firmware was in
+    // before topico 31, kept here as a regression test for the fail-closed
+    // rule: a reply must never fall back to the other channel's key, or to
+    // cleartext, just because ITS key is missing while some key exists.
+    processor.configure(endpoint, fake_seal_link, nullptr);
+
+    const auto payload = shell_request_payload(endpoint.source_id(),
+                                               endpoint.boot_id(),
+                                               "sys -manifest");
+    const btp::Header header = command_header(202U);
+    const btp::ByteView bytes{payload.data(), payload.size()};
+    const auto accepted =
+        processor.intake(header, bytes, 6000U, bally::Channel::B_Endpoint);
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<std::uint8_t>(CommandProcessor::IntakeKind::Ready),
+        static_cast<std::uint8_t>(accepted.kind));
+
+    CommandProcessor::ResultView completed{};
+    TEST_ASSERT_TRUE(processor.complete(accepted.work.cache_slot, 0U, 6100U,
+                                        &completed));
+
+    const std::uint32_t dropped_before = processor.stats().dropped;
+    TEST_ASSERT_FALSE(processor.send_result(completed));
+    TEST_ASSERT_EQUAL_UINT32(dropped_before + 1U, processor.stats().dropped);
+    TEST_ASSERT_EQUAL_UINT32(0U, sent_count);
 }
 
 void test_conflicting_duplicate_is_rejected_without_execution() {
@@ -916,6 +1014,8 @@ int main(int, char**) {
     RUN_TEST(test_publisher_queue_is_bounded_and_drop_newest_is_counted);
     RUN_TEST(test_publisher_registers_static_schemas_and_rejects_nan);
     RUN_TEST(test_duplicate_command_executes_once_and_replays_exact_result);
+    RUN_TEST(test_channel_b_reply_is_sealed_with_endpoint_key_not_link_key);
+    RUN_TEST(test_channel_b_reply_without_endpoint_key_configured_is_dropped);
     RUN_TEST(test_conflicting_duplicate_is_rejected_without_execution);
     RUN_TEST(test_saturated_execution_queue_returns_cached_busy_result);
     RUN_TEST(test_full_telemetry_queue_cannot_block_command_result);

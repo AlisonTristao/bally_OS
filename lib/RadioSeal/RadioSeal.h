@@ -88,6 +88,27 @@ bool open(const btp::Header& header, std::uint16_t ciphertext_size,
          const std::uint8_t* ciphertext_and_tag,
          std::uint8_t* out_plaintext) noexcept;
 
+/**
+ * @brief Same contract as seal(), for channel B (TraceView<->robot, key E)
+ * instead of channel C. Reads key_e() from the same KeyStore configure()
+ * bound; fails closed the same way (no key loaded -> false, never a
+ * cleartext fallback).
+ */
+bool seal_e(void* context, const btp::Header& header,
+           std::uint16_t payload_size, const std::uint8_t* plaintext,
+           std::uint8_t* out) noexcept;
+
+/**
+ * @brief Same contract as open(), for channel B (key E) instead of channel
+ * C. The two keys are independent (see KeyStore's class comment): a frame
+ * that fails here was never checked against key_l(), and vice versa -- the
+ * caller must already know which channel it is classifying before picking
+ * open() vs open_e(), since nothing on the wire names the key.
+ */
+bool open_e(const btp::Header& header, std::uint16_t ciphertext_size,
+           const std::uint8_t* ciphertext_and_tag,
+           std::uint8_t* out_plaintext) noexcept;
+
 }  // namespace RadioSeal
 
 #endif  // RADIO_SEAL_H

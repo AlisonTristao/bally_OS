@@ -2,11 +2,15 @@
 
 #include <cstring>
 
-void CommandProcessor::configure(BtpEndpoint& endpoint, BtpSealFn seal,
-                                 void* seal_context) noexcept {
+void CommandProcessor::configure(BtpEndpoint& endpoint, BtpSealFn seal_link,
+                                 void* seal_link_context,
+                                 BtpSealFn seal_endpoint,
+                                 void* seal_endpoint_context) noexcept {
     endpoint_ = &endpoint;
-    seal_ = seal;
-    seal_context_ = seal_context;
+    seal_link_ = seal_link;
+    seal_link_context_ = seal_link_context;
+    seal_endpoint_ = seal_endpoint;
+    seal_endpoint_context_ = seal_endpoint_context;
 }
 
 bool CommandProcessor::same_key(const RequestKey& left,
@@ -78,6 +82,7 @@ CommandProcessor::ResultView CommandProcessor::view(
         entry.result_timestamp_us,
         entry.result,
         entry.result_size,
+        entry.channel,
     };
 }
 
@@ -134,7 +139,7 @@ bool CommandProcessor::finish(CacheEntry& entry, Status status,
 bool CommandProcessor::make_transient(
     const RequestKey& key, std::uint16_t action_id,
     std::uint16_t action_version, Status status, ErrorCode error,
-    const char* message, std::uint64_t now_us,
+    const char* message, std::uint64_t now_us, bally::Channel channel,
     ResultView* result_out) noexcept {
     if (endpoint_ == nullptr || result_out == nullptr ||
         !endpoint_->reserve_sequence(&transient_sequence_) ||
@@ -146,13 +151,13 @@ bool CommandProcessor::make_transient(
     }
     transient_timestamp_us_ = now_us;
     *result_out = {transient_sequence_, transient_timestamp_us_,
-                   transient_result_, transient_size_};
+                   transient_result_, transient_size_, channel};
     return true;
 }
 
 CommandProcessor::Intake CommandProcessor::intake(
-    const btp::Header& header, btp::ByteView payload,
-    std::uint64_t now_us) noexcept {
+    const btp::Header& header, btp::ByteView payload, std::uint64_t now_us,
+    bally::Channel channel) noexcept {
     Intake intake{};
     // RX runs on the Wi-Fi task: never wait behind the shell task. A retry is
     // safe and will hit the same dedup key after the short critical section.
@@ -197,7 +202,7 @@ CommandProcessor::Intake CommandProcessor::intake(
             rejected_.fetch_add(1U, std::memory_order_relaxed);
             if (make_transient(key, action_id, action_version,
                                Status::Rejected, ErrorCode::RequestConflict,
-                               "request identity conflict", now_us,
+                               "request identity conflict", now_us, channel,
                                &intake.result)) {
                 intake.kind = IntakeKind::ResultReady;
             }
@@ -217,7 +222,7 @@ CommandProcessor::Intake CommandProcessor::intake(
         rejected_.fetch_add(1U, std::memory_order_relaxed);
         if (make_transient(key, action_id, action_version, Status::Busy,
                            ErrorCode::CapacityExhausted,
-                           "command cache exhausted", now_us,
+                           "command cache exhausted", now_us, channel,
                            &intake.result)) {
             intake.kind = IntakeKind::ResultReady;
         }
@@ -229,6 +234,7 @@ CommandProcessor::Intake CommandProcessor::intake(
     free_entry->key = key;
     free_entry->action_id = action_id;
     free_entry->action_version = action_version;
+    free_entry->channel = channel;
     free_entry->request_size = static_cast<std::uint16_t>(payload.size);
     std::memcpy(free_entry->request, payload.data, payload.size);
     const std::uint8_t slot = static_cast<std::uint8_t>(free_entry - cache_);
@@ -300,10 +306,33 @@ bool CommandProcessor::send_result(const ResultView& result) noexcept {
         note_drop();
         return false;
     }
+
+    // channel_of_peer(Vantage::Robot, ...) never returns A_Console (see
+    // bally_channels.h) -- this firmware is never the console's own peer --
+    // so B_Endpoint is the only branch besides the C_Link default.
+    const BtpSealFn seal = result.channel == bally::Channel::B_Endpoint
+                                ? seal_endpoint_
+                                : seal_link_;
+    void* const seal_context = result.channel == bally::Channel::B_Endpoint
+                                    ? seal_endpoint_context_
+                                    : seal_link_context_;
+
+    // Both configured nullptr means "no encryption at all" (see configure's
+    // comment) and every reply goes out unsealed, matching pre-channel-B
+    // behavior for the native tests. But once ANY channel has a key
+    // configured, a channel whose own key is still missing must never fall
+    // back to cleartext or to the other channel's key -- that key is the one
+    // its requester actually holds.
+    if (seal == nullptr &&
+        (seal_link_ != nullptr || seal_endpoint_ != nullptr)) {
+        note_drop();
+        return false;
+    }
+
     const bool sent = endpoint_->send_fragment(
         btp::MessageType::Command, kCommandResultObjectId, result.sequence,
         result.timestamp_us, result.payload, result.payload_size, 0U, 1U,
-        seal_, seal_context_);
+        seal, seal_context);
     if (!sent) note_drop();
     return sent;
 }

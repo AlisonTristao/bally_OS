@@ -6,6 +6,7 @@
 #include <cstdint>
 
 #include <BtpTransport.h>
+#include <bally_channels.h>
 
 class CommandProcessor {
 public:
@@ -54,6 +55,9 @@ public:
         std::uint64_t timestamp_us = 0U;
         const std::uint8_t* payload = nullptr;
         std::size_t payload_size = 0U;
+        // Which channel the ORIGINAL request arrived on -- send_result()
+        // seals the reply with that channel's key, never the other one.
+        bally::Channel channel = bally::Channel::C_Link;
     };
 
     struct Intake {
@@ -72,16 +76,34 @@ public:
         std::uint32_t unauthorized;
     };
 
-    // `seal`/`seal_context` (default nullptr) are forwarded verbatim to
-    // BtpEndpoint::send_fragment -- see BtpSealFn. COMMAND_RESULT here is
-    // always a reply to a channel C request (COMMAND has no path from
-    // TraceView into this firmware yet, topico 31), so the real caller
-    // passes RadioSeal::seal.
-    void configure(BtpEndpoint& endpoint, BtpSealFn seal = nullptr,
-                   void* seal_context = nullptr) noexcept;
+    // `seal_link`/`seal_endpoint` (both default nullptr) are forwarded
+    // verbatim to BtpEndpoint::send_fragment -- see BtpSealFn. Each reply is
+    // sealed with whichever one matches the ORIGINAL request's channel (see
+    // ResultView::channel and bally_channels.h): a channel-C request
+    // (dongle, key L) is answered with seal_link, a channel-B request
+    // (TraceView, key E) with seal_endpoint. send_result() fails closed
+    // rather than seal a reply with the other channel's key, or send it in
+    // the clear, whenever at least one of the two has been configured --
+    // the real callers pass RadioSeal::seal and RadioSeal::seal_e.
+    //
+    // Leaving both nullptr (the default) is not "channel B unsupported", it
+    // is "no encryption at all": every reply goes out unsealed regardless of
+    // channel, exactly as before this parameter existed. That is what the
+    // native unit tests exercise -- BTP framing over cleartext -- and is not
+    // a mode real firmware should configure.
+    void configure(BtpEndpoint& endpoint, BtpSealFn seal_link = nullptr,
+                   void* seal_link_context = nullptr,
+                   BtpSealFn seal_endpoint = nullptr,
+                   void* seal_endpoint_context = nullptr) noexcept;
 
+    // `channel` is the caller's classification of the request (see
+    // bally_channels.h::channel_of_peer), made BEFORE this call since only
+    // the caller has the header's cleartext source_id and knows which key
+    // opened the payload. Defaults to C_Link so a caller that never passes
+    // it -- every existing native test -- keeps today's behavior verbatim.
     Intake intake(const btp::Header& header, btp::ByteView payload,
-                  std::uint64_t now_us) noexcept;
+                  std::uint64_t now_us,
+                  bally::Channel channel = bally::Channel::C_Link) noexcept;
 
     // Completes a previously returned WorkItem. TinyShell uses zero for
     // success; every other code becomes FAILED/INTERNAL_ERROR.
@@ -111,6 +133,7 @@ private:
         RequestKey key{};
         std::uint16_t action_id = 0U;
         std::uint16_t action_version = 0U;
+        bally::Channel channel = bally::Channel::C_Link;
         std::uint16_t request_size = 0U;
         std::uint8_t request[btp_command::kMaxLogicalRequestSize]{};
         std::uint32_t result_sequence = 0U;
@@ -135,7 +158,8 @@ private:
     bool make_transient(const RequestKey& key, std::uint16_t action_id,
                         std::uint16_t action_version, Status status,
                         ErrorCode error, const char* message,
-                        std::uint64_t now_us, ResultView* result_out) noexcept;
+                        std::uint64_t now_us, bally::Channel channel,
+                        ResultView* result_out) noexcept;
     bool encode_result(const RequestKey& key, std::uint16_t action_id,
                        std::uint16_t action_version, Status status,
                        ErrorCode error, const char* message,
@@ -143,8 +167,10 @@ private:
                        std::uint16_t* size_out) noexcept;
 
     BtpEndpoint* endpoint_ = nullptr;
-    BtpSealFn seal_ = nullptr;
-    void* seal_context_ = nullptr;
+    BtpSealFn seal_link_ = nullptr;
+    void* seal_link_context_ = nullptr;
+    BtpSealFn seal_endpoint_ = nullptr;
+    void* seal_endpoint_context_ = nullptr;
     std::atomic_flag cache_lock_ = ATOMIC_FLAG_INIT;
     CacheEntry cache_[kCacheCapacity]{};
     std::uint8_t transient_result_[kMaxResultPayloadSize]{};
