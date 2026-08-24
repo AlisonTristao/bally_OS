@@ -34,10 +34,33 @@ Este projeto implementa o controle de um robô baseado em ESP32-S3, utilizando a
 - **OTAUpdater**: Atualização de firmware sem fio a partir do estado DEBUG — conecta a uma rede Wi-Fi cadastrada no cartão SD, anuncia `<hostname>.local` via mDNS e recebe o novo binário via HTTP (`POST /update`). `GET /status` (JSON: `device`, `online`, `firmware`, `ota_ready`) deixa uma ferramenta externa checar se o robô está pronto para receber o upload antes de mandá-lo.
 - **RobotSettings**: Armazena e persiste (`settings.conf` no SD) todos os parâmetros configuráveis em runtime.
 - **SDCard** / **USBMassStorage**: Acesso ao cartão SD e transferência de propriedade exclusiva do FAT entre o robô e um host USB.
-- **StateMachine**: Máquina de estados do robô, com transições e *callbacks* configuráveis.
-- **SystemMonitor**: Relatório opcional de saúde do sistema (CPU, memória, temperatura), habilitado por `ENABLE_SYSTEM_MONITOR`.
+- **StateMachine**: Máquina de estados do robô, com transições e *callbacks* configuráveis. Além do estado atual, guarda pedido de transição (`state -set`), trava (`state -lock`) e um anel com as últimas 8 transições.
+- **JobScheduler**: Comandos de shell disparados por tempo (`every`/`once`) ou por entrada em estado (`at`). C++ puro, sem FreeRTOS/SD/TinyShell — o relógio chega por parâmetro e a execução por *callback*, o que deixa a lib inteira coberta por `test/test_job_scheduler` no `env:native`. Um *job* é agendamento, não garantia de entrega: ocorrência que não coube na fila é contada e descartada, e atraso maior que um intervalo inteiro é descartado em vez de virar rajada.
+- **SystemMonitor**: Saúde do sistema (CPU, memória, temperatura, uptime, carga e *stack* por task). Sempre compilado; o relatório periódico é silenciado com `timers.sysmon_freq_ms = 0`, sem tirar os comandos sob demanda do ar.
 - **StaticObjects**: Inicializa e centraliza instâncias globais dos principais objetos (robô, sensores, motores, logger, etc.).
 - **TinyShell**: Interpretador de linha de comando embarcado. Organiza comandos em módulos, suporta autocompletar (*auto-completion*), converte dinamicamente os tipos de argumentos de *strings* para os tipos esperados, valida a execução e lida com erros de forma segura (*try-catch*).
+
+### Comandos agendados e script de boot
+
+O shell deixou de ser só um alvo de comandos. O módulo `job` agenda linhas do próprio shell:
+
+```
+job -every 5000, sensor -position          # a cada 5 s, para sempre
+job -repeat 200, 10, kalman -state         # 10 vezes, a cada 200 ms
+job -once 3000, junkebox -play_builtin boot
+job -at WAIT, sensor -calibrate            # a cada ENTRADA em WAIT
+job -list / job -cancel <id> / job -cancel_all / job -stats
+```
+
+O comando agendado viaja como um único argumento e pode conter espaços; vírgulas dentro dele são escapadas com `\,` (o TinyShell separa argumentos em vírgulas não escapadas):
+
+```
+job -every 1000, robot -set_pwm_pair 40\, 40\, 500
+```
+
+Um arquivo de comandos no cartão roda com `job -run_file <path>`, e o arquivo `autoexec.job` na raiz roda sozinho no boot — é o que permite configurar o robô sem ninguém do outro lado. Linhas em branco e começadas por `#` são ignoradas; uma linha por passagem do `routine()`, o que impede um script longo de estourar a fila de 10 comandos.
+
+Duas recusas deliberadas: **um job não agenda jobs** e **um script não roda comandos `job`** — as duas coisas se auto-replicam sem limite e encheriam as 8 vagas em poucas passagens.
 
 ### Outras Pastas
 - **robot/**: Implementação dos estados (Setup, Wait, Calibrate, Debug, Run, Finish, Telemetry, Error).
@@ -51,12 +74,16 @@ Cada pasta em `lib/` é compilável e compreensível isoladamente. Duas regras m
 1. **Dependência entre bibliotecas só quando justificada, e sempre explícita.** A maioria dos módulos (`Flags`, `StateMachine`, `HBridge`, `Encoder`, `ArraySensor`, `SystemMonitor`, `Format`) não inclui nenhuma outra biblioteca do projeto. Onde uma dependência é real — `Logger` grava no `SDCard`; `OTAUpdater` usa `SDCard`/`Flags_out`; `USBMassStorage` usa `SDCard` — o header só faz `class Nome;` (forward declaration) e o `.cpp` inclui o header completo. Isso limita o acoplamento à implementação, não à interface pública: quem só usa a classe por referência/ponteiro nunca precisa saber o que ela inclui por baixo.
 2. **`RobotSettings` não depende de nenhum outro módulo do projeto.** É a camada mais "de baixo" da configuração em runtime (dados + persistência em `settings.conf`); quem lê valores dela (`OTAUpdater`, `ArraySensor`, `Logger`, ...) depende dela, nunca o contrário. Os valores padrão compartilhados com o `OTAUpdater` (tempos, canal do ESP-NOW, ...) vivem em `lib/OTAUpdater/OtaDefaults.h`, um header sem nenhuma dependência que os dois incluem.
 
-**Comandos de shell: cada módulo registra os próprios.** Toda classe que expõe comandos de shell implementa `register_shell_commands(TinyShell&, ...)` no seu próprio `.cpp`, recebendo por parâmetro só o que precisa (ex.: `OTAUpdater::register_shell_commands` recebe `Logger&`, `SDCard&`, `USBMassStorage&` e um `std::function<bool()>` para consultar se algum teste de DEBUG está ativo — sem precisar saber que "teste de DEBUG" é um conceito do `ROBOT`). `ROBOT::startWrappers()` (`utils/BallyRobot/BallyRobot.cpp`) é só a lista dessas chamadas de composição.
+**Comandos de shell: cada módulo registra os próprios.** Toda classe que expõe comandos de shell implementa `register_shell_commands(TinyShell&, ...)` no seu próprio `.cpp`, recebendo por parâmetro só o que precisa (ex.: `OTAUpdater::register_shell_commands` recebe `Logger&`, `SDCard&`, `USBMassStorage&` e um `std::function<bool()>` para consultar se algum teste de DEBUG está ativo — sem precisar saber que "teste de DEBUG" é um conceito do `ROBOT`). `ROBOT::startWrappers()` (`utils/BallyRobot/BallyRobotShell.cpp`) é só a lista dessas chamadas de composição.
 
-Três módulos de shell moram no próprio `ROBOT` (`registerRobotIOCommands`/`registerKalmanCommands`/`registerDebugCommands`, em `utils/BallyRobot/BallyRobot.cpp`), por não terem dono natural fora dele:
+Alguns módulos de shell moram no próprio `ROBOT` (`registerSystemCommands`/`registerRobotIOCommands`/`registerKalmanCommands`/`registerDebugCommands`, em `utils/BallyRobot/BallyRobotShell.cpp`), por não terem dono natural fora dele:
 - **`robot`** (btn/ssr/set_pwm/set_led): aciona os `Flags_in`/`Flags_out`/`Flags_pwm` que o próprio `ROBOT` compõe; não há uma biblioteca "dona" além dele.
 - **`kalman`** (estado do EKF + log periódico): o filtro (`TinyEKF`) é uma dependência externa vendorizada, sem wrapper próprio no `lib/`; quem possui a instância, o timer de amostragem e os vetores de controle/medição é o `ROBOT`.
 - **`debug`** (`test_arr_sensor`/`test_encoder`): o agendamento e o *gate* (estado DEBUG + USB ocioso) são aplicados uniformemente sobre vários sensores a partir de estado privado do `ROBOT`, não pertencem a nenhum sensor individual.
+- **`sys`** (identidade, saúde e ciclo de vida): cruza `esp_system`, `esp_ota_ops`, `BtpEndpoint`, `SystemMonitor` e `StateMachine` de uma vez; nenhuma lib isolada responde "quem sou eu e como estou".
+- **`job`** (comandos agendados + script do SD): o `JobScheduler` é propositalmente livre de TinyShell para ser testável no host, e o executor de script precisa do cartão SD e da fila de comandos, que são do `ROBOT`.
+
+Além disso, `BallyRobotShell.cpp` é **o único lugar** onde podem ser registrados comandos que operam sobre as bibliotecas compiladas pelo `env:native` (`BtpTransport`, `CommandProcessor`, `Format`, `KeyStore`, `ManifestResponder`, `RxRouter`, `StatusReporter`, `SubscriptionResponder`, `TelemetryPublisher`, `TxScheduler`): nenhuma delas pode incluir `TinyShell.h`, que não existe no build de host. Ver `CONTRIBUTING.md` e o comentário de cabeçalho do próprio arquivo.
 
 `ROBOT`/`BallyRobot` é o *composition root*: o único lugar que conhece e instancia todos os subsistemas. Ele não contém a lógica de negócio de nenhum deles.
 

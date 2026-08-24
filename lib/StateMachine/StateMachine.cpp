@@ -1,9 +1,18 @@
 #include <StateMachine.h>
 #include <cstdio>
+#include <cstring>
+
+#include "freertos/task.h"
 
 std::atomic<uint8_t> StateMachine::current_state{NONE};
+std::atomic<uint8_t> StateMachine::requested_state_{NONE};
+std::atomic<bool>    StateMachine::locked_{false};
 SemaphoreHandle_t StateMachine::transitionMutex_ = nullptr;
 StateMachine::ErrorCallback StateMachine::errorCallback_ = nullptr;
+
+StateMachine::TransitionRecord StateMachine::history_[StateMachine::kHistoryDepth] = {};
+size_t StateMachine::history_head_  = 0;
+size_t StateMachine::history_count_ = 0;
 
 StateMachine *StateMachine::arr_states[NUMBER_OF_STATES] = {
 	NULL,
@@ -35,8 +44,79 @@ const char* StateMachine::stateToString(uint8_t state) {
     }
 }
 
-bool StateMachine::verifyState(uint8_t state) const {
+bool StateMachine::verifyState(uint8_t state) {
     return (state > NONE && state < NUMBER_OF_STATES);
+}
+
+uint8_t StateMachine::stateFromString(const char* name) {
+    if (name == nullptr) return NONE;
+
+    for (uint8_t candidate = NONE + 1; candidate < NUMBER_OF_STATES; ++candidate) {
+        const char* text = stateToString(candidate);
+
+        size_t i = 0;
+        for (; text[i] != '\0' && name[i] != '\0'; ++i) {
+            char a = text[i];
+            char b = name[i];
+            if (b >= 'a' && b <= 'z') b = static_cast<char>(b - ('a' - 'A'));
+            if (a != b) break;
+        }
+        if (text[i] == '\0' && name[i] == '\0') return candidate;
+    }
+    return NONE;
+}
+
+bool StateMachine::request_state(uint8_t state) {
+    if (!verifyState(state)) return false;
+    requested_state_.store(state, std::memory_order_release);
+    return true;
+}
+
+uint8_t StateMachine::take_request() {
+    return requested_state_.exchange(NONE, std::memory_order_acq_rel);
+}
+
+uint8_t StateMachine::pending_request() {
+    return requested_state_.load(std::memory_order_acquire);
+}
+
+void StateMachine::set_locked(bool locked) {
+    locked_.store(locked, std::memory_order_release);
+}
+
+bool StateMachine::is_locked() {
+    return locked_.load(std::memory_order_acquire);
+}
+
+void StateMachine::recordTransition(uint8_t from, uint8_t to) {
+    if (from == to) return;
+
+    history_[history_head_].from      = from;
+    history_[history_head_].to        = to;
+    history_[history_head_].uptime_ms =
+        static_cast<uint32_t>(xTaskGetTickCount()) *
+        static_cast<uint32_t>(portTICK_PERIOD_MS);
+
+    history_head_ = (history_head_ + 1) % kHistoryDepth;
+    if (history_count_ < kHistoryDepth) ++history_count_;
+}
+
+size_t StateMachine::history(TransitionRecord* out, size_t max_records) {
+    if (out == nullptr || max_records == 0) return 0;
+    if (transitionMutex_ == nullptr) return 0;
+    if (xSemaphoreTake(transitionMutex_, portMAX_DELAY) != pdTRUE) return 0;
+
+    const size_t wanted = (max_records < history_count_) ? max_records
+                                                         : history_count_;
+    // Walk backwards from the newest entry, which sits one slot behind head_.
+    for (size_t i = 0; i < wanted; ++i) {
+        const size_t index =
+            (history_head_ + kHistoryDepth - 1 - i) % kHistoryDepth;
+        out[i] = history_[index];
+    }
+
+    xSemaphoreGive(transitionMutex_);
+    return wanted;
 }
 
 void StateMachine::defaultErrorCallback(const char* message) {
@@ -123,7 +203,13 @@ bool StateMachine::run(){
 
     // execute action and use returned state as the next active state
     try {
-        current_state.store(arr_states[activeState]->action(), std::memory_order_release);
+        const uint8_t nextState =
+            static_cast<uint8_t>(arr_states[activeState]->action());
+        current_state.store(nextState, std::memory_order_release);
+        // Catches the self-transitions the action functions do on their own
+        // (SETUP/CALIBRATE/TELEMETRY -> WAIT, via States::go_to), which never
+        // pass through next() below.
+        recordTransition(activeState, nextState);
     } catch(const std::exception& e) {
         xSemaphoreGive(transitionMutex_);
         // LOGGER erro
@@ -157,7 +243,10 @@ bool StateMachine::next(uint8_t buttons){
     }
 
     try {
-        current_state.store(arr_states[activeState]->next_state(buttons), std::memory_order_release);
+        const uint8_t nextState =
+            static_cast<uint8_t>(arr_states[activeState]->next_state(buttons));
+        current_state.store(nextState, std::memory_order_release);
+        recordTransition(activeState, nextState);
     } catch(const std::exception& e) {
         xSemaphoreGive(transitionMutex_);
         // LOGGER erro

@@ -46,6 +46,19 @@ public:
         static States instance; // Criado apenas uma vez com segurança
         return instance;
     }
+
+    /**
+     * @brief Register the "state" shell module (get/set/table/lock/unlock/
+     * history).
+     *
+     * Lives here rather than in the ROBOT composition root because the
+     * transition policy is this file's: transitionTable[] and
+     * process_transition() are what "state table" prints and what "state set"
+     * feeds. Called from main.cpp, which already knows both this object and
+     * the shell, so utils/BallyRobot never has to include src/robot.
+     */
+    void register_shell_commands(TinyShell& shell, Logger& logger);
+
 private:
 // constructor
     States() : 

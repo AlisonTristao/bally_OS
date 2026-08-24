@@ -40,10 +40,15 @@
 #include <RadioSeal.h>
 #include <StateMachine.h>
 #include <USBMassStorage.h>
+#include <JobScheduler.h>
 
-#ifdef ENABLE_SYSTEM_MONITOR
+// SD card root file run automatically at boot, if present. Same convention as
+// OTA_WIFI_LIST_FILE (include/Settings.h), ROBOT_SETTINGS_FILE and
+// KEY_STORE_FILE: plain text, relative to the SDCard mount point. One shell
+// command per line; blank lines and lines starting with '#' are ignored.
+#define JOB_AUTOEXEC_FILE "autoexec.job"
+
 #include <SystemMonitor.h>
-#endif
 
 /**
  * @brief Non-blocking, periodic sample scheduler. Originally built for the
@@ -171,9 +176,17 @@ public:
     std::optional<Junkebox> junkebox;
     USBMassStorage usb_storage;
     OTAUpdater ota;
-#ifdef ENABLE_SYSTEM_MONITOR
+    // Always built (the old ENABLE_SYSTEM_MONITOR build flag is gone):
+    // observability that a commented-out line in platformio.ini can switch
+    // off is observability the field build never has. To silence only the
+    // periodic report, set timers.sysmon_freq_ms = 0 -- the on-demand
+    // "sysmon"/"sys" commands keep working either way.
     SystemMonitor sysmon;
-#endif
+
+    // Time- and state-triggered shell commands (the "job" module). Public
+    // because main.cpp has no business here but BallyRobotShell.cpp registers
+    // against it; poll() is driven from routine(), see pollJobs().
+    JobScheduler jobs;
 
     // Execute scheduled DEBUG tests without blocking the state-machine task.
     void processDebug();
@@ -230,6 +243,11 @@ private:
     // array_sensor/encoder_*/motor_* above.
     std::optional<TinyEKF> EKF;
     TaskHandle_t ekf_task_handle = nullptr; 
+    // The periodic timer that drives sampleEKF() at cfg.sample_micros.
+    // Kept as a member (it used to be a local in initInterruptions(), created
+    // and then thrown away) so "settings apply timers" can esp_timer_restart()
+    // it with a new period instead of the value being frozen until reboot.
+    esp_timer_handle_t ekf_timer_handle_ = nullptr;
 
     // Signals and flags for buttons, sensors, LEDs, and motors
     Flags_in buttons;
@@ -373,6 +391,29 @@ private:
     // subsystem.
     void startWrappers();
 
+    // "link"/"telemetry"/"sec": the radio, the protocol and the keys, read
+    // from the shell. All three stay here for one reason: every library they
+    // touch (TxScheduler, RxRouter, CommandProcessor, TelemetryPublisher,
+    // KeyStore) is compiled by env:native for its unit suite, where TinyShell
+    // does not exist -- see BallyRobotShell.cpp's header comment.
+    void registerLinkCommands();
+    void registerTelemetryCommands();
+    void registerSecurityCommands();
+
+    // "job": time- and state-triggered shell commands, plus the SD script
+    // runner. Stays here — JobScheduler is deliberately TinyShell-free so it
+    // can be unit tested under env:native (see its class comment), and the
+    // script runner needs both the SD card and the command queue, which are
+    // this class's.
+    void registerJobCommands();
+
+    // "sys": machine identity, health and lifecycle (info/identity/health/
+    // uptime/tasks/memory/temp/reset_reason/boot_mode/reboot/factory_reset).
+    // Stays here — it crosses esp_system, esp_ota_ops, the BTP endpoint's
+    // identity, SystemMonitor and StateMachine at once, so no single lib can
+    // answer "who am I and how am I".
+    void registerSystemCommands();
+
     // "robot": raw actuator/virtual-input I/O (btn/ssr/set_pwm/set_led).
     // Stays here — buttons/sideSensors/leds/motors are this composition's
     // own wiring of the generic Flags_in/out/pwm primitives (lib/Flags),
@@ -421,6 +462,47 @@ private:
         uint8_t cache_slot;
         char text[btp_command::kMaxShellCommandSize + 1U];
     };
+
+    // cache_slot for a command that did not come from the radio: a job firing
+    // or a line of an SD script. Deliberately outside CommandProcessor's
+    // kCacheCapacity (16) so it can never collide with a real reservation.
+    // runShell() uses it to skip the COMMAND_RESULT step — there is no
+    // request to correlate a result with.
+    static constexpr uint8_t kLocalCommandSlot = 0xFFU;
+
+    // Enqueue one shell line from inside the firmware. Returns false when the
+    // queue is full (the caller decides whether to drop or retry — the job
+    // scheduler drops, the script runner retries) or the line does not fit.
+    bool submitLocalCommand(const char* command_line);
+    static bool submitLocalCommandStatic(void* context, const char* command_line);
+
+    // ---- SD script runner ("job -run_file", and JOB_AUTOEXEC_FILE at boot) --
+    //
+    // Deliberately NOT part of JobScheduler: that library is pure C++ so it
+    // can be unit tested, and reading a file needs the SD card.
+    //
+    // The whole file is read into script_buffer_ once and then fed one line
+    // per routine() pass. Two reasons it is not streamed: SDCard allows a
+    // single open stream at a time and Logger::flush_to_sd wants it too, and
+    // a cursor over memory cannot leave a stream open across passes. One line
+    // per pass is also what keeps a 50-line script from overflowing the
+    // 10-deep command queue — the failure this replaced.
+    static constexpr size_t kScriptMaxBytes = 2048U;
+    char     script_buffer_[kScriptMaxBytes + 1U]{};
+    size_t   script_size_ = 0U;
+    size_t   script_cursor_ = 0U;
+    uint16_t script_line_ = 0U;
+    bool     script_active_ = false;
+    bool     autoexec_done_ = false;
+
+    /** @brief Load a script file and start feeding it. @return false when the
+     *  card is unmounted, the file is missing, or it is larger than
+     *  kScriptMaxBytes. */
+    bool startScript(const char* path);
+    /** @brief Feed at most one line. Called once per routine() pass. */
+    void pollScript();
+    /** @brief Drive JobScheduler from routine(); once per pass. */
+    void pollJobs();
 
     static constexpr size_t kCommandQueueLength = 10U;
     QueueHandle_t receivedDataQueue = nullptr;
@@ -472,6 +554,27 @@ private:
     static constexpr uint64_t kStatusPeriodUs = 1000000ULL;
     uint64_t next_status_us_ = 0U;
     void publishStatus();
+
+    // Zero point for "link -delta".
+    //
+    // The counters themselves are never reset, and there is deliberately no
+    // reset_stats() on TxScheduler/RxRouter/CommandProcessor: commands.md
+    // section 5 defines the STATUS counters as monotonic since boot, so
+    // zeroing them would make any consumer computing a delta see a negative
+    // one. A snapshot on this side gives the bench the same "since I started
+    // watching" view without touching the wire contract.
+    struct LinkStatsBaseline {
+        bool     set = false;
+        uint32_t uptime_ms = 0U;
+        uint64_t frames_rx = 0U;
+        uint64_t crc_errors = 0U;
+        uint64_t decode_errors = 0U;
+        TxScheduler::Stats       tx{};
+        RxRouter::Stats          rx{};
+        CommandProcessor::Stats  command{};
+    };
+    LinkStatsBaseline link_baseline_{};
+    void captureLinkBaseline();
 
     // Link counters for STATUS section 5. Written only by the ESP-NOW
     // receive callback (single writer) and read by publishStatus(); relaxed

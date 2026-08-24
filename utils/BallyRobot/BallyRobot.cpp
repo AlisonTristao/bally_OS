@@ -891,248 +891,162 @@ void ROBOT::runEKF(void *param) {
     }
 }
 
-void ROBOT::startWrappers() {
-    // Modules owned by ROBOT itself — see the declarations in BallyRobot.h
-    // for why each one stays here instead of moving to a subsystem lib.
-    registerRobotIOCommands();
-    registerKalmanCommands();
-    registerDebugCommands();
 
-    // Every other module is owned by the subsystem it operates on. "sensor"
-    // and "storage" are each split across two owners below (array sensor vs.
-    // encoders; SD file management vs. USB ownership) — both register into
-    // the same TinyShell module name, which TinyShell allows.
-    array_sensor->register_shell_commands(shell, logger, settings);
-    Encoder::register_shell_commands(shell, logger, *encoder_left, *encoder_right);
-    junkebox->register_shell_commands(shell, logger);
-
-    usb_storage.register_shell_commands(
-        shell, logger, sd_card,
-        [this]() { return anyDebugTestActive(); },
-        [this]() { sendNextShellOutputDirect(); });
-    sd_card.register_shell_commands(shell, logger);
-
-    logger.register_shell_commands(
-        shell, sd_card, settings,
-        [this]() { sendNextShellOutputDirect(); });
-
-    ota.register_shell_commands(
-        shell, logger, sd_card, usb_storage,
-        [this]() { return anyDebugTestActive(); },
-        [this]() { sendNextShellOutputDirect(); });
-
-    // "set"/"reset"/"reset_all" only change the in-memory copy; "save"
-    // persists it, and every change needs a reboot to actually take effect
-    // (pins, timers and EKF init are all applied once, at boot).
-    settings.register_shell_commands(
-        shell, logger, sd_card,
-        [this]() { sendNextShellOutputDirect(); });
-
-#ifdef ENABLE_SYSTEM_MONITOR
-    sysmon.register_shell_commands(shell, logger);
-#endif
+// Snapshot for "link -delta". Deliberately not a reset: see the comment on
+// LinkStatsBaseline in BallyRobot.h for why the counters themselves must stay
+// monotonic since boot.
+void ROBOT::captureLinkBaseline() {
+    link_baseline_.set = true;
+    link_baseline_.uptime_ms =
+        static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
+    link_baseline_.frames_rx = link_frames_rx_.load(std::memory_order_relaxed);
+    link_baseline_.crc_errors = link_crc_errors_.load(std::memory_order_relaxed);
+    link_baseline_.decode_errors =
+        link_decode_errors_.load(std::memory_order_relaxed);
+    link_baseline_.tx = tx_scheduler.stats();
+    link_baseline_.rx = rx_router_.stats();
+    link_baseline_.command = command_processor.stats();
 }
 
-void ROBOT::registerRobotIOCommands() {
-    // Raw actuator/virtual-input I/O: motors, LEDs, virtual button/side-sensor triggers.
-    shell.create_module("robot", "Raw actuator and virtual-input commands");
+// ==============================================================================
+// LOCAL COMMANDS, JOBS AND SD SCRIPTS
+// ==============================================================================
 
-    shell.add([](uint8_t btn_idx) -> uint8_t {
-        // set the flag of the button with the given index
-        if (btn_idx >= Flags_in::MAX_FLAGS)
-            return RESULT_ERROR;
-        instance_->buttons.setFlag(btn_idx);
-        return RESULT_OK;
-    }, "btn", "Virtually trigger a button", "robot");
+bool ROBOT::submitLocalCommand(const char* command_line) {
+    if (command_line == nullptr || command_line[0] == '\0') return false;
+    if (receivedDataQueue == nullptr) return false;
 
-    shell.add([](uint8_t ssr_idx) -> uint8_t {
-        // set the flag of the side sensor with the given index
-        if (ssr_idx >= Flags_in::MAX_FLAGS)
-            return RESULT_ERROR;
-        instance_->sideSensors.setFlag(ssr_idx);
-        return RESULT_OK;
-    }, "ssr", "Virtually trigger a side sensor", "robot");
+    const size_t length = std::strlen(command_line);
+    if (length > btp_command::kMaxShellCommandSize) return false;
 
-    shell.add([](uint8_t led_idx, int8_t pwm_value, uint32_t time) -> uint8_t {
-        // set the PWM value for the motor with the given index (-100..100)
-        if (led_idx >= Flags_in::MAX_FLAGS)
-            return RESULT_ERROR;
-        instance_->motors.setValue(led_idx, pwm_value, time);
-        return RESULT_OK;
-    }, "set_pwm", "Set PWM value for a motor (0 for left, 1 for right)", "robot");
+    QueuedCommand command{};
+    command.cache_slot = kLocalCommandSlot;
+    std::memcpy(command.text, command_line, length);
+    command.text[length] = '\0';
 
-    shell.add([](int8_t left_pwm, int8_t right_pwm, uint32_t time) -> uint8_t {
-        instance_->motors.setValue(MOTOR_LEFT_idx, left_pwm, time);
-        instance_->motors.setValue(MOTOR_RIGHT_idx, right_pwm, time);
-        return RESULT_OK;
-    }, "set_pwm_pair", "Set PWM values for both motors at once", "robot");
-
-    shell.add([](uint8_t pin, uint32_t time) -> uint8_t {
-        instance_->leds.setFlag(pin, time);
-        return RESULT_OK;
-    }, "set_led", "turn on a LED", "robot");
-
-    // Not a Flags_pwm command like the ones above: the buzzer needs a
-    // frequency in Hz, not a -100..100 duty percentage, so it doesn't fit
-    // that struct's semantics. Junkebox::play_tone() gives the same
-    // "one-shot, auto-stops after `time`" safety directly instead.
-    shell.add([](uint32_t freq_hz, uint32_t time) -> uint8_t {
-        if (!instance_->junkebox->play_tone(static_cast<uint16_t>(freq_hz), time)) {
-            ROBOT::logger.insert_log(logType::ERRO, "Junkebox is not initialized yet");
-            return RESULT_ERROR;
-        }
-        return RESULT_OK;
-    }, "test_buzzer", "Play a raw tone on the buzzer, bypassing note parsing: freq_hz,duration_ms", "robot");
+    // Never block: this runs on the routine task, which also drains telemetry
+    // and pumps the TX scheduler. A full queue is a "no", not a wait.
+    return xQueueSend(receivedDataQueue, &command, 0) == pdTRUE;
 }
 
-void ROBOT::registerKalmanCommands() {
-    // EKF (Kalman) state and periodic tuning log. Unlike the "debug" module
-    // below, this is available in any state (including RUN) since tuning
-    // the filter means watching it while the robot is actually driving.
-    shell.create_module("kalman", "EKF state and periodic tuning log");
-
-    shell.add([]() -> uint8_t {
-        ROBOT::logger.insert_logf(logType::INFO, "EKF state: v=%.4f w=%.4f b=%.4f",
-                                  instance_->EKF->get_state(0),
-                                  instance_->EKF->get_state(1),
-                                  instance_->EKF->get_state(2));
-        return RESULT_OK;
-    }, "state", "Read the current EKF state (v, w, gyro bias)", "kalman");
-
-    shell.add([](uint32_t interval_ms) -> uint8_t {
-        if (interval_ms == 0 ||
-            !instance_->kalman_log_test_.schedule(UINT32_MAX, interval_ms)) {
-            ROBOT::logger.insert_log(logType::ERRO,
-                                     "Invalid interval; kalman log not started");
-            return RESULT_ERROR;
-        }
-
-        ROBOT::logger.insert_logf(logType::INFO,
-                                  "Kalman log started: every %u ms", interval_ms);
-        return RESULT_OK;
-    }, "start_log", "Start periodic EKF state + measurement logging: interval_ms", "kalman");
-
-    shell.add([]() -> uint8_t {
-        instance_->kalman_log_test_.cancel();
-        ROBOT::logger.insert_log(logType::INFO, "Kalman log stopped");
-        return RESULT_OK;
-    }, "stop_log", "Stop periodic EKF logging", "kalman");
+bool ROBOT::submitLocalCommandStatic(void* context, const char* command_line) {
+    ROBOT* self = static_cast<ROBOT*>(context);
+    if (self == nullptr) return false;
+    return self->submitLocalCommand(command_line);
 }
 
-void ROBOT::registerDebugCommands() {
-    // DEBUG sensor tests: each schedules periodic, non-blocking sampling
-    // (see ScheduledDebugTest/processDebug). Add one command per sensor
-    // here — IMU and H-bridge current are planned next.
-    shell.create_module("debug", "Safe non-blocking sensor tests");
-
-    shell.add([](uint32_t samples, uint32_t interval_ms) -> uint8_t {
-        if (!instance_->scheduleDebugTest(instance_->array_sensor_test_,
-                                          samples, interval_ms)) {
-            ROBOT::logger.insert_log(
-                logType::ERRO,
-                "Array test requires DEBUG state, USB inactive and samples > 0");
-            return RESULT_ERROR;
-        }
-
-        ROBOT::logger.insert_logf(
-            logType::INFO,
-            "Array sensor test scheduled: %u samples every %u ms",
-            samples, interval_ms);
-        return RESULT_OK;
-    }, "test_arr_sensor", "Print sensor array: samples,interval_ms", "debug");
-
-    shell.add([](uint32_t samples, uint32_t interval_ms) -> uint8_t {
-        if (!instance_->scheduleDebugTest(instance_->encoder_test_,
-                                          samples, interval_ms)) {
-            ROBOT::logger.insert_log(
-                logType::ERRO,
-                "Encoder test requires DEBUG state, USB inactive and samples > 0");
-            return RESULT_ERROR;
-        }
-
-        ROBOT::logger.insert_logf(
-            logType::INFO,
-            "Encoder test scheduled: %u samples every %u ms",
-            samples, interval_ms);
-        return RESULT_OK;
-    }, "test_encoder", "Print left/right encoder counts: samples,interval_ms", "debug");
-
-    shell.add([](uint32_t samples, uint32_t interval_ms) -> uint8_t {
-        // Same reasoning as sampleEKF()'s imu_ready_ guard: without it, a
-        // sensor that never answered at boot would retry (and block on) an
-        // I2C timeout every sample instead of failing once, up front.
-        if (!instance_->imu_ready_) {
-            ROBOT::logger.insert_log(logType::ERRO,
-                                     "IMU not ready; nothing was detected at boot");
-            return RESULT_ERROR;
-        }
-
-        if (!instance_->scheduleDebugTest(instance_->imu_test_,
-                                          samples, interval_ms)) {
-            ROBOT::logger.insert_log(
-                logType::ERRO,
-                "IMU test requires DEBUG state, USB inactive and samples > 0");
-            return RESULT_ERROR;
-        }
-
-        ROBOT::logger.insert_logf(
-            logType::INFO,
-            "IMU test scheduled: %u samples every %u ms",
-            samples, interval_ms);
-        return RESULT_OK;
-    }, "test_imu", "Print IMU accel/gyro/temp readings: samples,interval_ms", "debug");
-
-    shell.add([]() -> uint8_t {
-        // Reuses the bus imu->begin() already opened on cfg.sda_pin/scl_pin
-        // instead of opening a second i2c_master_bus on the same pins (see
-        // ICM42688::scanBus()'s comment) -- so this works on demand, without
-        // a reboot, even when imu_ready_ is false.
-        if (!instance_->imu->busOpen()) {
-            ROBOT::logger.insert_log(
-                logType::ERRO,
-                "IMU I2C bus never opened (begin() failed before that point); nothing to scan");
-            return RESULT_ERROR;
-        }
-
-        std::string found;
-        const bool  any_found = instance_->imu->scanBus(found);
-        ROBOT::logger.insert_logf(
-            logType::INFO,
-            "I2C scan (IMU bus): %s | WHO_AM_I=0x%02X (expect 0x47)",
-            any_found ? found.c_str() : "no devices found",
-            instance_->imu->whoAmI());
-        return RESULT_OK;
-    }, "scan_i2c", "Probe the IMU I2C bus and read WHO_AM_I; works even if the IMU wasn't detected at boot", "debug");
-
-    shell.add([](uint32_t samples, uint32_t interval_ms) -> uint8_t {
-        // Same reuse-the-existing-bus reasoning as scan_i2c: no imu_ready_
-        // gate here on purpose -- the whole point is to keep re-checking
-        // even after a failed boot detection, since the bus can (and does,
-        // on a noisy/pull-up-less setup) recover a moment later.
-        if (!instance_->imu->busOpen()) {
-            ROBOT::logger.insert_log(
-                logType::ERRO,
-                "IMU I2C bus never opened (begin() failed before that point); nothing to check");
-            return RESULT_ERROR;
-        }
-
-        instance_->imu_i2c_ok_count_   = 0;
-        instance_->imu_i2c_fail_count_ = 0;
-        if (!instance_->scheduleDebugTest(instance_->imu_i2c_test_,
-                                          samples, interval_ms)) {
-            ROBOT::logger.insert_log(
-                logType::ERRO,
-                "I2C stability test requires DEBUG state, USB inactive and samples > 0");
-            return RESULT_ERROR;
-        }
-
-        ROBOT::logger.insert_logf(
-            logType::INFO,
-            "I2C stability test scheduled: %u checks every %u ms",
-            samples, interval_ms);
-        return RESULT_OK;
-    }, "test_i2c", "Re-check WHO_AM_I on a timer and tally ok/fail, to watch bus stability live: samples,interval_ms", "debug");
+void ROBOT::pollJobs() {
+    jobs.poll(static_cast<uint64_t>(esp_timer_get_time() / 1000ULL),
+              StateMachine::current_state.load(std::memory_order_acquire));
 }
+
+bool ROBOT::startScript(const char* path) {
+    if (path == nullptr || path[0] == '\0') return false;
+    if (!sd_card.is_mounted()) return false;
+    if (!sd_card.file_exists(path)) return false;
+
+    size_t read_bytes = 0;
+    if (!sd_card.read_file(path, script_buffer_, kScriptMaxBytes, &read_bytes)) {
+        return false;
+    }
+
+    // read_file stops at capacity without saying whether more was there, so a
+    // file at exactly the cap is reported as truncated too. Erring toward the
+    // warning is right: silently running the first 2 KB of a longer script is
+    // the worse failure.
+    if (read_bytes >= kScriptMaxBytes) {
+        logger.insert_logf(logType::WARN,
+                           "script %s reached the %u byte limit; it may be truncated",
+                           path, static_cast<unsigned>(kScriptMaxBytes));
+    }
+
+    script_buffer_[read_bytes] = '\0';
+    script_size_   = read_bytes;
+    script_cursor_ = 0U;
+    script_line_   = 0U;
+    script_active_ = true;
+    return true;
+}
+
+void ROBOT::pollScript() {
+    if (!script_active_) return;
+
+    // Skip blank lines and comments without spending a pass on each: only a
+    // line that actually produces a command costs one routine() iteration.
+    while (script_cursor_ < script_size_) {
+        const size_t start = script_cursor_;
+
+        size_t end = start;
+        while (end < script_size_ && script_buffer_[end] != '\n' &&
+               script_buffer_[end] != '\r') {
+            ++end;
+        }
+
+        // Borrow the buffer for one line: terminate in place, then restore the
+        // separator so the cursor arithmetic below stays valid.
+        const char separator = script_buffer_[end];
+        script_buffer_[end] = '\0';
+
+        char* line = &script_buffer_[start];
+        while (*line == ' ' || *line == '\t') ++line;
+
+        char* tail = &script_buffer_[end];
+        while (tail > line && (tail[-1] == ' ' || tail[-1] == '\t')) {
+            *--tail = '\0';
+        }
+
+        const bool runnable = (line[0] != '\0') && (line[0] != '#');
+        bool submitted = false;
+        bool queue_full = false;
+
+        if (runnable) {
+            if (JobScheduler::is_job_command(line)) {
+                // Same reason a job may not schedule jobs: a script that runs
+                // scripts (or fills the job table) has no bound.
+                logger.insert_logf(logType::WARN,
+                                   "script line %u ignored: a script may not run job commands",
+                                   static_cast<unsigned>(script_line_ + 1U));
+            } else if (submitLocalCommand(line)) {
+                submitted = true;
+            } else {
+                queue_full = true;
+            }
+        }
+
+        script_buffer_[end] = separator;
+
+        if (queue_full) {
+            // Unlike a job, a script line is retried: a boot script that runs
+            // three quarters of the way is worse than one that takes a few
+            // extra passes. The cursor is left where it is.
+            return;
+        }
+
+        ++script_line_;
+        script_cursor_ = end;
+        // Consume the line separator, CRLF included.
+        if (script_cursor_ < script_size_ && script_buffer_[script_cursor_] == '\r') {
+            ++script_cursor_;
+        }
+        if (script_cursor_ < script_size_ && script_buffer_[script_cursor_] == '\n') {
+            ++script_cursor_;
+        }
+
+        if (submitted) return;  // one command per pass
+    }
+
+    script_active_ = false;
+    logger.insert_logf(logType::INFO, "script finished lines=%u",
+                       static_cast<unsigned>(script_line_));
+}
+
+// ==============================================================================
+// SHELL REGISTRATION
+// ==============================================================================
+// startWrappers(), registerSystemCommands(), registerRobotIOCommands(),
+// registerKalmanCommands() and registerDebugCommands() live in
+// BallyRobotShell.cpp -- same class, separate translation unit. See the
+// header comment there for why the shell side is deliberately ESP-IDF-only.
 
 // ==============================================================================
 // MAIN TASKS & INITIALIZATION
@@ -1244,10 +1158,12 @@ void ROBOT::initInterruptions(void *param){
         .skip_unhandled_events = false
     };
 
-    // set the timer to trigger the EKF at the defined sample rate
-    esp_timer_handle_t timer;
-    esp_timer_create(&timer_args, &timer);
-    esp_timer_start_periodic(timer, cfg.sample_micros);
+    // set the timer to trigger the EKF at the defined sample rate. The handle
+    // is stored on the instance, not dropped on this task's stack: this task
+    // ends with vTaskDelete(NULL) a few lines below, and "settings apply
+    // timers" needs the handle later to change the period without a reboot.
+    esp_timer_create(&timer_args, &instance_->ekf_timer_handle_);
+    esp_timer_start_periodic(instance_->ekf_timer_handle_, cfg.sample_micros);
 
     vTaskDelete(NULL);
 }
@@ -1276,6 +1192,12 @@ void ROBOT::runShell(void *param) {
         // cache and never reaches TinyShell again.
         const uint8_t shell_status =
             instance_->shell.run_command_line(received_command.text);
+
+        // A job firing or a script line has no COMMAND_REQUEST behind it, so
+        // there is nothing to correlate a COMMAND_RESULT with and no cache
+        // entry to complete. Its output still goes out as LOG like any other.
+        if (received_command.cache_slot == kLocalCommandSlot) continue;
+
         CommandProcessor::ResultView result{};
         if (instance_->command_processor.complete(
                 received_command.cache_slot, shell_status,
@@ -1313,6 +1235,16 @@ void ROBOT::routine(void *param){
         ROBOT::logger.insert_log(logType::INFO, "Parallel processing initialized");
     #endif
 
+    // The boot script, if the card has one. This is what makes the robot
+    // configurable with nobody on the other end: write JOB_AUTOEXEC_FILE over
+    // USB MSC or with "storage -write", reboot, and it applies its own policy.
+    if (!instance_->autoexec_done_) {
+        instance_->autoexec_done_ = true;
+        if (instance_->startScript(JOB_AUTOEXEC_FILE)) {
+            ROBOT::logger.insert_logf(logType::INFO, "running %s", JOB_AUTOEXEC_FILE);
+        }
+    }
+
     // excute the loop to menage the robot
     while(true) {
         // OTA holds the radio on the target Wi-Fi's channel, so ESP-NOW
@@ -1336,6 +1268,10 @@ void ROBOT::routine(void *param){
         instance_->setOutputs();                    // set the output - leds, pwm...
         instance_->checkStateMachine();             // cheg the next state of the state machine
         instance_->updateSoundFeedback();           // react to the changes above with a Junkebox sound
+        // After checkStateMachine(), so a job attached to a state sees the
+        // entry on the same pass it happens rather than one pass later.
+        instance_->pollJobs();                      // fire due time/state jobs
+        instance_->pollScript();                    // feed at most one script line
         vTaskDelay(WDOG_TIMEOUT_TK); // delay for wathdog timer and to allow other tasks to run
     }
 }
@@ -1801,13 +1737,11 @@ bool ROBOT::init() {
     // sorted out if the one-shot boot log is still wanted.
     imu.emplace(cfg.sda_pin, cfg.scl_pin, IMU_I2C_ADDRESS, IMU_I2C_CLOCK_HZ);
 
-#ifdef ENABLE_SYSTEM_MONITOR
     sysmon.begin();
     sysmon.setOutputCallback([](const std::string& data) {
         if (!data.empty()) ROBOT::logger.insert_log(logType::DEBG, data.c_str());
     });
     sysmon.setLoggerCallback([]() { return ROBOT::logger.get_write_pct(); });
-#endif
 
     receivedDataQueue = xQueueCreateStatic(
         kCommandQueueLength, sizeof(QueuedCommand),
@@ -1816,6 +1750,11 @@ bool ROBOT::init() {
         ROBOT::logger.insert_log(logType::ERRO, "Failed to create receive queue");
         return false;
     }
+
+    // Bind the job executor as soon as the queue it submits into exists, and
+    // before startWrappers() can register the "job" commands: otherwise a
+    // command arriving in that window would be refused with NotConfigured.
+    jobs.configure(&ROBOT::submitLocalCommandStatic, this);
 
     // rx_router_ wires its own slots and storage in its constructor, so the
     // only thing that can be wrong here is that wiring, which is a

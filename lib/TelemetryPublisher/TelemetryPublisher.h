@@ -13,6 +13,19 @@ class TelemetryPublisher {
 public:
     static constexpr std::uint16_t kProtocolTestTopicId = 0x0001U;
     static constexpr std::uint16_t kRobotStateTopicId = 0x0002U;
+
+    // Reserved subscriber identity for a subscription created ON the robot
+    // (the "telemetry -sub" shell command) rather than by a SUBSCRIBE arriving
+    // over the radio.
+    //
+    // Subscriptions are keyed by (source_id, boot_id, topic_id), and that pair
+    // normally comes from the BTP envelope. A shell caller has no envelope, so
+    // it needs an identity that no real peer can present -- source_id derives
+    // from a factory MAC and is never zero, which is what makes zero safe to
+    // claim here. Without it, the dongle's own drop_session() on reconnect
+    // would take the bench's subscriptions down along with its own.
+    static constexpr std::uint32_t kLocalSubscriberSourceId = 0U;
+    static constexpr std::uint32_t kLocalSubscriberBootId = 0U;
     static constexpr std::uint16_t kSchemaVersion = 1U;
     static constexpr std::size_t kQueueCapacity = 16U;
     static constexpr std::size_t kProtocolTestPayloadSize = 10U;

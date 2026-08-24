@@ -31,11 +31,9 @@
 ROBOT& robot = ROBOT::getInstance();
 States& states = States::getInstance();
 
-#ifdef ENABLE_SYSTEM_MONITOR
 static StackType_t xSystemMonitorStack[M4KB];
 static StaticTask_t xSystemMonitorBuffer;
 static void init_system_monitor();
-#endif
 
 static StackType_t xRoutineStack[M8KB];
 static StaticTask_t xRoutineBuffer;
@@ -73,10 +71,9 @@ extern "C" void app_main(void) {
     // start the FreeRTOS tasks for the robot's operation
     start_freertos_tasks();
 
-    // initialize the system monitor if enabled
-    #ifdef ENABLE_SYSTEM_MONITOR
+    // System health reporting. Always started; timers.sysmon_freq_ms == 0
+    // silences the periodic report without taking the on-demand commands away.
     init_system_monitor();
-    #endif
 
     vTaskDelete(NULL); // goodbye main app
 }
@@ -113,6 +110,13 @@ static void setup_system_callbacks() {
         }
     });
 
+    // The "state" shell module. Registered from here, not from
+    // ROBOT::startWrappers(), because the transition policy lives in
+    // src/robot/StatesManager.cpp -- main.cpp is the one place that already
+    // knows both the States singleton and the robot's shell, so the
+    // composition root never has to include application state policy.
+    states.register_shell_commands(robot.shell, robot.logger);
+
     // Start the state machine in SETUP, unless robot.init() already jumped
     // straight into DEBUG because button 1/2 was held at boot (see
     // ROBOT::bootState()).
@@ -145,20 +149,31 @@ static void start_freertos_tasks() {
     ESP_LOGI("ROBOT_MAIN", "All FreeRTOS tasks started successfully");
 }
 
-#ifdef ENABLE_SYSTEM_MONITOR
 static void init_system_monitor() {
     // robot.sysmon is already configured (begin()/callbacks) by robot.init();
     // this task only drives its periodic report.
+    //
+    // sysmon_freq_ms is read every pass, not captured: "settings set timers
+    // sysmon_freq_ms 0" silences the report from the next pass on, and any
+    // non-zero value resumes it, with no reboot and without disturbing the
+    // on-demand sysmon/sys commands. The idle poll below is what makes 0 mean
+    // "quiet" instead of "spin at full speed on vTaskDelay(0)".
+    static constexpr uint32_t kDisabledPollMs = 1000;
+
     xTaskCreateStaticPinnedToCore(
         [](void* param) {
             (void)param;
             while (true) {
+                const uint32_t period_ms = robot.settings.data().sysmon_freq_ms;
+                if (period_ms == 0) {
+                    vTaskDelay(pdMS_TO_TICKS(kDisabledPollMs));
+                    continue;
+                }
                 robot.sysmon.update();
                 robot.sysmon.report();
-                vTaskDelay(pdMS_TO_TICKS(robot.settings.data().sysmon_freq_ms));
+                vTaskDelay(pdMS_TO_TICKS(period_ms));
             }
         }, "system_monitor", M4KB, NULL, 1, xSystemMonitorStack, &xSystemMonitorBuffer, PRO_CPU_NUM
     );
-    ESP_LOGI("ROBOT_MAIN", "System monitor initialized successfully");
+    ESP_LOGI("ROBOT_MAIN", "System monitor task started");
 }
-#endif

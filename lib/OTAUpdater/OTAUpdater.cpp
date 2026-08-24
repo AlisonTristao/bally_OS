@@ -828,6 +828,17 @@ void OTAUpdater::register_shell_commands(TinyShell& shell, Logger& logger, SDCar
     }, "status", "Show the current OTA update sub-mode status", "ota");
 
     shell.add([&logger, mark_direct_output]() -> uint8_t {
+        // Kept as an alias of "sys reboot", which is now the canonical name
+        // (a restart is not an OTA concept). The dongle and TraceView already
+        // depend on THIS name, so it does not go away.
+        //
+        // The deferred-restart timer below is duplicated in
+        // utils/BallyRobot/BallyRobotShell.cpp (scheduleRestart) rather than
+        // shared: OTAUpdater must not depend on the ROBOT composition root
+        // (CONTRIBUTING.md, "Nova biblioteca" item 3), and a new library for
+        // twelve lines of esp_timer boilerplate would cost more than it saves.
+        // If one side changes, change the other.
+        //
         // A successful upload sets the new image as the boot partition but
         // deliberately does not reboot on its own (see
         // OTAUpdater::finish_update) — this is the remote trigger for that,
@@ -847,7 +858,7 @@ void OTAUpdater::register_shell_commands(TinyShell& shell, Logger& logger, SDCar
         esp_timer_start_once(reboot_timer, 500000);
 
         return RESULT_OK;
-    }, "reboot", "Restart the robot now (e.g. to boot into a staged OTA update)", "ota");
+    }, "reboot", "Alias of 'sys reboot': restart the robot now", "ota");
 
     shell.add([this, &logger](std::string ssid, std::string password) -> uint8_t {
         if (!add_network(ssid.c_str(), password.c_str())) {
