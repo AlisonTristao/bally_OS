@@ -397,9 +397,12 @@ private:
     // set the outputs flags (leds and motors) to 0 after the time limit is reached
     void setOutputs();
 
-    // get the speed of the robot based on the encoders values
-    float getSpeedFromEncoders();
-    float getOmegaFromEncoders();
+    // get the linear/angular speed of the robot based on the encoders
+    // values. Reads each encoder's getCountDiff() exactly once -- it is a
+    // stateful "diff since last call" getter (see Encoder::getCountDiff()),
+    // so calling it a second time here (once for linear, once for angular)
+    // would starve the second reading of almost every pulse.
+    void getVelocitiesFromEncoders(float& linear_speed, float& angular_speed);
 
     // Callbacks for ESP-NOW 
     static void handleReceiveStatic(const esp_now_recv_info_t *recv_info, const uint8_t *incomingData, int len);

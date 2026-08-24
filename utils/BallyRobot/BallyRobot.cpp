@@ -825,18 +825,15 @@ void ROBOT::initEKF() {
     EKF.emplace(x0, P0, Q, R);
 }
 
-float ROBOT::getSpeedFromEncoders() {
+void ROBOT::getVelocitiesFromEncoders(float& linear_speed, float& angular_speed) {
     const SettingsData& cfg = settings.data();
-    float left_speed = encoder_left->getCountDiff()/cfg.encoder_ppr * cfg.wheel_radius * 2.0f * PI * settings.freq_ekf();
-    float right_speed = encoder_right->getCountDiff()/cfg.encoder_ppr * cfg.wheel_radius * 2.0f * PI * settings.freq_ekf();
-    return (left_speed + right_speed) / 2.0f;
-}
-
-float ROBOT::getOmegaFromEncoders() {
-    const SettingsData& cfg = settings.data();
-    float left_speed = encoder_left->getCountDiff()/cfg.encoder_ppr * cfg.wheel_radius * 2.0f * PI * settings.freq_ekf();
-    float right_speed = encoder_right->getCountDiff()/cfg.encoder_ppr * cfg.wheel_radius * 2.0f * PI * settings.freq_ekf();
-    return (right_speed - left_speed) / EKF_WHEEL_BASE;
+    // getCountDiff() consumes the delta since its last call -- read each
+    // encoder exactly once here and derive both speeds from that same
+    // reading (see the declaration comment in BallyRobot.h).
+    const float left_speed = encoder_left->getCountDiff()/cfg.encoder_ppr * cfg.wheel_radius * 2.0f * PI * settings.freq_ekf();
+    const float right_speed = encoder_right->getCountDiff()/cfg.encoder_ppr * cfg.wheel_radius * 2.0f * PI * settings.freq_ekf();
+    linear_speed = (left_speed + right_speed) / 2.0f;
+    angular_speed = (right_speed - left_speed) / EKF_WHEEL_BASE;
 }
 
 void ROBOT::sampleEKF(void *param) {
@@ -844,8 +841,8 @@ void ROBOT::sampleEKF(void *param) {
     instance_->control_input[0] = static_cast<float>(instance_->motors.getValue(MOTOR_RIGHT_idx));
     instance_->control_input[1] = static_cast<float>(instance_->motors.getValue(MOTOR_LEFT_idx));
 
-    instance_->measurement[0] = instance_->getSpeedFromEncoders();
-    instance_->measurement[1] = instance_->getOmegaFromEncoders();
+    instance_->getVelocitiesFromEncoders(instance_->measurement[0],
+                                         instance_->measurement[1]);
 
     // Skipped while the IMU never answered at boot (imu_ready_ == false):
     // retrying an I2C transaction against a disconnected sensor here would
