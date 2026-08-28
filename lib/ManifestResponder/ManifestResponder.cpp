@@ -192,9 +192,12 @@ std::size_t build_manifest_data(const btp::Header& request_header, std::uint8_t 
 
 }  // namespace
 
-void ManifestResponder::configure(BtpEndpoint& endpoint, const std::uint8_t uuid[16]) noexcept {
+void ManifestResponder::configure(BtpEndpoint& endpoint, const std::uint8_t uuid[16], BtpSealFn seal,
+                                  void* seal_context) noexcept {
     endpoint_ = &endpoint;
     if (uuid != nullptr) std::memcpy(uuid_, uuid, 16U);
+    seal_ = seal;
+    seal_context_ = seal_context;
 }
 
 bool ManifestResponder::handle_request(const btp::Header& request_header, btp::ByteView payload,
@@ -235,5 +238,5 @@ bool ManifestResponder::handle_request(const btp::Header& request_header, btp::B
     if (responseSize == 0U) return false;
 
     return endpoint_->send_logical(btp::MessageType::Control, kManifestDataObjectId, responsePayload, responseSize,
-                                   timestamp_us);
+                                   timestamp_us, seal_, seal_context_);
 }

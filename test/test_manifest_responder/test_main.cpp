@@ -473,6 +473,57 @@ void test_request_with_stale_boot_id_is_rejected() {
 // answer with NOT_FOUND -- the caller (radio rx path) must count it as a
 // drop, and nothing goes out over the endpoint.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Topico 31.3: MANIFEST_DATA rides channel C like every other CONTROL reply
+// this robot originates toward the dongle, so it must seal with whichever
+// function configure() was given, exactly like STATUS already does
+// (StatusReporter) -- one key, no per-channel choice, unlike
+// SubscriptionResponder's SUBSCRIBE_RESULT/UNSUBSCRIBE_RESULT. Without this,
+// bally_dongle's own reply to its own manifest-priming request never
+// authenticates under key L, so ManifestCache can never trust it (see
+// bally_channels.h's dongle_consumes comment on the topico 31.3 gap this
+// closes).
+// ---------------------------------------------------------------------------
+bool fake_seal(void*, const btp::Header&, std::uint16_t payload_size,
+              const std::uint8_t* plaintext, std::uint8_t* out) {
+    std::memcpy(out, plaintext, payload_size);
+    std::memset(out + payload_size, 0x11, BtpEndpoint::kAeadTagSize);
+    return true;
+}
+
+void test_reply_is_sealed_when_configured_with_a_seal_function() {
+    BtpEndpoint endpoint;
+    ManifestResponder responder;
+    TEST_ASSERT_TRUE(endpoint.configure(kLocalSourceId, kLocalBootId));
+    endpoint.set_send_callback(capture_send);
+    responder.configure(endpoint, kUuid, fake_seal, nullptr);
+
+    // NOT_MODIFIED (known revision) keeps this to one fragment, same as
+    // test_known_revision_returns_not_modified_with_no_topics -- the AEAD tag
+    // send_logical appends sits at the end of the sealed logical payload
+    // before fragmentation, so checking it is only simple to reason about
+    // when there is exactly one fragment.
+    sent_count = 0U;
+    const auto request_payload =
+        manifest_request_payload(0U, 0U, ManifestResponder::kConfigRevision);
+    const auto header = manifest_request_header(kRequesterSourceId, kRequesterBootId,
+                                                kRequestSequence);
+    const btp::ByteView view{request_payload.data(), request_payload.size()};
+    TEST_ASSERT_TRUE(responder.handle_request(header, view, 100000U));
+    TEST_ASSERT_EQUAL_UINT32(1U, sent_count);
+
+    btp::DecodedFrame decoded{};
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<std::uint8_t>(btp::Error::Ok),
+        static_cast<std::uint8_t>(btp::decode(
+            sent_frames[0], sent_sizes[0], btp::TransportProfile::EspNow, &decoded)));
+    TEST_ASSERT_TRUE((decoded.header.flags & btp::kFlagEncrypted) != 0U);
+    // 0x11 is fake_seal's tag marker -- proves handle_request actually routed
+    // the payload through the configured seal function instead of sending it
+    // in the clear, which is what this robot did before topico 31.3.
+    TEST_ASSERT_EQUAL_HEX8(0x11U, decoded.payload.data[decoded.payload.size - 1U]);
+}
+
 void test_short_payload_is_rejected_without_sending() {
     BtpEndpoint endpoint;
     ManifestResponder responder;
@@ -502,6 +553,7 @@ int main(int, char**) {
     RUN_TEST(test_known_revision_returns_not_modified_with_no_topics);
     RUN_TEST(test_request_for_different_source_is_rejected_not_found);
     RUN_TEST(test_request_with_stale_boot_id_is_rejected);
+    RUN_TEST(test_reply_is_sealed_when_configured_with_a_seal_function);
     RUN_TEST(test_short_payload_is_rejected_without_sending);
     return UNITY_END();
 }

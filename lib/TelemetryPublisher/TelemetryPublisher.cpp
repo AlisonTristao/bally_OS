@@ -86,8 +86,11 @@ private:
 
 }  // namespace
 
-void TelemetryPublisher::configure(BtpEndpoint& endpoint) noexcept {
+void TelemetryPublisher::configure(BtpEndpoint& endpoint, BtpSealFn seal,
+                                   void* seal_context) noexcept {
     endpoint_ = &endpoint;
+    seal_ = seal;
+    seal_context_ = seal_context;
 }
 
 TelemetryPublisher::PublishResult TelemetryPublisher::publish_protocol_test(
@@ -120,9 +123,16 @@ std::size_t TelemetryPublisher::flush(std::size_t max_samples) noexcept {
         if (read == write) break;
 
         const Sample& sample = queue_[read % kQueueCapacity];
+        // Every sample is one fragment (protocol.test and robot.state payloads
+        // are a handful of octets, +16 for the tag stays well under
+        // kEspNowMaxPayloadSize), which is what lets send_fragment seal it --
+        // it refuses to seal a fragment_count != 1 call. A failed seal (no key
+        // E) makes send_fragment return false and the sample is counted below
+        // as a send failure, never transmitted in the clear.
         const bool sent = endpoint_->send_fragment(
             btp::MessageType::Telemetry, sample.topic_id, sample.sequence,
-            sample.timestamp_us, sample.payload, sample.payload_size, 0U, 1U);
+            sample.timestamp_us, sample.payload, sample.payload_size, 0U, 1U,
+            seal_, seal_context_);
         if (sent) {
             sent_total_.fetch_add(1U, std::memory_order_relaxed);
             RuntimeLockGuard guard(runtime_lock_);

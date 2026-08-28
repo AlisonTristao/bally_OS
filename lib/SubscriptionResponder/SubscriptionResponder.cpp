@@ -51,15 +51,48 @@ void write_reference(std::uint8_t* out, const btp::Header& request_header) noexc
 
 }  // namespace
 
-void SubscriptionResponder::configure(BtpEndpoint& endpoint, TelemetryPublisher& publisher) noexcept {
+void SubscriptionResponder::configure(BtpEndpoint& endpoint, TelemetryPublisher& publisher,
+                                      BtpSealFn seal_link, void* seal_link_context,
+                                      BtpSealFn seal_endpoint,
+                                      void* seal_endpoint_context) noexcept {
     endpoint_ = &endpoint;
     publisher_ = &publisher;
+    seal_link_ = seal_link;
+    seal_link_context_ = seal_link_context;
+    seal_endpoint_ = seal_endpoint;
+    seal_endpoint_context_ = seal_endpoint_context;
+}
+
+bool SubscriptionResponder::seal_for(bally::Channel channel, BtpSealFn* seal_out,
+                                     void** context_out) const noexcept {
+    const BtpSealFn seal = channel == bally::Channel::B_Endpoint ? seal_endpoint_ : seal_link_;
+    void* const context =
+        channel == bally::Channel::B_Endpoint ? seal_endpoint_context_ : seal_link_context_;
+
+    // Same rule as CommandProcessor::send_result(): both nullptr means "no
+    // encryption at all" (every reply unsealed, pre-channel-B behavior); once
+    // ANY channel has a key configured, the channel whose own key is still
+    // missing must never fall back to cleartext or to the other channel's
+    // key.
+    if (seal == nullptr && (seal_link_ != nullptr || seal_endpoint_ != nullptr)) {
+        return false;
+    }
+    *seal_out = seal;
+    *context_out = context;
+    return true;
 }
 
 bool SubscriptionResponder::handle_subscribe(const btp::Header& request_header, btp::ByteView payload,
-                                             std::uint64_t timestamp_us) noexcept {
+                                             std::uint64_t timestamp_us,
+                                             bally::Channel channel) noexcept {
     if (endpoint_ == nullptr || publisher_ == nullptr || payload.data == nullptr ||
         payload.size < kSubscribeRequestSize) {
+        return false;
+    }
+
+    BtpSealFn seal = nullptr;
+    void* seal_context = nullptr;
+    if (!seal_for(channel, &seal, &seal_context)) {
         return false;
     }
 
@@ -123,13 +156,20 @@ bool SubscriptionResponder::handle_subscribe(const btp::Header& request_header, 
     write_u32_le(responsePayload + 24U, grantedLeaseMs);
 
     return endpoint_->send_logical(btp::MessageType::Control, kSubscribeResultObjectId, responsePayload,
-                                   sizeof(responsePayload), timestamp_us);
+                                   sizeof(responsePayload), timestamp_us, seal, seal_context);
 }
 
 bool SubscriptionResponder::handle_unsubscribe(const btp::Header& request_header, btp::ByteView payload,
-                                               std::uint64_t timestamp_us) noexcept {
+                                               std::uint64_t timestamp_us,
+                                               bally::Channel channel) noexcept {
     if (endpoint_ == nullptr || publisher_ == nullptr || payload.data == nullptr ||
         payload.size < kUnsubscribeRequestSize) {
+        return false;
+    }
+
+    BtpSealFn seal = nullptr;
+    void* seal_context = nullptr;
+    if (!seal_for(channel, &seal, &seal_context)) {
         return false;
     }
 
@@ -163,5 +203,5 @@ bool SubscriptionResponder::handle_unsubscribe(const btp::Header& request_header
     write_u16_le(responsePayload + 14U, errorCode);
 
     return endpoint_->send_logical(btp::MessageType::Control, kUnsubscribeResultObjectId, responsePayload,
-                                   sizeof(responsePayload), timestamp_us);
+                                   sizeof(responsePayload), timestamp_us, seal, seal_context);
 }

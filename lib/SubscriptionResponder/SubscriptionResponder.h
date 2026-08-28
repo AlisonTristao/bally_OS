@@ -4,6 +4,8 @@
 #include <cstddef>
 #include <cstdint>
 
+#include <BtpTransport.h>
+#include <bally_channels.h>
 #include <btp/codec.hpp>
 
 class BtpEndpoint;
@@ -37,7 +39,18 @@ public:
     static constexpr std::uint16_t kUnsubscribeObjectId = 0x0007U;
     static constexpr std::uint16_t kUnsubscribeResultObjectId = 0x0008U;
 
-    void configure(BtpEndpoint& endpoint, TelemetryPublisher& publisher) noexcept;
+    // `seal_link`/`seal_endpoint` follow CommandProcessor::configure()'s exact
+    // contract: each *_RESULT is sealed with whichever one matches the
+    // ORIGINAL request's channel (see the `channel` parameter below and
+    // bally_channels.h), and send fails closed -- never with the other
+    // channel's key, never in the clear -- whenever at least one of the two
+    // has been configured. Both left nullptr (the default) means no
+    // encryption at all, exactly as before this parameter existed; that is
+    // what the native unit tests exercise.
+    void configure(BtpEndpoint& endpoint, TelemetryPublisher& publisher,
+                   BtpSealFn seal_link = nullptr, void* seal_link_context = nullptr,
+                   BtpSealFn seal_endpoint = nullptr,
+                   void* seal_endpoint_context = nullptr) noexcept;
 
     // Parses a CONTROL/SUBSCRIBE or CONTROL/UNSUBSCRIBE payload (already
     // reassembled if needed by the caller, same convention as
@@ -45,14 +58,34 @@ public:
     // response over `endpoint`. Returns false only when the payload was too
     // short to parse at all (caller counts it as a drop, same as any other
     // malformed CONTROL frame); a well-formed request always gets an answer.
+    //
+    // `channel` is the caller's classification of the request (see
+    // bally_channels.h::channel_of_peer), made BEFORE this call since only
+    // the caller has the header's cleartext source_id and knows which key
+    // opened the payload -- same convention as
+    // CommandProcessor::intake()'s own `channel` parameter. Defaults to
+    // C_Link so a caller that never passes it -- every existing native test
+    // -- keeps today's behavior verbatim.
     bool handle_subscribe(const btp::Header& request_header, btp::ByteView payload,
-                          std::uint64_t timestamp_us) noexcept;
+                          std::uint64_t timestamp_us,
+                          bally::Channel channel = bally::Channel::C_Link) noexcept;
     bool handle_unsubscribe(const btp::Header& request_header, btp::ByteView payload,
-                            std::uint64_t timestamp_us) noexcept;
+                            std::uint64_t timestamp_us,
+                            bally::Channel channel = bally::Channel::C_Link) noexcept;
 
 private:
+    // Picks seal_link_/seal_endpoint_ by `channel`, matching
+    // CommandProcessor::send_result()'s fail-closed rule: returns false
+    // (never send unsealed or under the wrong key) when the matching one is
+    // null but at least one of the two has been configured.
+    bool seal_for(bally::Channel channel, BtpSealFn* seal_out, void** context_out) const noexcept;
+
     BtpEndpoint* endpoint_ = nullptr;
     TelemetryPublisher* publisher_ = nullptr;
+    BtpSealFn seal_link_ = nullptr;
+    void* seal_link_context_ = nullptr;
+    BtpSealFn seal_endpoint_ = nullptr;
+    void* seal_endpoint_context_ = nullptr;
 };
 
 #endif  // SUBSCRIPTION_RESPONDER_H

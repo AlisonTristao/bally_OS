@@ -12,6 +12,14 @@
 #include <LogTypes.h>
 #include <Settings.h>
 
+// Only for btp::Header, named in the LogRadioSeal function-pointer type
+// below. BtpTransport.h defines the equivalent alias BtpSealFn, but Logger.h
+// is pulled in by RobotSettings/OTAUpdater, whose PlatformIO libraries do not
+// depend on BtpTransport -- including it here breaks their `chain` LDF
+// resolution on the esp32-s3 build. btp/codec.hpp is header-only and already
+// on every consumer's path (the btp ESP-IDF component's public include).
+#include <btp/codec.hpp>
+
 class SDCard;
 class TinyShell;
 class RobotSettings;
@@ -28,12 +36,30 @@ public:
     Logger& operator=(const Logger&) = delete;
     void begin();
 
+    // Structurally identical to BtpTransport.h's BtpSealFn (and to
+    // BtpEndpoint::SealFn): a channel sealer passed straight through to
+    // BtpEndpoint::send_fragment. Redeclared here rather than pulled in with
+    // <BtpTransport.h> -- see the include note above.
+    using LogRadioSeal = bool (*)(void* context, const btp::Header& header,
+                                  std::uint16_t payload_size,
+                                  const std::uint8_t* plaintext,
+                                  std::uint8_t* out);
+
     // acess methods for the logger
     /*
     * @brief Attach the process-wide BTP endpoint used to allocate sequences,
     * encode LOG frames and hand exact wire bytes to the selected transport.
+    *
+    * `seal`/`seal_context` (default nullptr) are the channel-B sealer for LOG
+    * over the radio. LOG rides channel B (TraceView<->robot, key E --
+    * bally_channels.h), so the real caller passes RadioSeal::seal_e. When
+    * set, every LOG frame flush_logs() and send_log_direct() put on the radio
+    * is sealed with it or NOT SENT (fail-closed, no cleartext fallback). The
+    * SD flush path (flush_logs_to) is never sealed: those files are local
+    * diagnostics and must stay readable without the key.
     */
-    void configure_btp(BtpEndpoint& endpoint);
+    void configure_btp(BtpEndpoint& endpoint, LogRadioSeal seal = nullptr,
+                       void* seal_context = nullptr);
 
     /**
      * @brief Configure how many packets flush_logs() sends per call
@@ -147,13 +173,27 @@ private:
     uint32_t pending_send_bytes_ = 0;
     bool send_record_active_ = false;
     StoredLogHeader send_header_{};
-    uint8_t send_packet_index_ = 0;
+    // Octets of the current record already put on the radio. This was a
+    // uint8_t fragment index; it became a byte count once each radio chunk
+    // started going out as its own single-fragment LOG message rather than
+    // fragment N of one -- an AEAD tag covers the whole logical payload and
+    // cannot cover a slice of one, so a sealed LOG record over one ESP-NOW
+    // frame is sent as several independent sealed messages (each a separate
+    // line at the desktop). The SD flush path (flush_logs_to) still writes
+    // one multi-fragment record and is never sealed.
+    uint32_t send_record_bytes_done_ = 0;
 
     // Only one consumer (ESP-NOW or SD) may walk the ring at a time.
     bool consumer_busy_ = false;
 
     SemaphoreHandle_t mutex_ = NULL;
     BtpEndpoint* endpoint_ = nullptr;
+    // Channel-B sealer for LOG on the radio (RadioSeal::seal_e in real
+    // firmware); nullptr means send LOG in the clear, the pre-topico state
+    // and what env:native would exercise if it built Logger. Guarded by
+    // mutex_ like endpoint_.
+    LogRadioSeal endpoint_seal_ = nullptr;
+    void* endpoint_seal_context_ = nullptr;
     bool initialized_ = false;
 
     // SD log file naming/appending state (flush_to_sd/set_datetime).

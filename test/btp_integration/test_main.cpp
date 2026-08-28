@@ -119,6 +119,14 @@ bool fake_seal_endpoint(void*, const btp::Header&, std::uint16_t payload_size,
     return true;
 }
 
+// Stands in for "the key this channel needs is not loaded" -- RadioSeal::seal /
+// seal_e both return false in that state, and every send path must then drop
+// the frame rather than transmit it in the clear.
+bool always_failing_seal(void*, const btp::Header&, std::uint16_t,
+                         const std::uint8_t*, std::uint8_t*) {
+    return false;
+}
+
 void test_canonical_command_request_is_fully_parsed() {
     const auto bytes = read_vector("valid/command_request.bin");
     TEST_ASSERT_FALSE(bytes.empty());
@@ -234,9 +242,9 @@ void test_endpoint_fragments_with_one_shared_sequence_and_exact_sizes() {
 // Renamed from test_authorization_binds_mac_to_claimed_source: topico 28
 // removed that binding, so asserting it would assert a rule the firmware no
 // longer has. What is left is a radio filter, and the last assertion is the
-// point -- a frame whose source_id is somebody else's is now ACCEPTED, which
-// is what makes the hub work and what leaves the robot unauthenticated until
-// the AEAD tag arrives in topico 30.
+// point -- a frame whose source_id is somebody else's is now ACCEPTED at this
+// stage, which is what makes the hub work; authentication is the AEAD tag
+// opened after reassembly in ROBOT::handleReceiveStatic, not this memcmp.
 void test_peer_mac_filter_accepts_relayed_source_ids() {
     const std::uint8_t expected[6] = {0xDC, 0xDA, 0x0C, 0x30, 0xAA, 0x5C};
     const std::uint8_t attacker[6] = {0xDC, 0xDA, 0x0C, 0x30, 0xAA, 0x5D};
@@ -657,6 +665,55 @@ btp::DecodedFrame decode_only_frame() {
     return decoded;
 }
 
+// TELEMETRY rides channel B (bally_channels.h): configure() with an endpoint
+// seal makes flush() route every sample through it, exactly like STATUS
+// already seals on channel C. The dongle relays these and never reads them,
+// so the real caller passes RadioSeal::seal_e. Without a seal (the default)
+// the sample goes out in the clear, which is what every other test here
+// relies on.
+void test_telemetry_sample_is_sealed_when_configured_with_a_seal_function() {
+    sent_count = 0U;
+    BtpEndpoint endpoint;
+    TEST_ASSERT_TRUE(endpoint.configure(0x11223344U, 0xA1B2C3D4U));
+    endpoint.set_send_callback(capture_send);
+
+    TelemetryPublisher publisher;
+    publisher.configure(endpoint, fake_seal_endpoint, nullptr);
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<std::uint8_t>(TelemetryPublisher::PublishResult::Queued),
+        static_cast<std::uint8_t>(publisher.publish_protocol_test(
+            0x01020304U, float_from_bits(0x3F0D0A00U), 1000000U)));
+
+    TEST_ASSERT_EQUAL_UINT32(1U, publisher.flush(1U));
+    btp::DecodedFrame decoded = decode_only_frame();
+    TEST_ASSERT_EQUAL_UINT8(static_cast<std::uint8_t>(btp::MessageType::Telemetry),
+                            static_cast<std::uint8_t>(decoded.header.type));
+    TEST_ASSERT_TRUE((decoded.header.flags & btp::kFlagEncrypted) != 0U);
+    // 0x22 is fake_seal_endpoint's tag marker (key E); 0x11 would mean this
+    // went out under the channel-C key, which no TraceView holds.
+    TEST_ASSERT_EQUAL_HEX8(0x22U,
+                           decoded.payload.data[decoded.payload.size - 1U]);
+}
+
+void test_telemetry_sample_with_no_key_configured_is_dropped_not_sent_clear() {
+    sent_count = 0U;
+    BtpEndpoint endpoint;
+    TEST_ASSERT_TRUE(endpoint.configure(0x11223344U, 0xA1B2C3D4U));
+    endpoint.set_send_callback(capture_send);
+
+    // A seal that always fails stands in for "key E not loaded".
+    TelemetryPublisher publisher;
+    publisher.configure(endpoint, always_failing_seal, nullptr);
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<std::uint8_t>(TelemetryPublisher::PublishResult::Queued),
+        static_cast<std::uint8_t>(publisher.publish_protocol_test(
+            0x01020304U, 0.0f, 1000000U)));
+
+    TEST_ASSERT_EQUAL_UINT32(1U, publisher.flush(1U));  // consumed from the queue
+    TEST_ASSERT_EQUAL_UINT32(0U, sent_count);           // but nothing on the wire
+    TEST_ASSERT_EQUAL_UINT32(1U, publisher.stats().send_failed);
+}
+
 // Acceptance criterion: "pedido acima do maximo e limitado e informado ao
 // cliente" -- clamped, answered SUCCESS, never rejected. The mirror case
 // (below the schema's floor) is rejected, because section 4 forbids granting
@@ -725,6 +782,59 @@ void test_subscribe_above_max_is_clamped_and_below_min_is_rejected() {
     decoded = decode_only_frame();
     TEST_ASSERT_EQUAL_UINT8(0x00U, decoded.payload.data[12]);
     TEST_ASSERT_EQUAL_UINT32(10000U, read_u32(decoded.payload.data + 20U));
+}
+
+// Mirrors test_channel_b_reply_is_sealed_with_endpoint_key_not_link_key
+// (CommandProcessor) for SUBSCRIBE_RESULT: topico 31.2 widened
+// SubscriptionResponder to the same seal_link/seal_endpoint-by-channel rule.
+void test_subscribe_channel_b_reply_is_sealed_with_endpoint_key_not_link_key() {
+    BtpEndpoint endpoint;
+    TEST_ASSERT_TRUE(endpoint.configure(kLocalSource, kLocalBoot));
+    endpoint.set_send_callback(capture_send);
+    TelemetryPublisher publisher;
+    publisher.configure(endpoint);
+    SubscriptionResponder responder;
+    responder.configure(endpoint, publisher, fake_seal_link, nullptr,
+                        fake_seal_endpoint, nullptr);
+
+    const auto request = subscribe_payload(
+        TelemetryPublisher::kProtocolTestTopicId, 10000U, 5000U);
+    const btp::Header header = control_header(
+        SubscriptionResponder::kSubscribeObjectId, 0x0C30AA5CU, 0x10203040U, 40U);
+
+    sent_count = 0U;
+    TEST_ASSERT_TRUE(responder.handle_subscribe(
+        header, {request.data(), request.size()}, 1000U, bally::Channel::B_Endpoint));
+
+    btp::DecodedFrame decoded = decode_only_frame();
+    TEST_ASSERT_TRUE((decoded.header.flags & btp::kFlagEncrypted) != 0U);
+    // 0x22 is fake_seal_endpoint's marker; 0x11 would mean this went out
+    // sealed with the CHANNEL-C key instead, which a TraceView hub-channel
+    // requester does not hold.
+    TEST_ASSERT_EQUAL_HEX8(0x22U,
+                          decoded.payload.data[decoded.payload.size - 1U]);
+}
+
+void test_subscribe_channel_b_reply_without_endpoint_key_configured_is_dropped() {
+    BtpEndpoint endpoint;
+    TEST_ASSERT_TRUE(endpoint.configure(kLocalSource, kLocalBoot));
+    endpoint.set_send_callback(capture_send);
+    TelemetryPublisher publisher;
+    publisher.configure(endpoint);
+    SubscriptionResponder responder;
+    // Channel C is keyed, channel B is not: the reply must be dropped, never
+    // fall back to the link key or to cleartext just because SOME key exists.
+    responder.configure(endpoint, publisher, fake_seal_link, nullptr);
+
+    const auto request = subscribe_payload(
+        TelemetryPublisher::kProtocolTestTopicId, 10000U, 5000U);
+    const btp::Header header = control_header(
+        SubscriptionResponder::kSubscribeObjectId, 0x0C30AA5CU, 0x10203040U, 41U);
+
+    sent_count = 0U;
+    TEST_ASSERT_FALSE(responder.handle_subscribe(
+        header, {request.data(), request.size()}, 1000U, bally::Channel::B_Endpoint));
+    TEST_ASSERT_EQUAL_UINT32(0U, sent_count);
 }
 
 // PASSO 5: several sessions on one topic aggregate; the slow one never
@@ -1011,6 +1121,8 @@ int main(int, char**) {
     RUN_TEST(test_endpoint_fragments_with_one_shared_sequence_and_exact_sizes);
     RUN_TEST(test_peer_mac_filter_accepts_relayed_source_ids);
     RUN_TEST(test_protocol_test_matches_canonical_vector_and_origin_timestamp);
+    RUN_TEST(test_telemetry_sample_is_sealed_when_configured_with_a_seal_function);
+    RUN_TEST(test_telemetry_sample_with_no_key_configured_is_dropped_not_sent_clear);
     RUN_TEST(test_publisher_queue_is_bounded_and_drop_newest_is_counted);
     RUN_TEST(test_publisher_registers_static_schemas_and_rejects_nan);
     RUN_TEST(test_duplicate_command_executes_once_and_replays_exact_result);
@@ -1021,6 +1133,8 @@ int main(int, char**) {
     RUN_TEST(test_full_telemetry_queue_cannot_block_command_result);
     RUN_TEST(test_scheduler_counts_delivery_timeout_and_link_delivery);
     RUN_TEST(test_subscribe_above_max_is_clamped_and_below_min_is_rejected);
+    RUN_TEST(test_subscribe_channel_b_reply_is_sealed_with_endpoint_key_not_link_key);
+    RUN_TEST(test_subscribe_channel_b_reply_without_endpoint_key_configured_is_dropped);
     RUN_TEST(test_multiple_subscribers_aggregate_on_one_topic);
     RUN_TEST(test_topic_keeps_publishing_until_the_last_consumer_leaves);
     RUN_TEST(test_lease_expiry_and_new_boot_id_end_a_session);

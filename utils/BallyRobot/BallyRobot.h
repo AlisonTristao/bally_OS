@@ -423,11 +423,13 @@ private:
                                 btp::ByteView payload);
     // Topico 17: CONTROL/SUBSCRIBE and CONTROL/UNSUBSCRIBE, routed the same
     // way processManifestRequest already is (see handleReceiveStatic's
-    // object_id switch).
-    void processSubscribeRequest(const btp::Header& header,
-                                 btp::ByteView payload);
-    void processUnsubscribeRequest(const btp::Header& header,
-                                   btp::ByteView payload);
+    // object_id switch). `channel` is threaded through the same way
+    // processCommandRequest's already is, since topico 31.2 widened these
+    // two object_ids to channel B alongside COMMAND.
+    void processSubscribeRequest(const btp::Header& header, btp::ByteView payload,
+                                 bally::Channel channel);
+    void processUnsubscribeRequest(const btp::Header& header, btp::ByteView payload,
+                                   bally::Channel channel);
     void dispatchDecoded(const btp::Header& header, btp::ByteView payload,
                         bally::Channel channel);
     void sampleTelemetry();

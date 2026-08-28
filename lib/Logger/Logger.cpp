@@ -65,9 +65,12 @@ void Logger::free_mutex() {
     if (mutex_ != nullptr) xSemaphoreGive(mutex_);
 }
 
-void Logger::configure_btp(BtpEndpoint& endpoint) {
+void Logger::configure_btp(BtpEndpoint& endpoint, LogRadioSeal seal,
+                           void* seal_context) {
     if (!wait_for_mutex()) return;
     endpoint_ = &endpoint;
+    endpoint_seal_ = seal;
+    endpoint_seal_context_ = seal_context;
     free_mutex();
 }
 
@@ -116,15 +119,38 @@ void Logger::insert_log(logType type, const char* msg) {
 bool Logger::send_log_direct(logType type, const char* msg) {
     if (msg == nullptr || msg[0] == '\0') return false;
     BtpEndpoint* endpoint = nullptr;
+    LogRadioSeal seal = nullptr;
+    void* seal_context = nullptr;
     if (!wait_for_mutex()) return false;
     endpoint = endpoint_;
+    seal = endpoint_seal_;
+    seal_context = endpoint_seal_context_;
     free_mutex();
     if (endpoint == nullptr) return false;
 
-    return endpoint->send_logical(
-        btp::MessageType::Log, static_cast<uint16_t>(type),
-        reinterpret_cast<const uint8_t*>(msg), strlen(msg),
-        static_cast<uint64_t>(esp_timer_get_time()));
+    // Same independent-single-fragment framing as flush_logs(): a sealed LOG
+    // record larger than one ESP-NOW frame becomes several sealed messages,
+    // since an AEAD tag cannot cover a slice of a logical payload. For the
+    // usual short shell line this is exactly one send_fragment call.
+    const size_t total = strlen(msg);
+    const size_t stride =
+        seal != nullptr ? (btp::kEspNowMaxPayloadSize - kBtpAeadTagSize)
+                        : static_cast<size_t>(btp::kEspNowMaxPayloadSize);
+    const uint64_t timestamp_us = static_cast<uint64_t>(esp_timer_get_time());
+
+    for (size_t offset = 0U; offset < total; offset += stride) {
+        const size_t chunk = (total - offset < stride) ? (total - offset) : stride;
+        uint32_t sequence = 0U;
+        if (!endpoint->reserve_sequence(&sequence)) return false;
+        if (!endpoint->send_fragment(
+                btp::MessageType::Log, static_cast<uint16_t>(type), sequence,
+                timestamp_us,
+                reinterpret_cast<const uint8_t*>(msg) + offset, chunk, 0U, 1U,
+                seal, seal_context)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 void Logger::insert_log_impl(const uint8_t* data, size_t len, logType type,
@@ -207,7 +233,7 @@ void Logger::clear_ring() {
     pending_send_bytes_ = 0;
     send_record_active_ = false;
     send_header_ = {};
-    send_packet_index_ = 0;
+    send_record_bytes_done_ = 0;
     consumer_busy_ = false;
 }
 
@@ -247,14 +273,18 @@ void Logger::flush_logs() {
 
     for (uint32_t sent_packets = 0; sent_packets < max_packets; ++sent_packets) {
         uint8_t payload[btp::kEspNowMaxPayloadSize];
-        uint8_t fragment_index = 0U;
-        uint8_t fragment_count = 0U;
-        uint16_t fragment_length = 0U;
+        uint16_t chunk_length = 0U;
+        bool first_chunk = false;
         StoredLogHeader header{};
         BtpEndpoint* endpoint = nullptr;
+        LogRadioSeal seal = nullptr;
+        void* seal_context = nullptr;
 
-        // Copy only the next fragment from PSRAM. The frame itself is encoded
-        // into a 250-byte stack buffer by BtpEndpoint and sent at its real size.
+        // Copy only the next chunk from PSRAM. Each chunk goes out as its own
+        // single-fragment LOG message (see send_record_bytes_done_ in the
+        // header): a sealed frame's AEAD tag covers a whole logical payload,
+        // never a slice, so a record too big for one ESP-NOW frame is sent as
+        // several independent messages rather than one fragmented one.
         if (!wait_for_mutex()) break;
 
         if (storage_ == nullptr || pending_send_bytes_ == 0 || endpoint_ == nullptr) {
@@ -269,34 +299,46 @@ void Logger::flush_logs() {
             }
 
             send_record_active_ = true;
-            send_packet_index_ = 0;
+            send_record_bytes_done_ = 0U;
         }
 
-        fragment_count = static_cast<uint8_t>(
-            (send_header_.length + btp::kEspNowMaxPayloadSize - 1U) /
-            btp::kEspNowMaxPayloadSize);
-        const uint32_t payload_offset =
-            send_packet_index_ * btp::kEspNowMaxPayloadSize;
+        seal = endpoint_seal_;
+        seal_context = endpoint_seal_context_;
+
+        // A sealed frame is plaintext + 16-octet tag, and encode_fragment
+        // refuses it once that total passes kEspNowMaxPayloadSize -- so the
+        // plaintext chunk has to leave room for the tag. Unsealed chunks use
+        // the whole frame.
+        const uint32_t chunk_stride =
+            seal != nullptr
+                ? static_cast<uint32_t>(btp::kEspNowMaxPayloadSize - kBtpAeadTagSize)
+                : static_cast<uint32_t>(btp::kEspNowMaxPayloadSize);
+
+        const uint32_t payload_offset = send_record_bytes_done_;
         const uint32_t remaining = send_header_.length - payload_offset;
-        fragment_length = static_cast<uint16_t>(
-            remaining < btp::kEspNowMaxPayloadSize
-                ? remaining
-                : btp::kEspNowMaxPayloadSize);
+        chunk_length = static_cast<uint16_t>(
+            remaining < chunk_stride ? remaining : chunk_stride);
+        first_chunk = (payload_offset == 0U);
         const uint32_t ring_payload_offset =
             (send_offset_ + sizeof(StoredLogHeader) + payload_offset) % storage_capacity_;
 
         header = send_header_;
-        fragment_index = send_packet_index_;
         endpoint = endpoint_;
-        read_from_ring(ring_payload_offset, payload, fragment_length);
+        read_from_ring(ring_payload_offset, payload, chunk_length);
 
         free_mutex();
 
-        // A rejected frame keeps the packet cursor unchanged for the next call.
+        // The record's stored sequence names the first chunk; later chunks are
+        // separate logical messages and need their own. reserve_sequence is
+        // internally atomic, so it is safe to call here with the lock dropped.
+        uint32_t sequence = header.sequence;
+        if (!first_chunk && !endpoint->reserve_sequence(&sequence)) break;
+
+        // A rejected frame keeps the record cursor unchanged for the next call.
         if (!endpoint->send_fragment(
                 btp::MessageType::Log, static_cast<uint16_t>(header.type),
-                header.sequence, header.timestamp_us, payload, fragment_length,
-                fragment_index, fragment_count)) {
+                sequence, header.timestamp_us, payload, chunk_length, 0U, 1U,
+                seal, seal_context)) {
             break;
         }
 
@@ -307,14 +349,14 @@ void Logger::flush_logs() {
             break;
         }
 
-        ++send_packet_index_;
-        if (send_packet_index_ >= fragment_count) {
+        send_record_bytes_done_ += chunk_length;
+        if (send_record_bytes_done_ >= send_header_.length) {
             const uint32_t record_size = sizeof(StoredLogHeader) + send_header_.length;
             send_offset_ = (send_offset_ + record_size) % storage_capacity_;
             pending_send_bytes_ -= record_size;
             send_record_active_ = false;
             send_header_ = {};
-            send_packet_index_ = 0;
+            send_record_bytes_done_ = 0U;
         }
 
         free_mutex();

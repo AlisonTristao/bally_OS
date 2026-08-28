@@ -7,6 +7,11 @@
 
 #include <btp/codec.hpp>
 
+// Needed for BtpSealFn (a file-scope type alias, not a member of BtpEndpoint),
+// which configure() below names -- same reason StatusReporter.h and
+// SubscriptionResponder.h already include this.
+#include <BtpTransport.h>
+
 class BtpEndpoint;
 
 class TelemetryPublisher {
@@ -139,7 +144,17 @@ public:
 
     enum class UnsubscribeOutcome : std::uint8_t { Removed, NotFound, UnknownTopic };
 
-    void configure(BtpEndpoint& endpoint) noexcept;
+    // `seal`/`seal_context` (default nullptr) are forwarded verbatim to
+    // BtpEndpoint::send_fragment in flush() -- see BtpSealFn. TELEMETRY is
+    // channel B (TraceView<->robot, key E -- bally_channels.h): the dongle
+    // relays it and never reads it, so its real caller passes
+    // RadioSeal::seal_e. Both left nullptr (the default) means every sample
+    // goes out in the clear, exactly as before this parameter existed -- the
+    // mode the native unit tests exercise. Fail-closed once a seal is set: a
+    // sample whose seal fails (no key E loaded) is dropped and counted as a
+    // send failure, never sent unsealed.
+    void configure(BtpEndpoint& endpoint, BtpSealFn seal = nullptr,
+                   void* seal_context = nullptr) noexcept;
 
     // Pure rate policy, exposed for testing: applies min/default/max of the
     // schema to a requested rate (see TopicSchema above). Never returns a
@@ -297,6 +312,8 @@ private:
     std::uint32_t locked_topic_rate(std::uint16_t topic_id) const noexcept;
 
     BtpEndpoint* endpoint_ = nullptr;
+    BtpSealFn seal_ = nullptr;
+    void* seal_context_ = nullptr;
     Sample queue_[kQueueCapacity]{};
     TopicRuntime runtime_[kMaxTopics]{};
     Subscription subscriptions_[kMaxSubscriptions]{};

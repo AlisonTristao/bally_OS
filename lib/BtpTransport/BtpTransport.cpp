@@ -377,33 +377,31 @@ std::uint32_t source_id_from_mac(const std::uint8_t mac[6]) noexcept {
     return source_id;
 }
 
-// THE ROBOT HAS NO AUTHENTICATION AT THIS POINT. Read the whole comment
-// before changing anything here.
+// A CHEAP RADIO FILTER, NOT AUTHENTICATION. Read the whole comment before
+// changing anything here.
 //
 // This used to also require claimed_source_id == source_id_from_mac(
-// received_mac) -- that is, the source_id a frame declared had to be derived
-// from the MAC the radio reported. That condition is gone, and NOTHING has
-// replaced it yet.
+// received_mac) -- the source_id a frame declared had to derive from the MAC
+// the radio reported. That condition is gone: it encodes "one peer, one
+// identity", and the hub model breaks that. Every frame now arrives over the
+// radio from the dongle's MAC, but its source_id is whoever actually wrote it
+// -- TraceView talking end to end through the hub, or the dongle itself.
+// Under the old rule every relayed frame is rejected, so the two cannot
+// coexist.
 //
-// Why it had to go: it encodes "one peer, one identity", and the hub model
-// breaks that. Every frame now arrives over the radio from the dongle's MAC,
-// but its source_id is whoever actually wrote it -- TraceView talking end to
-// end through the hub, or the dongle itself. Under the old rule every
-// relayed frame is rejected, so the two cannot coexist.
-//
-// What is left is the MAC memcmp. That is a cheap radio filter and still
-// worth having (it drops traffic from anything that is not our one peer
-// before it costs a decode), but it is NOT authorization: an ESP-NOW source
-// MAC is forged in one line, and BTP itself says so
+// What is left is the MAC memcmp. It drops traffic from anything that is not
+// our one peer before it costs a decode, but it is NOT authorization: an
+// ESP-NOW source MAC is forged in one line, and BTP itself says so
 // (docs/fragmentation-and-transports.md 3.1, "it does not authenticate
 // anything").
 //
-// Real authorization arrives in topico 30: the AEAD tag over the frame
-// becomes the check, at this same call site, and it is strictly stronger --
-// a MAC is forged in one line, a 16-octet tag needs the key. Between this
-// change and that one the robot executes shell commands for anyone who can
-// spoof a MAC. That gap is deliberate and is why topico 28 is a BENCH
-// delivery only.
+// The real authorization is the AEAD tag, checked immediately after
+// reassembly in ROBOT::handleReceiveStatic: the frame is classified to a
+// channel by its cleartext source_id and then opened with RadioSeal::open
+// (key L, channel C) or open_e (key E, channel B), both fail-closed, no
+// fallback to reading the still-sealed bytes. A forged MAC clears this
+// memcmp; it does not produce a 16-octet tag without the key, so it never
+// reaches the shell.
 bool authorized_source(const std::uint8_t expected_mac[6],
                        const std::uint8_t received_mac[6]) noexcept {
     return expected_mac != nullptr && received_mac != nullptr &&

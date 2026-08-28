@@ -6,6 +6,11 @@
 
 #include <btp/codec.hpp>
 
+// Needed for BtpSealFn (a file-scope type alias, not a member of
+// BtpEndpoint), which configure() below names -- same reason
+// StatusReporter.h and SubscriptionResponder.h already include this.
+#include <BtpTransport.h>
+
 class BtpEndpoint;
 
 // Answers CONTROL/MANIFEST_REQUEST (BTP/docs/commands.md
@@ -44,7 +49,16 @@ public:
 
     // uuid is copied (16 bytes, opaque, stable identity for this boot -- see
     // BallyRobot.cpp's configureProtocolIdentity(), derived from the MAC).
-    void configure(BtpEndpoint& endpoint, const std::uint8_t uuid[16]) noexcept;
+    //
+    // `seal`/`seal_context` (default nullptr) are forwarded verbatim to
+    // BtpEndpoint::send_logical -- see BtpSealFn. MANIFEST_REQUEST/DATA is
+    // channel C always (bally_channels.h: only the dongle's own aggregation
+    // cache legitimately asks a robot for its manifest), so its real caller
+    // passes RadioSeal::seal, the same single key StatusReporter's STATUS
+    // already seals with -- no per-channel choice to make, unlike
+    // SubscriptionResponder's SUBSCRIBE_RESULT/UNSUBSCRIBE_RESULT.
+    void configure(BtpEndpoint& endpoint, const std::uint8_t uuid[16],
+                   BtpSealFn seal = nullptr, void* seal_context = nullptr) noexcept;
 
     // Parses a CONTROL/MANIFEST_REQUEST payload (already validated as
     // unfragmented or reassembled by the caller) and sends the matching
@@ -60,6 +74,8 @@ public:
 private:
     BtpEndpoint* endpoint_ = nullptr;
     std::uint8_t uuid_[16] = {};
+    BtpSealFn seal_ = nullptr;
+    void* seal_context_ = nullptr;
 };
 
 #endif  // MANIFEST_RESPONDER_H

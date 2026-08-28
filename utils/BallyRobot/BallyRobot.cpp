@@ -291,16 +291,35 @@ bool ROBOT::configureProtocolIdentity() {
     }
 #endif
 
-    logger.configure_btp(protocol);
+    // LOG is channel B (bally_channels.h), same as TELEMETRY: the dongle
+    // relays it and never reads it. Sealed with key E over the radio, or not
+    // sent -- the SD flush path stays cleartext (local diagnostic files).
+    logger.configure_btp(protocol, RadioSeal::seal_e, nullptr);
     // COMMAND_RESULT is sealed with whichever channel's key opened the
     // request it answers (see CommandProcessor::configure's comment):
     // seal_link for channel C (dongle, key L), seal_endpoint for channel B
     // (TraceView, key E, topico 31).
     command_processor.configure(protocol, RadioSeal::seal, nullptr,
                                 RadioSeal::seal_e, nullptr);
-    manifest_responder.configure(protocol, protocol_uuid_);
-    telemetry.configure(protocol);
-    subscription_responder.configure(protocol, telemetry);
+    // MANIFEST_DATA is channel C always (bally_channels.h: only the dongle's
+    // own ManifestCache legitimately asks a robot for its manifest), so it
+    // takes the single-key seal STATUS already uses below -- topico 31.3:
+    // without this, bally_dongle's own reply to its own priming request
+    // never authenticates, so it can never be told apart from a forged one
+    // and ManifestCache never learns this robot's schema while a desktop is
+    // attached (see bally_channels.h's dongle_consumes comment).
+    manifest_responder.configure(protocol, protocol_uuid_, RadioSeal::seal, nullptr);
+    // TELEMETRY is channel B (bally_channels.h): TraceView holds key E, the
+    // dongle relays the samples and never reads them. Sealed with E so a
+    // desktop that has the robot's password is the only thing that can plot
+    // them -- fail-closed, no cleartext fallback if key E is missing.
+    telemetry.configure(protocol, RadioSeal::seal_e, nullptr);
+    // SUBSCRIBE_RESULT/UNSUBSCRIBE_RESULT are sealed the same way
+    // COMMAND_RESULT is (topico 31.2): seal_link for channel C, seal_endpoint
+    // for channel B -- see handleReceiveStatic's widened classification
+    // above.
+    subscription_responder.configure(protocol, telemetry, RadioSeal::seal, nullptr,
+                                      RadioSeal::seal_e, nullptr);
     // STATUS (heartbeat) is channel C by definition (bally_channels.h), so
     // it seals for real too.
     status_reporter.configure(protocol, telemetry, RadioSeal::seal, nullptr);
@@ -689,13 +708,13 @@ void ROBOT::handleReceiveStatic(const esp_now_recv_info_t *recv_info, const uint
     // received frame attempt.
     instance_->link_frames_rx_.fetch_add(1U, std::memory_order_relaxed);
 
-    // Cheap radio filter, and NOT authentication -- read the comment on
-    // btp_command::authorized_source. It no longer binds the frame's
-    // source_id to the sender's MAC, because behind a hub every frame
+    // Stage zero: cheap radio filter, and NOT authentication -- read the
+    // comment on btp_command::authorized_source. It no longer binds the
+    // frame's source_id to the sender's MAC, because behind a hub every frame
     // legitimately arrives from the dongle's MAC carrying somebody else's
-    // source_id. The real authorization (the AEAD tag) lands at this exact
-    // spot in topico 30; until then a spoofed MAC reaches the shell, which
-    // is why this build is for the bench.
+    // source_id. The real authorization is the AEAD tag opened in stage two
+    // below (RadioSeal::open / open_e, fail-closed): a spoofed MAC clears this
+    // memcmp but cannot forge a tag, so it never reaches the shell.
     //
     // It runs before btp::decode now, where it used to run after: a frame
     // from a radio that is not our peer no longer moves the CRC or
@@ -745,14 +764,14 @@ void ROBOT::handleReceiveStatic(const esp_now_recv_info_t *recv_info, const uint
 
     // Stage two: classify, then open. header.source_id sits in the clear at
     // a fixed offset even inside a sealed frame (bally_channels.h), so which
-    // key opens this frame can be decided before opening it. Only COMMAND is
-    // classified today -- the switch below still restricts every other
-    // MessageType to channel C, so CONTROL (MANIFEST_REQUEST/SUBSCRIBE/
-    // UNSUBSCRIBE) keeps exactly its old behavior. Widening those to channel
-    // B needs ManifestResponder/SubscriptionResponder's own replies made
-    // channel-aware too (they still seal with key L unconditionally, the
-    // same gap CommandProcessor had before topico 31) -- a separate change,
-    // not done here.
+    // key opens this frame can be decided before opening it. COMMAND and
+    // CONTROL/SUBSCRIBE/UNSUBSCRIBE are classified by peer (topico 31.2
+    // widened these two alongside COMMAND, once SubscriptionResponder's own
+    // replies became channel-aware -- see its configure()); CONTROL/
+    // MANIFEST_REQUEST stays forced to channel C, because only the dongle's
+    // own aggregation cache legitimately sends one -- a TraceView hub-child
+    // asks the DONGLE for a robot's manifest, never the robot directly (see
+    // ManifestCache in bally_dongle), so there is nothing to widen there.
     //
     // This is the robot's REAL authorization now (see the long comment on
     // btp_command::authorized_source): the MAC check above is a cheap radio
@@ -763,8 +782,13 @@ void ROBOT::handleReceiveStatic(const esp_now_recv_info_t *recv_info, const uint
     // plaintext.
     const btp::Header& header = instance_->rx_routed_.header;
     const std::size_t ciphertext_size = instance_->rx_routed_.payload_size;
+    const bool classify_by_peer =
+        header.type == btp::MessageType::Command ||
+        (header.type == btp::MessageType::Control &&
+         (header.object_id == SubscriptionResponder::kSubscribeObjectId ||
+          header.object_id == SubscriptionResponder::kUnsubscribeObjectId));
     const bally::Channel channel =
-        header.type == btp::MessageType::Command
+        classify_by_peer
             ? bally::channel_of_peer(bally::Vantage::Robot, header.source_id,
                                      instance_->dongle_source_id_)
             : bally::Channel::C_Link;
@@ -831,9 +855,9 @@ void ROBOT::dispatchDecoded(const btp::Header& header, btp::ByteView payload,
         if (header.object_id == ManifestResponder::kManifestRequestObjectId) {
             processManifestRequest(header, payload);
         } else if (header.object_id == SubscriptionResponder::kSubscribeObjectId) {
-            processSubscribeRequest(header, payload);
+            processSubscribeRequest(header, payload, channel);
         } else if (header.object_id == SubscriptionResponder::kUnsubscribeObjectId) {
-            processUnsubscribeRequest(header, payload);
+            processUnsubscribeRequest(header, payload, channel);
         }
     } else {
         processCommandRequest(header, payload, channel);
@@ -870,16 +894,16 @@ void ROBOT::processManifestRequest(const btp::Header& header,
     manifest_responder.handle_request(header, payload, now_us);
 }
 
-void ROBOT::processSubscribeRequest(const btp::Header& header,
-                                    btp::ByteView payload) {
+void ROBOT::processSubscribeRequest(const btp::Header& header, btp::ByteView payload,
+                                    bally::Channel channel) {
     const uint64_t now_us = static_cast<uint64_t>(esp_timer_get_time());
-    subscription_responder.handle_subscribe(header, payload, now_us);
+    subscription_responder.handle_subscribe(header, payload, now_us, channel);
 }
 
-void ROBOT::processUnsubscribeRequest(const btp::Header& header,
-                                      btp::ByteView payload) {
+void ROBOT::processUnsubscribeRequest(const btp::Header& header, btp::ByteView payload,
+                                      bally::Channel channel) {
     const uint64_t now_us = static_cast<uint64_t>(esp_timer_get_time());
-    subscription_responder.handle_unsubscribe(header, payload, now_us);
+    subscription_responder.handle_unsubscribe(header, payload, now_us, channel);
 }
 
 void ROBOT::handleSendStatic(const wifi_tx_info_t *tx_info, esp_now_send_status_t status) {
