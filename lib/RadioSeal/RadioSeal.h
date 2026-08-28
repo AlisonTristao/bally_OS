@@ -34,8 +34,17 @@ class KeyStore;
  * The fix is BtpEndpoint::SealFn: a function-pointer callback instead of a
  * direct dependency, so the actual crypto call lives here, in a library only
  * utils/BallyRobot (ESP-IDF/Arduino-only, never built under env:native) ever
- * includes. On the real target the ESP-IDF SDK's mbedtls/PSA backend links
- * without any extra configuration.
+ * includes.
+ *
+ * On the real target the backend does NOT link automatically: under
+ * `framework = espidf` a PlatformIO lib_deps library is compiled outside the
+ * ESP-IDF component graph and never gets the mbedtls/PSA include paths, so
+ * BTP/src/aead.cpp compiles empty and these calls come out undefined. BTP is
+ * therefore consumed as an ESP-IDF component (components/btp/CMakeLists.txt,
+ * `REQUIRES mbedtls`) rather than a lib_deps entry -- that is what puts
+ * <psa/crypto.h> on aead.cpp's path. This ESP-IDF is mbedtls 4.x /
+ * TF-PSA-Crypto, where <mbedtls/gcm.h> is no longer public, so the PSA
+ * backend is the one that links (present in BTP past the v2.0.0 tag).
  */
 namespace RadioSeal {
 
