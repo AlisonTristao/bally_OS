@@ -141,6 +141,11 @@ public:
     // routine to be executed in parallel processing
     static void routine(void *param);
 
+    // dedicated radio task: drains the TX scheduler and re-publishes STATUS at
+    // a steady rate, decoupled from routine()'s workload (see start_freertos_
+    // tasks() in main.cpp for why). Never blocks.
+    static void runComms(void *param);
+
     // configure the interruptions for the buttons and side sensors
     static void initInterruptions(void *param);
 
@@ -639,12 +644,17 @@ private:
     uint32_t protocol_test_counter_ = 0U;
     stateName last_telemetry_state_ = NONE;
 
-    // CONTROL/STATUS (topico 17 PASSOS 8/9): one spontaneous message per
-    // second, published from routine() -- the same task that already drains
-    // the telemetry queue and pumps the scheduler, so the control loop and
-    // the state-machine task never pay for it. status_version=2 carries the
-    // per-topic block (subscriber count, aggregate rate, bytes, drops).
-    static constexpr uint64_t kStatusPeriodUs = 1000000ULL;
+    // CONTROL/STATUS (topico 17 PASSOS 8/9): a spontaneous message published
+    // from the dedicated comms task (runComms()), decoupled from routine().
+    // status_version=2 carries the per-topic block (subscriber count, aggregate
+    // rate, bytes, drops).
+    //
+    // 500 ms, not 1 s: this frame is also the dongle's presence heartbeat for
+    // hub.peers and its trigger to (re)prime the robot's manifest. Near the
+    // motors ESP-NOW loses frames, so sending twice as often is what makes the
+    // dongle reliably hear at least one per second and keeps a healthy robot
+    // from flickering "offline". Still a small frame on a lightly used channel.
+    static constexpr uint64_t kStatusPeriodUs = 500000ULL;
     uint64_t next_status_us_ = 0U;
     void publishStatus();
 

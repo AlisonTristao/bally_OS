@@ -37,6 +37,8 @@ static void init_system_monitor();
 
 static StackType_t xRoutineStack[M8KB];
 static StaticTask_t xRoutineBuffer;
+static StackType_t xCommsStack[M8KB];
+static StaticTask_t xCommsBuffer;
 static StackType_t xShellStack[M8KB];
 static StaticTask_t xShellBuffer;
 static StackType_t xStateMachineStack[M8KB];
@@ -81,10 +83,19 @@ extern "C" void app_main(void) {
 static void setup_system_callbacks() {
     // Every BTP producer enqueues through the priority scheduler. The radio
     // callback below is the only place that starts an ESP-NOW transmission.
+    //
+    // 60 ms delivery timeout (down from the 250 ms default): the scheduler
+    // sends the next frame only once the previous one's ESP-NOW send callback
+    // lands or this timeout expires. Near the motors the callback is regularly
+    // late or lost to RF noise, and at 250 ms that collapsed the whole radio
+    // output to ~4 frames/s — STATUS, telemetry and COMMAND_RESULT all with it.
+    // A callback that has not arrived in 60 ms is not going to change the
+    // outcome; the frame was already handed to the driver. A late callback is
+    // harmless (on_delivery() no-ops once awaiting_delivery_ clears).
     robot.tx_scheduler.configure([](void*, const uint8_t *data, size_t len) {
         static const uint8_t peer_mac[6] = {MAC_ADDR};
         return (esp_now_send(peer_mac, data, len)) == ESP_OK;
-    }, nullptr);
+    }, nullptr, 60U);
     robot.protocol.set_send_callback(TxScheduler::enqueue_callback,
                                      &robot.tx_scheduler);
 
@@ -135,12 +146,23 @@ static void setup_system_callbacks() {
 
 static void start_freertos_tasks() {
     // Priority order on PRO_CPU_NUM (core 0 — core 1/APP_CPU_NUM is reserved
-    // for state_machine alone, see CONTRIBUTING.md): EKF (4) > routine (3) >
-    // shell (2) > junkebox (1) > interrupts (0). junkebox sits just above
-    // interrupts because note timing only needs to be roughly on-beat, not
-    // exact — it should never delay EKF sampling, motor routine upkeep or
-    // shell command handling.
+    // for state_machine alone, see CONTRIBUTING.md): EKF (4) = comms (4) >
+    // routine (3) > shell (2) > junkebox (1) > interrupts (0). junkebox sits
+    // just above interrupts because note timing only needs to be roughly
+    // on-beat, not exact — it should never delay EKF sampling, motor routine
+    // upkeep or shell command handling.
+    //
+    // comms is split out of routine on purpose: the robot<->dongle link's
+    // liveness signal (CONTROL/STATUS on channel C) and the ESP-NOW TX pump
+    // must keep running at a steady rate even when routine() stalls on an SD
+    // flush, a contended logger mutex or a slow control-loop pass. When they
+    // rode routine(), a routine() hiccup made the robot look offline to the
+    // dongle (hub.peers) and stalled every MANIFEST_DATA / COMMAND_RESULT the
+    // TX scheduler was holding. comms only pumps queues and re-publishes
+    // STATUS — it never blocks — so it is safe at EKF's priority; EKF itself
+    // spends almost all its time blocked on ulTaskNotifyTake().
     xTaskCreateStaticPinnedToCore(robot.routine,           "routine",       M8KB, NULL, 3,  xRoutineStack,      &xRoutineBuffer,      PRO_CPU_NUM);
+    xTaskCreateStaticPinnedToCore(robot.runComms,          "comms",         M8KB, NULL, 4,  xCommsStack,        &xCommsBuffer,        PRO_CPU_NUM);
     xTaskCreateStaticPinnedToCore(robot.initInterruptions, "interrupts",    M2KB, NULL, 0,  xInterruptsStack,   &xInterruptsBuffer,   PRO_CPU_NUM);
     xTaskCreateStaticPinnedToCore(robot.runStateMachine,   "state_machine", M8KB, NULL, 10, xStateMachineStack, &xStateMachineBuffer, APP_CPU_NUM);
     xTaskCreateStaticPinnedToCore(robot.runShell,          "shell_task",    M8KB, NULL, 2,  xShellStack,        &xShellBuffer,        PRO_CPU_NUM);

@@ -1575,17 +1575,12 @@ void ROBOT::routine(void *param){
         // flush and let logs pile up in PSRAM instead of retrying/losing
         // them, then drain everything once cancel() gives the channel back.
         if (!instance_->ota.is_active()) {
-            // Producers only enqueue encoded frames. The scheduler drains one
-            // callback-correlated ESP-NOW attempt at a time, always selecting
-            // COMMAND_RESULT before status, critical logs, telemetry and debug.
+            // Producers only enqueue encoded frames; the "comms" task drains
+            // the scheduler and re-publishes STATUS (see runComms() below), so
+            // a stall here never silences the link. This task still feeds the
+            // scheduler with telemetry and log frames.
             instance_->telemetry.flush(4U);
             ROBOT::logger.flush_logs();              // send the logger messagens to output
-            instance_->tx_scheduler.pump(
-                static_cast<uint64_t>(esp_timer_get_time() / 1000ULL));
-            // Topico 17 PASSOS 8/9. Runs on the comms task, after the
-            // telemetry drain, so the control loop and the state-machine
-            // task never see it.
-            instance_->publishStatus();
         }
         instance_->resetFlags();                    // reset the flags - buttons, side sensors, pwm...
         instance_->setOutputs();                    // set the output - leds, pwm...
@@ -1596,6 +1591,36 @@ void ROBOT::routine(void *param){
         instance_->pollJobs();                      // fire due time/state jobs
         instance_->pollScript();                    // feed at most one script line
         vTaskDelay(WDOG_TIMEOUT_TK); // delay for wathdog timer and to allow other tasks to run
+    }
+}
+
+// Dedicated radio task. Only two jobs, neither of which ever blocks:
+//   - pump() the TX scheduler: it starts at most one ESP-NOW send per call and
+//     returns immediately (the delivery callback lands on the Wi-Fi task), so
+//     this loop's rate is what sets radio throughput. On routine() it was
+//     throttled to routine()'s slowest pass;
+//   - publishStatus(): self-gated to kStatusPeriodUs, so calling it every pass
+//     costs nothing until one is actually due.
+//
+// The result: the dongle keeps hearing STATUS on channel C (hub.peers stays
+// "online", MANIFEST_REQUEST priming keeps getting answered) and queued
+// COMMAND_RESULT / MANIFEST_DATA leave promptly, regardless of what routine(),
+// the logger or an SD flush are doing.
+void ROBOT::runComms(void *param) {
+    (void)param;
+
+    while (!instance_->initialized)
+        vTaskDelay(100 / portTICK_PERIOD_MS);
+
+    while (true) {
+        // Same OTA guard routine() uses: while OTA holds the radio on the
+        // target Wi-Fi channel, ESP-NOW frames never reach the peer.
+        if (!instance_->ota.is_active()) {
+            instance_->tx_scheduler.pump(
+                static_cast<uint64_t>(esp_timer_get_time() / 1000ULL));
+            instance_->publishStatus();
+        }
+        vTaskDelay(WDOG_TIMEOUT_TK);
     }
 }
 
