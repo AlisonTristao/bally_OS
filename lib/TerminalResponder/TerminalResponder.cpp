@@ -139,6 +139,7 @@ TerminalResponder::Slot* TerminalResponder::find_or_alloc(std::uint32_t source_i
     victim->needs_editor_reset = true;
     victim->in.clear();
     victim->pending_out.clear();
+    victim->async_out.clear();
     victim->result_ready = false;
     origins_seen_.fetch_add(1U, std::memory_order_relaxed);
     return victim;
@@ -195,6 +196,45 @@ void TerminalResponder::deliver_command_output(std::uint32_t source_id, std::uin
     if (s != nullptr) {
         s->pending_out = std::move(rendered);
         s->result_ready = true;
+    }
+    unlock();
+}
+
+void TerminalResponder::push_async_output(std::uint32_t source_id, std::uint32_t boot_id,
+                                          const char* text) noexcept {
+    if (text == nullptr || text[0] == '\0' || endpoint_ == nullptr) {
+        return;
+    }
+
+    // Build the "! <line>\r\n" form OUTSIDE the lock (same reasoning as
+    // deliver_command_output rendering before it locks): this runs on the
+    // state-machine task and the critical section below must stay O(1).
+    std::string line = "! ";
+    line += text;
+    while (!line.empty() &&
+           (line.back() == '\r' || line.back() == '\n' || line.back() == ' ')) {
+        line.pop_back();
+    }
+    line += "\r\n";
+
+    // State-machine task (core 1) while pump()/on_terminal_in() run on core 0:
+    // the lock holder is always on the other core making progress, so a bounded
+    // try is enough and dropping the line on a miss beats spinning core 1.
+    if (!try_lock()) {
+        async_lines_dropped_.fetch_add(1U, std::memory_order_relaxed);
+        return;
+    }
+    Slot* s = find(source_id, boot_id);
+    if (s == nullptr) {
+        // No terminal ever spoke to this robot from that origin (or its slot
+        // was evicted): nothing to mirror to. The LOG frame still carries it.
+        unlock();
+        return;
+    }
+    if (s->async_out.size() + line.size() <= kMaxAsyncOut) {
+        s->async_out += line;
+    } else {
+        async_lines_dropped_.fetch_add(1U, std::memory_order_relaxed);
     }
     unlock();
 }

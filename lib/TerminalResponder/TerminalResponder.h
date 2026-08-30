@@ -53,6 +53,10 @@ public:
     // Ceiling on one command's mirrored output before it is truncated with a
     // notice -- keeps a `help`-sized dump from flooding the TX scheduler.
     static constexpr std::size_t kMaxCommandOut = 2048U;
+    // Ceiling on un-drained unsolicited output held for one origin
+    // (push_async_output). pump() drains it every comms pass, so this only
+    // fills if the radio backs up hard; the oldest lines are dropped then.
+    static constexpr std::size_t kMaxAsyncOut = 1024U;
 
     // Submit one completed shell line for execution. The implementation
     // enqueues it on the robot's command queue tagged with (source_id,
@@ -92,6 +96,20 @@ public:
     void deliver_command_output(std::uint32_t source_id, std::uint32_t boot_id,
                                 const char* text, std::uint8_t status) noexcept;
 
+    // Queue one line of unsolicited output for an existing terminal origin --
+    // e.g. an asynchronous "debug" test's periodic result, which otherwise
+    // only leaves the robot as a LOG frame and never shows in the terminal
+    // that started it. `text` is one line WITHOUT a trailing newline; it is
+    // mirrored back prefixed with "! " and CR+LF-terminated, matching a
+    // command's own output, and printed above the prompt (the edit line is
+    // restored once the burst pauses).
+    //
+    // A silent no-op if (source_id, boot_id) has no live slot (that terminal
+    // never spoke to this robot, or its slot was evicted). Safe to call from
+    // any task; bounded, drops the line on overflow or lock contention.
+    void push_async_output(std::uint32_t source_id, std::uint32_t boot_id,
+                           const char* text) noexcept;
+
     struct Stats {
         std::uint32_t origins_seen;
         std::uint32_t origins_evicted;
@@ -99,6 +117,7 @@ public:
         std::uint32_t lines_dropped_busy;
         std::uint32_t frames_out;
         std::uint32_t in_bytes_dropped;
+        std::uint32_t async_lines_dropped;
     };
     Stats stats() const noexcept;
 
@@ -126,8 +145,16 @@ private:
         // reset() -- so the Wi-Fi RX task never spin-waits here for long.
         std::string in;            // TERMINAL_IN bytes awaiting the editor
         std::string pending_out;   // command output awaiting the editor
+        std::string async_out;     // unsolicited output awaiting the editor
+                                   // (push_async_output); bounded at kMaxAsyncOut
         bool result_ready = false;
         bool needs_editor_reset = false;  // slot just (re)allocated; pump() resets
+
+        // pump()-owned (like prompt_painted/awaiting_result): an async burst
+        // broke off the prompt line and it has not been repainted yet. pump()
+        // sets it when it flushes async_out and clears it on the pass that
+        // repaints the prompt once the burst pauses.
+        bool async_prompt_dirty = false;
     };
 
     // Bound for try_lock()'s spin. Large only because every critical section
@@ -171,6 +198,7 @@ private:
     std::atomic<std::uint32_t> lines_dropped_busy_{0U};
     std::atomic<std::uint32_t> frames_out_{0U};
     std::atomic<std::uint32_t> in_bytes_dropped_{0U};
+    std::atomic<std::uint32_t> async_lines_dropped_{0U};
 };
 
 #endif  // TERMINAL_RESPONDER_H
