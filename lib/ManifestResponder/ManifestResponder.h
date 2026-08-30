@@ -31,21 +31,42 @@ class BtpEndpoint;
 // it just means "describe yourself") always describes exactly one source
 // (this robot), so catalog_index=0/catalog_count=1/CATALOG_COMPLETE is set on
 // every response, per commands.md section 3.2's "for a targeted request".
+// One source_info entry (BTP/docs/commands.md section 3.12): three textual
+// fields. `key` is a stable machine identifier ("fw_version"), `label` a
+// human name for display ("Firmware", may be empty), `value` the datum as
+// text ("2", "16777216", "ESP32-S3"). All three are copied onto the wire when
+// the response is built, so a caller may point them at any storage that stays
+// valid for the duration of handle_request() -- esp_app_get_description()
+// fields, RobotSettings buffers, static scratch.
+struct SourceInfoEntry {
+    const char* key;
+    const char* label;
+    const char* value;
+};
+
 class ManifestResponder {
 public:
     static constexpr std::uint16_t kManifestRequestObjectId = 0x0003U;
     static constexpr std::uint16_t kManifestDataObjectId = 0x0004U;
-    static constexpr std::uint16_t kManifestFormatVersion = 1U;
+    // Format 2 adds the source_info block after source_name (commands.md
+    // section 3.12). A consumer that only implements format 1 rejects this
+    // response, so the fleet moves together -- there is no format negotiation
+    // in MANIFEST_REQUEST.
+    static constexpr std::uint16_t kManifestFormatVersion = 2U;
     static constexpr std::uint32_t kConfigRevision = 1U;
     static constexpr std::uint8_t kSourceRoleRobot = 0x01U;
-    // Comfortably covers the two current schemas (protocol.test, robot.state)
-    // with headroom for a few more fields/topics; well under the manifest's
-    // 49152-octet wire ceiling (commands.md section 6).
-    // BtpEndpoint::send_logical fragments this across ESP-NOW frames
-    // (kEspNowMaxPayloadSize=210) automatically -- reusing the same
-    // btp::fragment_count/make_fragment machinery every other logical send in
-    // this firmware already uses, not a second scheme.
-    static constexpr std::size_t kMaxManifestPayloadSize = 512U;
+    // Upper bound on source_info entries this responder will emit; commands.md
+    // section 6 caps the wire at 32. A caller passing more is truncated here
+    // rather than overrunning the payload buffer.
+    static constexpr std::size_t kMaxSourceInfoEntries = 16U;
+    // The two current schemas (protocol.test, robot.state) are ~200 octets;
+    // prefix + source_name take ~275, which leaves room for a compact
+    // source_info block. Sized to BtpEndpoint::send_logical's own
+    // kMaxLogicalPayloadSize ceiling (600) -- a manifest larger than that is
+    // refused there anyway, so build_manifest_data failing at this bound is
+    // the earlier, cleaner failure. send_logical still fragments whatever
+    // fits across ESP-NOW frames (kEspNowMaxPayloadSize=210) automatically.
+    static constexpr std::size_t kMaxManifestPayloadSize = 600U;
 
     // uuid is copied (16 bytes, opaque, stable identity for this boot -- see
     // BallyRobot.cpp's configureProtocolIdentity(), derived from the MAC).
@@ -57,8 +78,18 @@ public:
     // passes RadioSeal::seal, the same single key StatusReporter's STATUS
     // already seals with -- no per-channel choice to make, unlike
     // SubscriptionResponder's SUBSCRIBE_RESULT/UNSUBSCRIBE_RESULT.
+    // `source_info`/`source_info_count` (default none) describe this robot to
+    // a human operator -- name, firmware version, chip, running partition.
+    // The array is borrowed, not copied: it and every string it points at
+    // must outlive this responder (the composition root keeps it static). Its
+    // string *contents* are re-read on every response, so a value backed by a
+    // RobotSettings buffer reflects a live "settings -set" without a
+    // config_revision bump (commands.md section 3.12: source_info is not
+    // gated by config_revision).
     void configure(BtpEndpoint& endpoint, const std::uint8_t uuid[16],
-                   BtpSealFn seal = nullptr, void* seal_context = nullptr) noexcept;
+                   BtpSealFn seal = nullptr, void* seal_context = nullptr,
+                   const SourceInfoEntry* source_info = nullptr,
+                   std::size_t source_info_count = 0U) noexcept;
 
     // Parses a CONTROL/MANIFEST_REQUEST payload (already validated as
     // unfragmented or reassembled by the caller) and sends the matching
@@ -76,6 +107,8 @@ private:
     std::uint8_t uuid_[16] = {};
     BtpSealFn seal_ = nullptr;
     void* seal_context_ = nullptr;
+    const SourceInfoEntry* source_info_ = nullptr;
+    std::size_t source_info_count_ = 0U;
 };
 
 #endif  // MANIFEST_RESPONDER_H

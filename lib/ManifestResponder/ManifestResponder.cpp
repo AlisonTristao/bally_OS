@@ -148,8 +148,9 @@ bool write_topic_record(Writer& writer, const TelemetryPublisher::TopicSchema& t
 std::size_t build_manifest_data(const btp::Header& request_header, std::uint8_t status, std::uint8_t flags,
                                 std::uint16_t error_code, const std::uint8_t uuid[16],
                                 std::uint32_t described_source_id, std::uint32_t described_boot_id,
-                                std::uint32_t config_revision, const char* name, std::uint8_t* output,
-                                std::size_t capacity) noexcept {
+                                std::uint32_t config_revision, const char* name,
+                                const SourceInfoEntry* source_info, std::size_t source_info_count,
+                                std::uint8_t* output, std::size_t capacity) noexcept {
     Writer writer(output, capacity);
     const bool error = (status != kStatusSuccess);
 
@@ -182,6 +183,34 @@ std::size_t build_manifest_data(const btp::Header& request_header, std::uint8_t 
         return 0U;
     }
 
+    // source_info block -- manifest_format_version 2 (commands.md section
+    // 3.12). Written on every SUCCESS response, NOT_MODIFIED included: it is
+    // informational, not a descriptor, and is not gated by config_revision,
+    // so a consumer always gets the current values. An error (REJECTED)
+    // response describes nothing and writes an empty block. An entry with an
+    // empty value is skipped entirely -- that is what makes name/description
+    // optional: the field just does not appear until it is set.
+    const std::size_t infoClamped =
+        (error || source_info == nullptr)
+            ? 0U
+            : (source_info_count > ManifestResponder::kMaxSourceInfoEntries
+                   ? ManifestResponder::kMaxSourceInfoEntries
+                   : source_info_count);
+    std::uint16_t infoCount = 0U;
+    for (std::size_t i = 0U; i < infoClamped; ++i) {
+        const char* value = source_info[i].value;
+        if (value != nullptr && value[0] != '\0') ++infoCount;
+    }
+    if (!writer.u16(infoCount)) return 0U;
+    for (std::size_t i = 0U; i < infoClamped; ++i) {
+        const char* value = source_info[i].value;
+        if (value == nullptr || value[0] == '\0') continue;
+        if (!writer.utf8(source_info[i].key) || !writer.utf8(source_info[i].label) ||
+            !writer.utf8(value)) {
+            return 0U;
+        }
+    }
+
     for (std::size_t i = 0U; i < topicCount; ++i) {
         if (!write_topic_record(writer, schemas[i])) return 0U;
     }
@@ -193,11 +222,14 @@ std::size_t build_manifest_data(const btp::Header& request_header, std::uint8_t 
 }  // namespace
 
 void ManifestResponder::configure(BtpEndpoint& endpoint, const std::uint8_t uuid[16], BtpSealFn seal,
-                                  void* seal_context) noexcept {
+                                  void* seal_context, const SourceInfoEntry* source_info,
+                                  std::size_t source_info_count) noexcept {
     endpoint_ = &endpoint;
     if (uuid != nullptr) std::memcpy(uuid_, uuid, 16U);
     seal_ = seal;
     seal_context_ = seal_context;
+    source_info_ = source_info;
+    source_info_count_ = (source_info == nullptr) ? 0U : source_info_count;
 }
 
 bool ManifestResponder::handle_request(const btp::Header& request_header, btp::ByteView payload,
@@ -218,21 +250,22 @@ bool ManifestResponder::handle_request(const btp::Header& request_header, btp::B
         // Not this robot's identity -- a leaf node only knows how to
         // describe itself (see class comment).
         responseSize = build_manifest_data(request_header, kStatusRejected, kFlagCatalogComplete, kErrorNotFound,
-                                           uuid_, 0U, 0U, 0U, "unknown source", responsePayload,
+                                           uuid_, 0U, 0U, 0U, "unknown source", nullptr, 0U, responsePayload,
                                            sizeof(responsePayload));
     } else if (targetBootId != 0U && targetBootId != localBootId) {
         responseSize = build_manifest_data(request_header, kStatusRejected, kFlagCatalogComplete,
-                                           kErrorStaleTargetBoot, uuid_, 0U, 0U, 0U, "boot mismatch",
+                                           kErrorStaleTargetBoot, uuid_, 0U, 0U, 0U, "boot mismatch", nullptr, 0U,
                                            responsePayload, sizeof(responsePayload));
     } else if (knownRevision != 0U && knownRevision == kConfigRevision) {
         responseSize = build_manifest_data(request_header, kStatusSuccess,
                                            static_cast<std::uint8_t>(kFlagNotModified | kFlagCatalogComplete),
                                            kErrorNone, uuid_, localSourceId, localBootId, kConfigRevision, nullptr,
-                                           responsePayload, sizeof(responsePayload));
+                                           source_info_, source_info_count_, responsePayload,
+                                           sizeof(responsePayload));
     } else {
         responseSize = build_manifest_data(request_header, kStatusSuccess, kFlagCatalogComplete, kErrorNone, uuid_,
-                                           localSourceId, localBootId, kConfigRevision, nullptr, responsePayload,
-                                           sizeof(responsePayload));
+                                           localSourceId, localBootId, kConfigRevision, nullptr, source_info_,
+                                           source_info_count_, responsePayload, sizeof(responsePayload));
     }
 
     if (responseSize == 0U) return false;

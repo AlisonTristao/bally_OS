@@ -13,6 +13,10 @@
 #include "esp_random.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "esp_app_desc.h"
+#include "esp_chip_info.h"
+#include "esp_ota_ops.h"
+#include <cstdio>
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
 #include "esp_rom_sys.h"
@@ -227,6 +231,53 @@ bool ROBOT::configurePinsFromSettings()
     return true;
 }
 
+void ROBOT::buildSourceInfo() {
+    // Values for MANIFEST_DATA's source_info block (BTP/docs/commands.md
+    // section 3.12). Each string is static (an app-descriptor field, a
+    // literal, the OTA partition label), a RobotSettings buffer re-read on
+    // every response, or a slice of source_info_scratch_ formatted here once.
+    // ManifestResponder drops any entry whose value is empty, so an
+    // unconfigured name/description simply does not appear on the wire.
+    const esp_app_desc_t* app = esp_app_get_description();
+    esp_chip_info_t chip{};
+    esp_chip_info(&chip);
+    const esp_partition_t* running = esp_ota_get_running_partition();
+
+    char* cursor = source_info_scratch_;
+    char* const scratch_end = source_info_scratch_ + sizeof(source_info_scratch_);
+    const char* built = "";
+    const char* chip_rev = "";
+    if (app != nullptr) {
+        const int n = std::snprintf(cursor, static_cast<size_t>(scratch_end - cursor),
+                                    "%s %s", app->date, app->time);
+        if (n > 0 && cursor + n + 1 <= scratch_end) { built = cursor; cursor += n + 1; }
+    }
+    {
+        const int n = std::snprintf(cursor, static_cast<size_t>(scratch_end - cursor),
+                                    "%u.%u", chip.revision / 100U, chip.revision % 100U);
+        if (n > 0 && cursor + n + 1 <= scratch_end) { chip_rev = cursor; cursor += n + 1; }
+    }
+
+    std::size_t i = 0U;
+    const auto add = [&](const char* key, const char* label, const char* value) {
+        if (i < ManifestResponder::kMaxSourceInfoEntries && value != nullptr) {
+            source_info_entries_[i++] = SourceInfoEntry{key, label, value};
+        }
+    };
+
+    add("name",         "Name",              settings.data().name);
+    add("description",  "Description",       settings.data().description);
+    add("model",        "Model",             "BallyRobot");
+    add("fw_version",   "Firmware",          app != nullptr ? app->version : "");
+    add("fw_build",     "Built",             built);
+    add("idf_version",  "ESP-IDF",           app != nullptr ? app->idf_ver : "");
+    add("chip",         "Chip",              "ESP32-S3");
+    add("chip_revision", "Chip revision",    chip_rev);
+    add("ota_partition", "Running partition", running != nullptr ? running->label : "");
+
+    source_info_count_ = i;
+}
+
 bool ROBOT::configureProtocolIdentity() {
     if (protocol.source_id() != 0U && protocol.boot_id() != 0U) return true;
 
@@ -308,7 +359,9 @@ bool ROBOT::configureProtocolIdentity() {
     // never authenticates, so it can never be told apart from a forged one
     // and ManifestCache never learns this robot's schema while a desktop is
     // attached (see bally_channels.h's dongle_consumes comment).
-    manifest_responder.configure(protocol, protocol_uuid_, RadioSeal::seal, nullptr);
+    buildSourceInfo();
+    manifest_responder.configure(protocol, protocol_uuid_, RadioSeal::seal, nullptr,
+                                 source_info_entries_, source_info_count_);
     // TELEMETRY is channel B (bally_channels.h): TraceView holds key E, the
     // dongle relays the samples and never reads them. Sealed with E so a
     // desktop that has the robot's password is the only thing that can plot

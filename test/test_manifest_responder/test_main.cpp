@@ -276,6 +276,10 @@ void test_full_manifest_response_matches_telemetry_schemas() {
     TEST_ASSERT_EQUAL_UINT16(0U, reader.u16());  // action_count
     TEST_ASSERT_EQUAL_STRING("bally_software", reader.utf8().c_str());
 
+    // source_info block (manifest_format_version 2, commands.md 3.12): this
+    // fixture configures no entries, so it is a bare zero count.
+    TEST_ASSERT_EQUAL_UINT16(0U, reader.u16());  // info_count
+
     for (std::size_t t = 0U; t < expected_topic_count; ++t) {
         const TelemetryPublisher::TopicSchema& topic = schemas[t];
 
@@ -381,6 +385,9 @@ void test_known_revision_returns_not_modified_with_no_topics() {
     TEST_ASSERT_EQUAL_UINT16(0U, reader.u16());  // topic_count
     TEST_ASSERT_EQUAL_UINT16(0U, reader.u16());  // action_count
     TEST_ASSERT_EQUAL_STRING("bally_software", reader.utf8().c_str());
+    // source_info still rides along on a NOT_MODIFIED response (commands.md
+    // 3.12: not gated by config_revision); this fixture configures none.
+    TEST_ASSERT_EQUAL_UINT16(0U, reader.u16());  // info_count
     TEST_ASSERT_EQUAL_UINT32(logical.size(), reader.pos());
 }
 
@@ -425,6 +432,7 @@ void test_request_for_different_source_is_rejected_not_found() {
     TEST_ASSERT_EQUAL_UINT16(0U, reader.u16());  // topic_count
     TEST_ASSERT_EQUAL_UINT16(0U, reader.u16());  // action_count
     TEST_ASSERT_EQUAL_STRING("unknown source", reader.utf8().c_str());
+    TEST_ASSERT_EQUAL_UINT16(0U, reader.u16());  // info_count: an error describes nothing
     TEST_ASSERT_EQUAL_UINT32(logical.size(), reader.pos());
 }
 
@@ -524,6 +532,90 @@ void test_reply_is_sealed_when_configured_with_a_seal_function() {
     TEST_ASSERT_EQUAL_HEX8(0x11U, decoded.payload.data[decoded.payload.size - 1U]);
 }
 
+// ---------------------------------------------------------------------------
+// A configured source_info block (commands.md 3.12) round-trips: info_count
+// then key/label/value per entry, in order; an entry with an empty value is
+// dropped (that is what makes name/description optional). It rides a full
+// response AND a NOT_MODIFIED one, since source_info is not gated by
+// config_revision.
+// ---------------------------------------------------------------------------
+void skip_prefix_and_name_to_source_info(Reader& reader, std::uint16_t* topic_count_out) {
+    for (int i = 0; i < 3; ++i) reader.u32();  // request reference
+    reader.u8();                               // status
+    reader.u8();                               // flags
+    reader.u16();                              // error_code
+    reader.u16();                              // manifest_format_version
+    reader.u16();                              // reserved
+    reader.u32();                              // config_revision
+    std::uint8_t uuid[16]{};
+    reader.bytes(uuid, sizeof(uuid));
+    reader.u32();                              // described_source_id
+    reader.u32();                              // described_boot_id
+    reader.u8();                               // source_role
+    reader.u8();                               // source_flags
+    reader.u16();                              // catalog_index
+    reader.u16();                              // catalog_count
+    *topic_count_out = reader.u16();           // topic_count
+    reader.u16();                              // action_count
+    TEST_ASSERT_EQUAL_STRING("bally_software", reader.utf8().c_str());
+}
+
+void assert_two_entry_info_block(Reader& reader) {
+    TEST_ASSERT_EQUAL_UINT16(2U, reader.u16());  // info_count: the empty entry was dropped
+    TEST_ASSERT_EQUAL_STRING("fw_version", reader.utf8().c_str());
+    TEST_ASSERT_EQUAL_STRING("Firmware", reader.utf8().c_str());
+    TEST_ASSERT_EQUAL_STRING("1dd9fc5", reader.utf8().c_str());
+    TEST_ASSERT_EQUAL_STRING("chip", reader.utf8().c_str());
+    TEST_ASSERT_EQUAL_STRING("Chip", reader.utf8().c_str());
+    TEST_ASSERT_EQUAL_STRING("ESP32-S3", reader.utf8().c_str());
+}
+
+void test_source_info_block_round_trips_and_skips_empty_values() {
+    BtpEndpoint endpoint;
+    ManifestResponder responder;
+    TEST_ASSERT_TRUE(endpoint.configure(kLocalSourceId, kLocalBootId));
+    endpoint.set_send_callback(capture_send);
+
+    const SourceInfoEntry info[] = {
+        {"fw_version", "Firmware", "1dd9fc5"},
+        {"name", "Name", ""},  // empty value -> not emitted
+        {"chip", "Chip", "ESP32-S3"},
+    };
+    responder.configure(endpoint, kUuid, nullptr, nullptr, info,
+                        sizeof(info) / sizeof(info[0]));
+
+    std::size_t expected_topic_count = 0U;
+    TelemetryPublisher::schemas(&expected_topic_count);
+
+    const auto header = manifest_request_header(kRequesterSourceId, kRequesterBootId,
+                                                kRequestSequence);
+
+    // Full response: source_info sits between source_name and the topic records.
+    {
+        const auto logical = send_and_reassemble(
+            endpoint, responder, header, manifest_request_payload(0U, 0U, 0U));
+        Reader reader(logical);
+        std::uint16_t topic_count = 0U;
+        skip_prefix_and_name_to_source_info(reader, &topic_count);
+        TEST_ASSERT_EQUAL_UINT32(expected_topic_count, topic_count);
+        assert_two_entry_info_block(reader);
+        TEST_ASSERT_LESS_THAN_UINT32(logical.size(), reader.pos());  // topic records still follow
+    }
+
+    // NOT_MODIFIED response: no topic records, but the same source_info block.
+    {
+        const auto logical = send_and_reassemble(
+            endpoint, responder, header,
+            manifest_request_payload(0U, 0U, ManifestResponder::kConfigRevision));
+        Reader reader(logical);
+        std::uint16_t topic_count = 0U;
+        skip_prefix_and_name_to_source_info(reader, &topic_count);
+        TEST_ASSERT_EQUAL_UINT16(0U, topic_count);
+        assert_two_entry_info_block(reader);
+        TEST_ASSERT_EQUAL_UINT32(logical.size(), reader.pos());  // nothing after
+    }
+}
+
 void test_short_payload_is_rejected_without_sending() {
     BtpEndpoint endpoint;
     ManifestResponder responder;
@@ -553,6 +645,7 @@ int main(int, char**) {
     RUN_TEST(test_known_revision_returns_not_modified_with_no_topics);
     RUN_TEST(test_request_for_different_source_is_rejected_not_found);
     RUN_TEST(test_request_with_stale_boot_id_is_rejected);
+    RUN_TEST(test_source_info_block_round_trips_and_skips_empty_values);
     RUN_TEST(test_reply_is_sealed_when_configured_with_a_seal_function);
     RUN_TEST(test_short_payload_is_rejected_without_sending);
     return UNITY_END();

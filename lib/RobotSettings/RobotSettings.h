@@ -42,6 +42,14 @@ class Logger;
  * include/Settings.h used before this field moved out of it.
  */
 struct SettingsData {
+    // -------- identity (how this robot presents itself over BTP) --------
+    // Surfaced verbatim in MANIFEST_DATA's source_info block
+    // (BTP/docs/commands.md section 3.12), read live on every response, so a
+    // "settings -set identity name ..." shows up without a reboot. Empty by
+    // default: an unconfigured robot simply omits the entry.
+    char name[32]        = "";
+    char description[64] = "";
+
     // -------- timers --------
     uint32_t sample_micros  = 1000;   // EKF sample period, us (1000 -> 1kHz)
     uint32_t sysmon_freq_ms = 10000;  // system monitor report period, ms

@@ -23,6 +23,9 @@ constexpr size_t kMaxModuleNameLength = 32;
     { mod, #field, SettingType::type, offsetof(SettingsData, field), sizeof(SettingsData::field) }
 
 const SettingEntry RobotSettings::kTable[] = {
+    ENTRY("identity", name,        STRING),
+    ENTRY("identity", description, STRING),
+
     ENTRY("timers", sample_micros,  U32),
     ENTRY("timers", sysmon_freq_ms, U32),
     ENTRY("timers", delay_flags,    U32),

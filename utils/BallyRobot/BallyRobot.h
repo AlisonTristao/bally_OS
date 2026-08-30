@@ -329,6 +329,19 @@ private:
     // a stable "source_uuid" to put in MANIFEST_DATA.
     std::uint8_t protocol_uuid_[16]{};
 
+    // MANIFEST_DATA source_info block (BTP/docs/commands.md section 3.12),
+    // built once by buildSourceInfo() from esp_app_get_description(),
+    // esp_chip_info(), the running OTA partition and RobotSettings. Entries
+    // borrow their strings: app-descriptor fields (static), settings buffers
+    // (re-read live, so "settings -set identity ..." needs no reboot), and
+    // slices of source_info_scratch_ for the formatted numbers. Manifest
+    // Responder drops an entry whose value is empty, so an unconfigured
+    // name/description simply does not appear.
+    SourceInfoEntry source_info_entries_[ManifestResponder::kMaxSourceInfoEntries]{};
+    std::size_t source_info_count_ = 0U;
+    char source_info_scratch_[96]{};
+    void buildSourceInfo();
+
     // Set once in init() from imu->begin()'s result. Gates the IMU read in
     // sampleEKF() — skipping it when the sensor never answered avoids
     // retrying (and blocking on) an I2C timeout on every EKF tick.
