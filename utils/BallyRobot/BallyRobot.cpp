@@ -1860,6 +1860,21 @@ void ROBOT::sampleTelemetry() {
         next_protocol_test_us_ = now_us;
     }
 
+    // A low-rate whole-document topic for TraceView's Text Board. Building
+    // the task table is intentionally gated by a live subscription; with no
+    // board open this adds no SystemMonitor formatting or RF traffic.
+    const uint64_t monitor_period_us =
+        telemetry.topic_period_us(TelemetryPublisher::kSystemMonitorTopicId);
+    if (monitor_period_us != 0U && now_us >= next_system_monitor_us_) {
+        sysmon.update();
+        const std::string report = sysmon.getTelemetryReport(
+            TelemetryPublisher::kMaxSystemMonitorTextSize);
+        telemetry.publish_system_monitor(report.data(), report.size(), now_us);
+        next_system_monitor_us_ = now_us + monitor_period_us;
+    } else if (monitor_period_us == 0U) {
+        next_system_monitor_us_ = now_us;
+    }
+
     const stateName current_state = static_cast<stateName>(
         machine.current_state.load(std::memory_order_acquire));
     if (current_state != last_telemetry_state_) {

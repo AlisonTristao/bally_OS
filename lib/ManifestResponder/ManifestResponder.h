@@ -14,7 +14,7 @@
 class BtpEndpoint;
 
 // Answers CONTROL/MANIFEST_REQUEST (BTP/docs/commands.md
-// section 3) by describing this robot's own two static schemas, taken
+// section 3) by describing this robot's static schemas, taken
 // verbatim from TelemetryPublisher::schemas() -- the same table the robot
 // already uses to pack samples, so the manifest can never drift from what is
 // actually published on the wire.
@@ -66,9 +66,9 @@ public:
     // the schema. Raise both this and kMaxManifestPayloadSize together if a
     // future schema genuinely needs more.
     static constexpr std::size_t kRecordsReserveBytes = 256U;
-    // The two current schemas (protocol.test, robot.state) are ~200 octets;
-    // prefix + source_name take ~275, which leaves room for a compact
-    // source_info block. Sized to BtpEndpoint::send_logical's own
+    // The compact schema catalog (including fieldless system.monitor) plus
+    // prefix/source information fits this bound. Sized to
+    // BtpEndpoint::send_logical's own
     // kMaxLogicalPayloadSize ceiling (600) -- a manifest larger than that is
     // refused there anyway, so build_manifest_data failing at this bound is
     // the earlier, cleaner failure. send_logical still fragments whatever

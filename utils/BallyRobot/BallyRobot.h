@@ -677,6 +677,7 @@ private:
     // dongle's SUBSCRIBE actually granted (protocol.test's schema max is
     // still 50000 millihz = 20000us, see TelemetryPublisher.cpp's kSchemas).
     uint64_t next_protocol_test_us_ = 0U;
+    uint64_t next_system_monitor_us_ = 0U;
     uint32_t protocol_test_counter_ = 0U;
     stateName last_telemetry_state_ = NONE;
 

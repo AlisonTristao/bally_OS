@@ -18,6 +18,7 @@ class TelemetryPublisher {
 public:
     static constexpr std::uint16_t kProtocolTestTopicId = 0x0001U;
     static constexpr std::uint16_t kRobotStateTopicId = 0x0002U;
+    static constexpr std::uint16_t kSystemMonitorTopicId = 0x0003U;
 
     // Reserved subscriber identity for a subscription created ON the robot
     // (the "telemetry -sub" shell command) rather than by a SUBSCRIBE arriving
@@ -35,8 +36,17 @@ public:
     static constexpr std::size_t kQueueCapacity = 16U;
     static constexpr std::size_t kProtocolTestPayloadSize = 10U;
     static constexpr std::size_t kRobotStatePayloadSize = 3U;
+    // The system.monitor document is the full `sys -health` report
+    // (SystemMonitor::getFullReport): banner + CPU + memory + the complete
+    // per-task table. TELEMETRY reserves the first two payload octets for
+    // schema_version, leaving this much for the UTF-8 text itself. Sized for
+    // ~22 tasks; a longer report is line-truncated by getTelemetryReport().
+    // BtpEndpoint::kMaxLogicalPayloadSize must stay >= the payload size below.
+    static constexpr std::size_t kMaxSystemMonitorTextSize = 1800U;
+    static constexpr std::size_t kMaxSystemMonitorPayloadSize =
+        kMaxSystemMonitorTextSize + 2U;
 
-    enum class Encoding : std::uint8_t { PackedLe = 0x05U };
+    enum class Encoding : std::uint8_t { Utf8 = 0x02U, PackedLe = 0x05U };
     enum class WireType : std::uint8_t { Uint8, Uint32, Float32 };
 
     struct FieldSchema {
@@ -237,6 +247,15 @@ public:
                                         std::uint64_t timestamp_us) noexcept;
     PublishResult publish_robot_state(std::uint8_t state,
                                       std::uint64_t timestamp_us) noexcept;
+    // Publishes one complete replace-in-place dashboard document (the full
+    // `sys -health` report). `text` is UTF-8 without a terminator and must fit
+    // kMaxSystemMonitorTextSize. Unlike the numeric topics this does NOT go
+    // through queue_[]: the document is large and low-rate (0.33 Hz), so it
+    // gets its own single staging slot. A document produced while the previous
+    // one is still unflushed is dropped (QueueFull) -- the next tick refreshes
+    // it -- rather than racing flush().
+    PublishResult publish_system_monitor(const char* text, std::size_t length,
+                                         std::uint64_t timestamp_us) noexcept;
 
     // Sends and removes at most max_samples. A radio rejection drops that
     // sample and is counted, so one bad sample cannot stall the queue.
@@ -252,10 +271,18 @@ public:
     static void pack_robot_state(
         std::uint8_t state,
         std::uint8_t output[kRobotStatePayloadSize]) noexcept;
+    static bool pack_system_monitor(
+        const char* text, std::size_t length,
+        std::uint8_t output[kMaxSystemMonitorPayloadSize],
+        std::size_t* bytes_written) noexcept;
 
 private:
+    // queue_[] only ever holds the small numeric samples now (system.monitor
+    // has its own staging slot, see monitor_stage_), so it is sized for them
+    // and not the ~1.8 KB UTF-8 document -- that is what keeps queue_[16] at a
+    // few hundred bytes instead of ~29 KB of mostly-idle static RAM.
     static constexpr std::size_t kMaxPayloadSize = kProtocolTestPayloadSize;
-    static constexpr std::size_t kMaxTopics = 2U;  // matches kSchemas today
+    static constexpr std::size_t kMaxTopics = 3U;  // matches kSchemas today
 public:
     // Bounded subscription table: kMaxTopics topics times a handful of
     // concurrent desktop sessions behind the single ESP-NOW peer. A request
@@ -275,6 +302,20 @@ private:
         std::uint16_t topic_id;
         std::uint16_t payload_size;
         std::uint8_t payload[kMaxPayloadSize];
+    };
+
+    // Out-of-band staging for the one large, low-rate, replace-in-place
+    // topic. Single-producer (publish_system_monitor, control task) /
+    // single-consumer (flush, comms task) handoff over `pending`: the
+    // producer fills the fields then release-stores true; the consumer
+    // acquire-loads, sends, then release-stores false. Neither side touches
+    // the payload while the other owns it.
+    struct MonitorStage {
+        std::atomic<bool> pending{false};
+        std::uint64_t timestamp_us = 0U;
+        std::uint32_t sequence = 0U;
+        std::uint16_t payload_size = 0U;
+        std::uint8_t payload[kMaxSystemMonitorPayloadSize]{};
     };
 
     // Per-topic byte/drop counters for STATUS section 5.1. Index-aligned with
@@ -315,6 +356,7 @@ private:
     BtpSealFn seal_ = nullptr;
     void* seal_context_ = nullptr;
     Sample queue_[kQueueCapacity]{};
+    MonitorStage monitor_stage_{};
     TopicRuntime runtime_[kMaxTopics]{};
     Subscription subscriptions_[kMaxSubscriptions]{};
     bool runtime_initialized_ = false;

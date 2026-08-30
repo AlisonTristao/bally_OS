@@ -15,6 +15,7 @@ SystemMonitor::SystemMonitor() {
     last_total_runtime = 0;
     core0_load = 0.0f;
     core1_load = 0.0f;
+    state_mutex = xSemaphoreCreateMutexStatic(&state_mutex_buffer);
     
     task_records.reserve(30); 
 }
@@ -44,11 +45,16 @@ void SystemMonitor::dispatch(const std::string& data) {
 }
 
 void SystemMonitor::update() {
+    if (state_mutex != nullptr && xSemaphoreTake(state_mutex, portMAX_DELAY) != pdTRUE) return;
+
     uint32_t total_runtime;
     UBaseType_t array_size = uxTaskGetNumberOfTasks();
     TaskStatus_t *status_array = (TaskStatus_t *)malloc(array_size * sizeof(TaskStatus_t));
     
-    if (status_array == nullptr) return;
+    if (status_array == nullptr) {
+        if (state_mutex != nullptr) xSemaphoreGive(state_mutex);
+        return;
+    }
 
     array_size = uxTaskGetSystemState(status_array, array_size, &total_runtime);
 
@@ -115,6 +121,7 @@ void SystemMonitor::update() {
     );
 
     free(status_array);
+    if (state_mutex != nullptr) xSemaphoreGive(state_mutex);
 }
 
 float SystemMonitor::getCoreTemperature() {
@@ -168,6 +175,13 @@ std::string SystemMonitor::getMemoryStats() {
 }
 
 std::string SystemMonitor::getTaskStats() {
+    if (state_mutex != nullptr && xSemaphoreTake(state_mutex, portMAX_DELAY) != pdTRUE) return {};
+    std::string output = getTaskStatsUnlocked();
+    if (state_mutex != nullptr) xSemaphoreGive(state_mutex);
+    return output;
+}
+
+std::string SystemMonitor::getTaskStatsUnlocked() {
     std::string output;
     output.reserve(task_records.size() * 100 + 150); 
 
@@ -210,9 +224,16 @@ std::string SystemMonitor::getTaskStats() {
 }
 
 std::string SystemMonitor::getFullReport() {
+    if (state_mutex != nullptr && xSemaphoreTake(state_mutex, portMAX_DELAY) != pdTRUE) return {};
+    std::string report = getFullReportUnlocked();
+    if (state_mutex != nullptr) xSemaphoreGive(state_mutex);
+    return report;
+}
+
+std::string SystemMonitor::getFullReportUnlocked() {
     std::string report = "";
     report.reserve(1024);
-    
+
     char core_buffer[512];
 
     float write_pct = 0.0f;
@@ -241,9 +262,32 @@ std::string SystemMonitor::getFullReport() {
     
     report += core_buffer;
     report += getMemoryStats();
-    report += getTaskStats();
+    report += getTaskStatsUnlocked();
     report += "=================================================\n";
-    
+
+    return report;
+}
+
+std::string SystemMonitor::getTelemetryReport(std::size_t max_bytes) {
+    if (max_bytes == 0U) return {};
+
+    // The BTP system.monitor topic carries the exact `sys -health` report so
+    // TraceView's Text Board matches the console line for line. The only
+    // difference is the hard byte cap: if a report with an unusually large
+    // task table would overflow it, keep whole lines and mark the cut.
+    if (state_mutex != nullptr && xSemaphoreTake(state_mutex, portMAX_DELAY) != pdTRUE) return {};
+    std::string report = getFullReportUnlocked();
+    if (state_mutex != nullptr) xSemaphoreGive(state_mutex);
+
+    if (report.size() <= max_bytes) return report;
+
+    static constexpr char kMarker[] = "... (truncated)\n";
+    const std::size_t marker_len = sizeof(kMarker) - 1U;
+    const std::size_t budget = (max_bytes > marker_len) ? (max_bytes - marker_len) : 0U;
+    const std::size_t search_from = (budget == 0U) ? 0U : (budget - 1U);
+    const std::size_t cut = report.rfind('\n', search_from);
+    report.resize((cut == std::string::npos) ? 0U : (cut + 1U));
+    report += kMarker;
     return report;
 }
 

@@ -190,6 +190,22 @@ bool BtpEndpoint::send_logical(btp::MessageType type,
     std::uint32_t sequence = 0U;
     if (!reserve_sequence(&sequence)) return false;
 
+    return send_logical_reserved(type, object_id, sequence, payload,
+                                 payload_size, timestamp_us, seal,
+                                 seal_context);
+}
+
+bool BtpEndpoint::send_logical_reserved(
+    btp::MessageType type,
+    std::uint16_t object_id,
+    std::uint32_t sequence,
+    const std::uint8_t* payload,
+    std::size_t payload_size,
+    std::uint64_t timestamp_us,
+    SealFn seal,
+    void* seal_context) const noexcept {
+    if (sequence == 0U || (payload == nullptr && payload_size != 0U)) return false;
+
     if (seal == nullptr) {
         std::uint8_t count = 0U;
         if (btp::fragment_count(payload_size, btp::TransportProfile::EspNow,

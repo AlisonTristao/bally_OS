@@ -55,11 +55,13 @@ public:
     using SealFn = BtpSealFn;
     static constexpr std::size_t kAeadTagSize = kBtpAeadTagSize;
 
-    // Bounds the sealed[] scratch buffer send_logical uses when sealing.
-    // Matches RxRouter::kMaxPayloadSize / btp_command::kMaxLogicalRequestSize
-    // -- the largest logical message this firmware ever sends today (a
-    // fragmented COMMAND_RESULT/STATUS never gets close).
-    static constexpr std::size_t kMaxLogicalPayloadSize = 600U;
+    // Bounds the sealed[] scratch buffer send_logical uses when sealing. The
+    // largest logical message this firmware sends is the UTF-8 system.monitor
+    // telemetry document (TelemetryPublisher::kMaxSystemMonitorPayloadSize) --
+    // a fragmented COMMAND_RESULT/STATUS/MANIFEST_DATA never gets close.
+    // RxRouter::kMaxPayloadSize and btp_command::kMaxLogicalRequestSize are
+    // independent receive/command bounds and are NOT tied to this one.
+    static constexpr std::size_t kMaxLogicalPayloadSize = 1920U;
 
     bool configure(std::uint32_t source_id, std::uint32_t boot_id) noexcept;
     void set_send_callback(SendCallback callback) noexcept;
@@ -88,6 +90,18 @@ public:
                       std::uint64_t timestamp_us,
                       SealFn seal = nullptr,
                       void* seal_context = nullptr) noexcept;
+
+    // Same whole-message seal/fragment path, using a sequence already
+    // reserved by a non-blocking producer. This keeps a queued large sample
+    // in the same producer sequence order as adjacent one-frame samples.
+    bool send_logical_reserved(btp::MessageType type,
+                               std::uint16_t object_id,
+                               std::uint32_t sequence,
+                               const std::uint8_t* payload,
+                               std::size_t payload_size,
+                               std::uint64_t timestamp_us,
+                               SealFn seal = nullptr,
+                               void* seal_context = nullptr) const noexcept;
 
     // Encodes exactly one physical frame. When `seal` is non-null this frame
     // MUST be the whole logical message (fragment_count == 1): the AEAD tag

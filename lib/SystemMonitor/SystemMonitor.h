@@ -2,11 +2,13 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include "esp_system.h"
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "driver/temperature_sensor.h"
 #include <string>
+#include <cstddef>
 #include <functional>
 #include <vector>
 
@@ -40,7 +42,16 @@ private:
     float core0_load;
     float core1_load;
 
+    // update() runs from the normal monitor task and can also be requested by
+    // the telemetry/shell tasks. Protect the vector and its delta counters so
+    // those low-rate readers never race a realloc/sort.
+    StaticSemaphore_t state_mutex_buffer;
+    SemaphoreHandle_t state_mutex;
+
     void dispatch(const std::string& data);
+    std::string getTaskStatsUnlocked();
+    // Body of getFullReport(); caller must already hold state_mutex.
+    std::string getFullReportUnlocked();
 
 public:
     SystemMonitor();
@@ -58,6 +69,12 @@ public:
     std::string getTaskStats();
     
     std::string getFullReport();
+
+    // The `sys -health` report (getFullReport) for the BTP UTF8
+    // system.monitor telemetry topic. Returns at most max_bytes: an
+    // oversized task table is cut on a line boundary with a trailing
+    // "... (truncated)" marker.
+    std::string getTelemetryReport(std::size_t max_bytes);
 
     void report();
 

@@ -8,6 +8,7 @@
 #include <TxScheduler.h>
 #include <bally_channels.h>
 #include <btp/codec.hpp>
+#include <btp/fragmentation.hpp>
 
 #include <cstdint>
 #include <cstring>
@@ -33,12 +34,16 @@ std::vector<std::uint8_t> read_vector(const char* relative_path) {
     return {};
 }
 
-std::uint8_t sent_frames[2][btp::kEspNowMaxFrameSize]{};
-std::size_t sent_sizes[2]{};
+// Deep enough for the largest logical message this firmware sends: the
+// system.monitor UTF-8 document sealed and split into ESP-NOW fragments.
+constexpr std::size_t kMaxCapturedFrames = 16U;
+std::uint8_t sent_frames[kMaxCapturedFrames][btp::kEspNowMaxFrameSize]{};
+std::size_t sent_sizes[kMaxCapturedFrames]{};
 std::size_t sent_count = 0U;
 
 bool capture_send(const std::uint8_t* data, std::size_t size) {
-    if (sent_count >= 2U || size > btp::kEspNowMaxFrameSize) return false;
+    if (sent_count >= kMaxCapturedFrames || size > btp::kEspNowMaxFrameSize)
+        return false;
     std::memcpy(sent_frames[sent_count], data, size);
     sent_sizes[sent_count] = size;
     ++sent_count;
@@ -62,6 +67,9 @@ void write_u32(std::uint8_t* output, std::uint32_t value) {
     output[2] = static_cast<std::uint8_t>(value >> 16U);
     output[3] = static_cast<std::uint8_t>(value >> 24U);
 }
+
+std::uint16_t read_u16(const std::uint8_t* data);
+btp::DecodedFrame decode_only_frame();
 
 std::vector<std::uint8_t> shell_request_payload(std::uint32_t target_source,
                                                 std::uint32_t target_boot,
@@ -319,11 +327,18 @@ void test_publisher_registers_static_schemas_and_rejects_nan() {
     std::size_t schema_count = 0U;
     const auto* schemas = TelemetryPublisher::schemas(&schema_count);
     TEST_ASSERT_NOT_NULL(schemas);
-    TEST_ASSERT_EQUAL_UINT32(2U, schema_count);
+    TEST_ASSERT_EQUAL_UINT32(3U, schema_count);
     TEST_ASSERT_EQUAL_STRING("protocol.test", schemas[0].name);
     TEST_ASSERT_EQUAL_HEX16(TelemetryPublisher::kProtocolTestTopicId,
                             schemas[0].topic_id);
     TEST_ASSERT_EQUAL_STRING("robot.state", schemas[1].name);
+    TEST_ASSERT_EQUAL_STRING("system.monitor", schemas[2].name);
+    TEST_ASSERT_EQUAL_HEX16(TelemetryPublisher::kSystemMonitorTopicId,
+                            schemas[2].topic_id);
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<std::uint8_t>(TelemetryPublisher::Encoding::Utf8),
+        static_cast<std::uint8_t>(schemas[2].encoding));
+    TEST_ASSERT_EQUAL_UINT32(0U, schemas[2].field_count);
 
     BtpEndpoint endpoint;
     TEST_ASSERT_TRUE(endpoint.configure(1U, 2U));
@@ -334,6 +349,153 @@ void test_publisher_registers_static_schemas_and_rejects_nan() {
         static_cast<std::uint8_t>(publisher.publish_protocol_test(
             1U, float_from_bits(0x7FC00000U), 10U)));
     TEST_ASSERT_EQUAL_UINT32(1U, publisher.stats().dropped_invalid);
+}
+
+void test_system_monitor_publishes_complete_utf8_document() {
+    sent_count = 0U;
+    BtpEndpoint endpoint;
+    TEST_ASSERT_TRUE(endpoint.configure(0x11223344U, 0xA1B2C3D4U));
+    endpoint.set_send_callback(capture_send);
+
+    TelemetryPublisher publisher;
+    publisher.configure(endpoint);
+    const char report[] = "TASK            C  CPU%  STKk\nEKF_task        P  12.3   1.8\n";
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<std::uint8_t>(TelemetryPublisher::PublishResult::Queued),
+        static_cast<std::uint8_t>(publisher.publish_system_monitor(
+            report, std::strlen(report), 3000000U)));
+    TEST_ASSERT_EQUAL_UINT32(1U, publisher.flush(1U));
+
+    const btp::DecodedFrame decoded = decode_only_frame();
+    TEST_ASSERT_EQUAL_UINT8(static_cast<std::uint8_t>(btp::MessageType::Telemetry),
+                            static_cast<std::uint8_t>(decoded.header.type));
+    TEST_ASSERT_EQUAL_HEX16(TelemetryPublisher::kSystemMonitorTopicId,
+                            decoded.header.object_id);
+    TEST_ASSERT_EQUAL_UINT64(3000000U, decoded.header.timestamp_us);
+    TEST_ASSERT_EQUAL_UINT16(TelemetryPublisher::kSchemaVersion,
+                             read_u16(decoded.payload.data));
+    TEST_ASSERT_EQUAL_UINT32(std::strlen(report) + 2U, decoded.payload.size);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(
+        reinterpret_cast<const std::uint8_t*>(report), decoded.payload.data + 2U,
+        std::strlen(report));
+
+    std::string too_large(TelemetryPublisher::kMaxSystemMonitorTextSize + 1U, 'x');
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<std::uint8_t>(TelemetryPublisher::PublishResult::InvalidValue),
+        static_cast<std::uint8_t>(publisher.publish_system_monitor(
+            too_large.data(), too_large.size(), 4000000U)));
+}
+
+void test_large_sealed_monitor_fragments_and_reassembles() {
+    sent_count = 0U;
+    BtpEndpoint endpoint;
+    TEST_ASSERT_TRUE(endpoint.configure(0x11223344U, 0xA1B2C3D4U));
+    endpoint.set_send_callback(capture_send);
+
+    TelemetryPublisher publisher;
+    publisher.configure(endpoint, fake_seal_endpoint, nullptr);
+
+    std::string report(TelemetryPublisher::kMaxSystemMonitorTextSize, 'x');
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<std::uint8_t>(TelemetryPublisher::PublishResult::Queued),
+        static_cast<std::uint8_t>(publisher.publish_system_monitor(
+            report.data(), report.size(), 7000000U)));
+
+    // Replace-in-place staging: a second document before flush() takes the
+    // first is dropped, not queued behind it.
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<std::uint8_t>(TelemetryPublisher::PublishResult::QueueFull),
+        static_cast<std::uint8_t>(publisher.publish_system_monitor(
+            report.data(), report.size(), 7003000U)));
+
+    std::uint8_t expected_fragments = 0U;
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<std::uint8_t>(btp::Error::Ok),
+        static_cast<std::uint8_t>(btp::fragment_count(
+            TelemetryPublisher::kMaxSystemMonitorPayloadSize +
+                BtpEndpoint::kAeadTagSize,
+            btp::TransportProfile::EspNow, &expected_fragments)));
+    TEST_ASSERT_TRUE(expected_fragments > 1U);
+    TEST_ASSERT_TRUE(expected_fragments <= kMaxCapturedFrames);
+
+    // One logical sample, however many wire fragments it needs.
+    TEST_ASSERT_EQUAL_UINT32(1U, publisher.flush(4U));
+    TEST_ASSERT_EQUAL_UINT32(expected_fragments, sent_count);
+
+    btp::DecodedFrame decoded[kMaxCapturedFrames]{};
+    std::size_t reassembled = 0U;
+    for (std::size_t i = 0U; i < sent_count; ++i) {
+        TEST_ASSERT_EQUAL_UINT8(
+            static_cast<std::uint8_t>(btp::Error::Ok),
+            static_cast<std::uint8_t>(btp::decode(
+                sent_frames[i], sent_sizes[i], btp::TransportProfile::EspNow,
+                &decoded[i])));
+        TEST_ASSERT_EQUAL_HEX16(TelemetryPublisher::kSystemMonitorTopicId,
+                                decoded[i].header.object_id);
+        // Every fragment carries the one sequence the whole document was
+        // sealed under, and the collection timestamp is preserved.
+        TEST_ASSERT_EQUAL_UINT32(decoded[0].header.sequence,
+                                 decoded[i].header.sequence);
+        TEST_ASSERT_EQUAL_UINT64(7000000U, decoded[i].header.timestamp_us);
+        TEST_ASSERT_EQUAL_UINT8(expected_fragments,
+                                decoded[i].header.fragment_count);
+        TEST_ASSERT_EQUAL_UINT8(i, decoded[i].header.fragment_index);
+        TEST_ASSERT_TRUE((decoded[i].header.flags & btp::kFlagEncrypted) != 0U);
+        TEST_ASSERT_TRUE((decoded[i].header.flags & btp::kFlagFragmented) != 0U);
+        reassembled += decoded[i].payload.size;
+    }
+    TEST_ASSERT_EQUAL_UINT32(TelemetryPublisher::kMaxSystemMonitorPayloadSize +
+                                 BtpEndpoint::kAeadTagSize,
+                             reassembled);
+}
+
+// The staged system.monitor document and the numeric queue drain in the same
+// flush() without either starving the other. Wire order between topics is not
+// asserted -- a replace-in-place UTF-8 topic has no ordering requirement.
+void test_monitor_and_numeric_samples_both_flush() {
+    sent_count = 0U;
+    BtpEndpoint endpoint;
+    TEST_ASSERT_TRUE(endpoint.configure(0x11223344U, 0xA1B2C3D4U));
+    endpoint.set_send_callback(capture_send);
+
+    TelemetryPublisher publisher;
+    publisher.configure(endpoint);
+
+    const char report[] = "================= Monitor Stats =================\n"
+                          "core PRO    :   12.30 %\n";
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<std::uint8_t>(TelemetryPublisher::PublishResult::Queued),
+        static_cast<std::uint8_t>(publisher.publish_protocol_test(1U, 1.0F, 1U)));
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<std::uint8_t>(TelemetryPublisher::PublishResult::Queued),
+        static_cast<std::uint8_t>(publisher.publish_system_monitor(
+            report, std::strlen(report), 2U)));
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<std::uint8_t>(TelemetryPublisher::PublishResult::Queued),
+        static_cast<std::uint8_t>(publisher.publish_robot_state(3U, 3U)));
+    TEST_ASSERT_EQUAL_UINT32(3U, publisher.queued_count());
+
+    TEST_ASSERT_EQUAL_UINT32(3U, publisher.flush(8U));
+    TEST_ASSERT_EQUAL_UINT32(0U, publisher.queued_count());
+    TEST_ASSERT_EQUAL_UINT32(3U, sent_count);
+
+    bool saw_monitor = false;
+    for (std::size_t i = 0U; i < sent_count; ++i) {
+        btp::DecodedFrame frame{};
+        TEST_ASSERT_EQUAL_UINT8(
+            static_cast<std::uint8_t>(btp::Error::Ok),
+            static_cast<std::uint8_t>(btp::decode(
+                sent_frames[i], sent_sizes[i], btp::TransportProfile::EspNow,
+                &frame)));
+        if (frame.header.object_id == TelemetryPublisher::kSystemMonitorTopicId) {
+            saw_monitor = true;
+            TEST_ASSERT_EQUAL_UINT32(std::strlen(report) + 2U, frame.payload.size);
+            TEST_ASSERT_EQUAL_UINT8_ARRAY(
+                reinterpret_cast<const std::uint8_t*>(report),
+                frame.payload.data + 2U, std::strlen(report));
+        }
+    }
+    TEST_ASSERT_TRUE(saw_monitor);
 }
 
 void test_duplicate_command_executes_once_and_replays_exact_result() {
@@ -993,7 +1155,7 @@ void test_topic_status_is_measured_and_serialized() {
             99U, float_from_bits(0x3F0D0A00U), 3000U)));
 
     TelemetryPublisher::TopicStats stats[4]{};
-    TEST_ASSERT_EQUAL_UINT32(2U, publisher.topic_stats(stats, 4U));
+    TEST_ASSERT_EQUAL_UINT32(3U, publisher.topic_stats(stats, 4U));
     TEST_ASSERT_EQUAL_HEX16(TelemetryPublisher::kProtocolTestTopicId,
                             stats[0].topic_id);
     TEST_ASSERT_EQUAL_UINT16(1U, stats[0].subscriber_count);
@@ -1076,9 +1238,9 @@ void test_status_is_published_as_a_control_message() {
     TEST_ASSERT_EQUAL_HEX16(StatusReporter::kStatusObjectId,
                             decoded.header.object_id);
     TEST_ASSERT_EQUAL_UINT8(1U, decoded.header.fragment_count);
-    TEST_ASSERT_EQUAL_UINT32(92U + 2U + (28U * 2U), decoded.payload.size);
+    TEST_ASSERT_EQUAL_UINT32(92U + 2U + (28U * 3U), decoded.payload.size);
     TEST_ASSERT_EQUAL_UINT16(2U, read_u16(decoded.payload.data));
-    TEST_ASSERT_EQUAL_UINT16(2U, read_u16(decoded.payload.data + 92U));
+    TEST_ASSERT_EQUAL_UINT16(3U, read_u16(decoded.payload.data + 92U));
     TEST_ASSERT_EQUAL_HEX32(kLocalSource, read_u32(decoded.payload.data + 94U));
     TEST_ASSERT_EQUAL_UINT32(50000U, read_u32(decoded.payload.data + 102U));
 }
@@ -1125,6 +1287,9 @@ int main(int, char**) {
     RUN_TEST(test_telemetry_sample_with_no_key_configured_is_dropped_not_sent_clear);
     RUN_TEST(test_publisher_queue_is_bounded_and_drop_newest_is_counted);
     RUN_TEST(test_publisher_registers_static_schemas_and_rejects_nan);
+    RUN_TEST(test_system_monitor_publishes_complete_utf8_document);
+    RUN_TEST(test_large_sealed_monitor_fragments_and_reassembles);
+    RUN_TEST(test_monitor_and_numeric_samples_both_flush);
     RUN_TEST(test_duplicate_command_executes_once_and_replays_exact_result);
     RUN_TEST(test_channel_b_reply_is_sealed_with_endpoint_key_not_link_key);
     RUN_TEST(test_channel_b_reply_without_endpoint_key_configured_is_dropped);
