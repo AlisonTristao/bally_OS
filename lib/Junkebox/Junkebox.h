@@ -24,12 +24,14 @@ class Logger;
  * @brief Plays a song read from the SD card on a buzzer, off the calling task.
  *
  * A song is a plain text file, one note per line: "NOTE,DURATION_MS"
- * (e.g. "C4,250", "REST,100" for silence). play() only queues the request
- * and returns immediately; the actual note-by-note playback (and the LEDC
- * frequency changes it drives) happens on task()'s own FreeRTOS task, so
- * callers (the state machine, the shell) are never blocked while a song
- * plays. A second play() interrupts whatever is currently playing and
- * switches to the new song; stop() just silences the buzzer and goes idle.
+ * (e.g. "C4,250", "REST,100" for silence). An optional "LOOP,N" line
+ * repeats the complete file N times, which keeps long songs below the 4 KiB
+ * input-buffer limit. play() only queues the request and returns immediately;
+ * the actual note-by-note playback (and the LEDC frequency changes it drives)
+ * happens on task()'s own FreeRTOS task, so callers (the state machine, the
+ * shell) are never blocked while a song plays. A second play() interrupts
+ * whatever is currently playing and switches to the new song; stop() just
+ * silences the buzzer and goes idle.
  */
 class Junkebox {
 public:

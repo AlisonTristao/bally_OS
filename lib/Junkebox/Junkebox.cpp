@@ -14,6 +14,8 @@
 
 namespace {
 constexpr const char* TAG = "JUNKEBOX";
+constexpr size_t kMaxSongLineBytes = 64;
+constexpr uint16_t kMaxSongLoops = 100;
 
 // Semitone offset from C, indexed by note letter - 'A'. A=9 B=11 C=0 D=2
 // E=4 F=5 G=7, i.e. standard piano key order.
@@ -52,6 +54,29 @@ bool note_token_to_freq(const char* token, uint16_t& freq_hz) {
     if (freq < 20.0f || freq > 20000.0f) return false;
 
     freq_hz = static_cast<uint16_t>(freq + 0.5f);
+    return true;
+}
+
+// Optional whole-file repetition directive: "LOOP,N". Keeping it separate
+// from parse_note_line() means old song files remain exactly compatible and
+// built-in sounds (which contain no directive) still play once.
+bool parse_loop_line(char* line, uint16_t& loop_count) {
+    const size_t len = strlen(line);
+    if (len > 0 && line[len - 1] == '\r') line[len - 1] = '\0';
+
+    while (*line == ' ' || *line == '\t') line++;
+    if (strncasecmp(line, "LOOP,", 5) != 0) return false;
+
+    char* end = nullptr;
+    const unsigned long value = strtoul(line + 5, &end, 10);
+    while (end != nullptr && (*end == ' ' || *end == '\t')) end++;
+
+    if (end == nullptr || end == line + 5 || *end != '\0' ||
+        value == 0 || value > kMaxSongLoops) {
+        return false;
+    }
+
+    loop_count = static_cast<uint16_t>(value);
     return true;
 }
 }  // namespace
@@ -249,7 +274,12 @@ bool Junkebox::parse_note_line(char* line, uint16_t& freq_hz, uint32_t& duration
 }
 
 void Junkebox::play_file(const char* path) {
-    if (card_ == nullptr) return;
+    if (card_ == nullptr || !card_->is_mounted()) {
+        ESP_LOGW(TAG,
+                 "cannot play '%s': SD card is not mounted for the robot",
+                 path != nullptr ? path : "(null)");
+        return;
+    }
 
     size_t bytes_read = 0;
     if (!card_->read_file(path, file_buffer_, sizeof(file_buffer_) - 1, &bytes_read)) {
@@ -280,37 +310,53 @@ void Junkebox::play_raw_tone(uint16_t freq_hz, uint32_t duration_ms) {
 }
 
 // Parses and plays the note lines already sitting in file_buffer_[0..length)
-// — shared by play_file() (SD-read bytes) and play_builtin_notes() (a
-// compiled-in string copied in first, since it lives in read-only rodata
-// and parse_note_line() mutates the buffer in place).
+// — shared by play_file() (SD-read bytes) and play_builtin_notes(). Each line
+// is copied before parse_note_line() mutates it; preserving file_buffer_ lets
+// LOOP,N replay the same text without reading the SD card again.
 void Junkebox::play_buffer(size_t length) {
     file_buffer_[length] = '\0';
 
-    char* cursor = file_buffer_;
-    while (cursor != nullptr && *cursor != '\0') {
-        char* line = cursor;
-        char* newline = strchr(cursor, '\n');
-        if (newline != nullptr) {
-            *newline = '\0';
-            cursor = newline + 1;
-        } else {
-            cursor = nullptr;  // last line, no trailing '\n'
-        }
+    uint16_t loop_count = 1;
+    for (uint16_t loop = 0; loop < loop_count; ++loop) {
+        const char* cursor = file_buffer_;
+        while (cursor != nullptr && *cursor != '\0') {
+            const char* line_start = cursor;
+            const char* newline = strchr(cursor, '\n');
+            const size_t line_length = newline != nullptr
+                ? static_cast<size_t>(newline - line_start)
+                : strlen(line_start);
+            cursor = newline != nullptr ? newline + 1 : nullptr;
 
-        uint16_t freq_hz = 0;
-        uint32_t duration_ms = 0;
-        if (!parse_note_line(line, freq_hz, duration_ms)) continue;
+            // Note/directive lines are tiny. Oversized lines are malformed
+            // (or long comments) and can be ignored without touching the
+            // preserved source buffer used by the next loop.
+            if (line_length >= kMaxSongLineBytes) continue;
 
-        const esp_err_t tone_err = set_tone(freq_hz);
-        if (tone_err != ESP_OK) {
-            ESP_LOGW(TAG, "set_tone(%u) failed: 0x%x", freq_hz, tone_err);
-        }
+            char line[kMaxSongLineBytes];
+            memcpy(line, line_start, line_length);
+            line[line_length] = '\0';
 
-        // Waits for the note's duration, but returns immediately (>0) if
-        // play()/stop() signals the task in the meantime — that's how
-        // playback is interrupted mid-note instead of only between notes.
-        if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(duration_ms)) > 0) {
-            return;
+            uint16_t requested_loops = 1;
+            if (parse_loop_line(line, requested_loops)) {
+                if (loop == 0) loop_count = requested_loops;
+                continue;
+            }
+
+            uint16_t freq_hz = 0;
+            uint32_t duration_ms = 0;
+            if (!parse_note_line(line, freq_hz, duration_ms)) continue;
+
+            const esp_err_t tone_err = set_tone(freq_hz);
+            if (tone_err != ESP_OK) {
+                ESP_LOGW(TAG, "set_tone(%u) failed: 0x%x", freq_hz, tone_err);
+            }
+
+            // Waits for the note's duration, but returns immediately (>0) if
+            // play()/stop() signals the task in the meantime — that's how
+            // playback is interrupted mid-note, including inside a loop.
+            if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(duration_ms)) > 0) {
+                return;
+            }
         }
     }
 }
@@ -319,6 +365,25 @@ void Junkebox::register_shell_commands(TinyShell& shell, Logger& logger) {
     shell.create_module("junkebox", "Buzzer playback: SD-stored songs and compiled-in system sounds");
 
     shell.add([this, &logger](std::string path) -> uint8_t {
+        if (path.empty() || path.size() >= MAX_PATH_LENGTH) {
+            logger.insert_logf(logType::ERRO,
+                               "Junkebox: invalid/long song path (%u bytes, max=%u)",
+                               static_cast<unsigned>(path.size()),
+                               static_cast<unsigned>(MAX_PATH_LENGTH - 1U));
+            return RESULT_ERROR;
+        }
+        if (card_ == nullptr || !card_->is_mounted()) {
+            logger.insert_log(
+                logType::ERRO,
+                "Junkebox: SD card is not mounted for robot; safely eject it from the PC and press button 2");
+            return RESULT_ERROR;
+        }
+        if (!card_->file_exists(path.c_str())) {
+            logger.insert_logf(logType::ERRO,
+                               "Junkebox: song file not found: %s",
+                               path.c_str());
+            return RESULT_ERROR;
+        }
         if (!play(path.c_str())) {
             logger.insert_log(logType::ERRO, "Junkebox is not initialized yet");
             return RESULT_ERROR;

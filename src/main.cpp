@@ -47,7 +47,11 @@ static StackType_t xEKFStack[M2KB];
 static StaticTask_t xEKFBuffer;
 static StackType_t xInterruptsStack[M2KB];
 static StaticTask_t xInterruptsBuffer;
-static StackType_t xJunkeboxStack[M2KB];
+// SD-backed playback enters stdio/VFS/FatFs/SDSPI before the first note.
+// That call chain needs materially more stack than compiled-in playback,
+// which never leaves Junkebox's parser. 2 KiB was enough for builtins but
+// could trip the FreeRTOS stack canary as soon as play_file() called fopen().
+static StackType_t xJunkeboxStack[M4KB];
 static StaticTask_t xJunkeboxBuffer;
 
 static void setup_system_callbacks();
@@ -167,7 +171,7 @@ static void start_freertos_tasks() {
     xTaskCreateStaticPinnedToCore(robot.runStateMachine,   "state_machine", M8KB, NULL, 10, xStateMachineStack, &xStateMachineBuffer, APP_CPU_NUM);
     xTaskCreateStaticPinnedToCore(robot.runShell,          "shell_task",    M8KB, NULL, 2,  xShellStack,        &xShellBuffer,        PRO_CPU_NUM);
     xTaskCreateStaticPinnedToCore(robot.runEKF,            "EKF_task",      M2KB, NULL, 4,  xEKFStack,          &xEKFBuffer,          PRO_CPU_NUM);
-    xTaskCreateStaticPinnedToCore(Junkebox::task,          "junkebox_task", M2KB, &(*robot.junkebox), 1, xJunkeboxStack, &xJunkeboxBuffer, PRO_CPU_NUM);
+    xTaskCreateStaticPinnedToCore(Junkebox::task,          "junkebox_task", M4KB, &(*robot.junkebox), 1, xJunkeboxStack, &xJunkeboxBuffer, PRO_CPU_NUM);
     ESP_LOGI("ROBOT_MAIN", "All FreeRTOS tasks started successfully");
 }
 
