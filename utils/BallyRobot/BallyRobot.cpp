@@ -19,6 +19,7 @@
 #include <cstdio>
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
+#include "driver/ledc.h"
 #include "esp_rom_sys.h"
 #include "esp_wifi.h"
 #include "esp_now.h"
@@ -92,6 +93,52 @@ static void readMacAddress() {
 // ==============================================================================
 
 namespace {
+
+constexpr ledc_mode_t kLedPwmMode = LEDC_LOW_SPEED_MODE;
+constexpr ledc_timer_t kLedPwmTimer = LEDC_TIMER_2;
+constexpr ledc_timer_bit_t kLedPwmResolution = LEDC_TIMER_8_BIT;
+constexpr uint32_t kLedPwmFrequencyHz = 5000;
+constexpr uint32_t kLedPwmMaxDuty = 255;
+
+bool configureLedPwmTimer()
+{
+    ledc_timer_config_t timer = {};
+    timer.speed_mode = kLedPwmMode;
+    timer.timer_num = kLedPwmTimer;
+    timer.duty_resolution = kLedPwmResolution;
+    timer.freq_hz = kLedPwmFrequencyHz;
+    timer.clk_cfg = LEDC_AUTO_CLK;
+
+    return ledc_timer_config(&timer) == ESP_OK;
+}
+
+bool configureLedPwmChannel(uint8_t pin, uint8_t channel)
+{
+    const gpio_num_t gpio = static_cast<gpio_num_t>(pin);
+    if (!GPIO_IS_VALID_OUTPUT_GPIO(gpio) ||
+        channel >= static_cast<uint8_t>(LEDC_CHANNEL_MAX)) {
+        return false;
+    }
+
+    ledc_channel_config_t config = {};
+    config.speed_mode = kLedPwmMode;
+    config.channel = static_cast<ledc_channel_t>(channel);
+    config.timer_sel = kLedPwmTimer;
+    config.gpio_num = pin;
+    config.duty = 0;
+    config.hpoint = 0;
+
+    return ledc_channel_config(&config) == ESP_OK;
+}
+
+void setLedPwmDuty(uint8_t channel, float level)
+{
+    const uint32_t duty = static_cast<uint32_t>(level * kLedPwmMaxDuty + 0.5f);
+    const ledc_channel_t ledc_channel = static_cast<ledc_channel_t>(channel);
+    if (ledc_set_duty(kLedPwmMode, ledc_channel, duty) == ESP_OK) {
+        ledc_update_duty(kLedPwmMode, ledc_channel);
+    }
+}
 
 bool configureOutputPin(gpio_num_t pin, uint32_t initialLevel)
 {
@@ -227,6 +274,21 @@ bool ROBOT::configurePinsFromSettings()
             return false;
         }
     }
+
+    // CH0..CH3 belong to the motors and CH4 to the buzzer. The three LED
+    // channels share their own fixed-frequency timer; yellow stays on GPIO
+    // because its calibrated gain is 1.0 and needs no PWM.
+    if (!configureLedPwmTimer() ||
+        !configureLedPwmChannel(cfg.led0, CH5) ||
+        !configureLedPwmChannel(cfg.led1, CH6) ||
+        !configureLedPwmChannel(cfg.led3, CH7)) {
+        return false;
+    }
+
+    leds.setGain(LED_BLUE, 0.125f);
+    leds.setGain(LED_GREEN, 0.125f);
+    leds.setGain(LED_YELLOW, 1.0f);
+    leds.setGain(LED_RED, 0.5f);
 
     return true;
 }
@@ -570,13 +632,15 @@ void ROBOT::setOutputs() {
         motor_right->applyPWM(right_pwm);
     }
 
-    // turn on the leds according to the BITS of the arr_stats variable
-    uint8_t arr_stats = leds.getFlags();
+    // Green, red and blue are stronger than yellow on the board, so their
+    // active flag level is attenuated by the per-output gain through PWM.
+    // Yellow remains a regular full-level GPIO output.
     const SettingsData& cfg = settings.data();
-    gpio_set_level(static_cast<gpio_num_t>(cfg.led0), (arr_stats & (1 << LED0_idx)));
-    gpio_set_level(static_cast<gpio_num_t>(cfg.led1), (arr_stats & (1 << LED1_idx)));
-    gpio_set_level(static_cast<gpio_num_t>(cfg.led2), (arr_stats & (1 << LED2_idx)));
-    gpio_set_level(static_cast<gpio_num_t>(cfg.led3), (arr_stats & (1 << LED3_idx)));
+    setLedPwmDuty(CH5, leds.getValue(LED_BLUE));
+    setLedPwmDuty(CH6, leds.getValue(LED_GREEN));
+    gpio_set_level(static_cast<gpio_num_t>(cfg.led2),
+                   leds.getValue(LED_YELLOW) > 0.0f);
+    setLedPwmDuty(CH7, leds.getValue(LED_RED));
 }
 
 bool ROBOT::canScheduleDebugTest() const {

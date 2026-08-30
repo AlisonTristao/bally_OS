@@ -74,6 +74,12 @@
 // never shared with CH0..CH3: Junkebox changes its timer's frequency per
 // note, which would detune the H-bridges' fixed 5kHz PWM if they shared it.
 #define CH4             4
+// Blue, green and red status LEDs. They share a third timer, independent of
+// both motors and buzzer. Yellow remains a full-brightness digital output and
+// therefore does not consume the ninth channel that the ESP32-S3 lacks.
+#define CH5             5
+#define CH6             6
+#define CH7             7
 
 // -------------------- OTA over Wi-Fi (DEBUG state) --------------------
 // wifi.txt is already its own SD-backed, shell-editable config (see

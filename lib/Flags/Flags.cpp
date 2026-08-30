@@ -69,6 +69,29 @@ void Flags_out::setFlag(uint8_t index, uint32_t time) {
     timeLimit[index] = time;
 }
 
+void Flags_out::setGain(uint8_t index, float gain) {
+    if (!isValidIndex(index))
+        return;
+
+    if (gain < 0.0f)
+        gain = 0.0f;
+    else if (gain > 1.0f)
+        gain = 1.0f;
+
+    gains[index] = gain;
+}
+
+float Flags_out::getValue(uint8_t index) const {
+    if (!isValidIndex(index))
+        return 0.0f;
+
+    return (flags.allFlags & (1U << index)) ? gains[index] : 0.0f;
+}
+
+float Flags_out::getGain(uint8_t index) const {
+    return isValidIndex(index) ? gains[index] : 0.0f;
+}
+
 // ===== Flags_pwm ======
 
 void Flags_pwm::setValue(uint8_t index, int8_t value, uint32_t time) {

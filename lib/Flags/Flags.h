@@ -93,6 +93,21 @@ public:
     virtual ~Flags_out() {};
     // Sets a specific flag manually
     void IRAM_ATTR setFlag(uint8_t index, uint32_t time);
+
+    // Scales the active output level for one flag (0.0 = off, 1.0 = full).
+    // Gains default to 1.0 so existing digital-output users keep their
+    // original behaviour unless they explicitly opt into attenuation.
+    void setGain(uint8_t index, float gain);
+
+    // Returns the effective output level after applying the configured gain.
+    // An inactive or invalid flag always returns 0.0.
+    float getValue(uint8_t index) const;
+
+    // Returns the configured gain, or 0.0 for an invalid index.
+    float getGain(uint8_t index) const;
+protected:
+    float gains[MAX_FLAGS] = {1.0f, 1.0f, 1.0f, 1.0f,
+                              1.0f, 1.0f, 1.0f, 1.0f};
 };
 
 // PWM output flags storing values from 0 to 100
