@@ -109,17 +109,34 @@ private:
         std::uint32_t boot_id = 0U;
         std::uint64_t last_used_us = 0U;
 
+        // editor, prompt_painted, awaiting_result and pending_line are touched
+        // ONLY by pump() -- never by on_terminal_in() or deliver_command_output()
+        // -- so they need no lock. A slot reused for a new origin is reset by
+        // pump() when it sees needs_editor_reset, not by find_or_alloc() on the
+        // Wi-Fi task: reset()ing a ShellLineEditor there, under lock_, is what a
+        // spin-waiting pump()/deliver_command_output() could deadlock against.
         ShellLineEditor editor{kHistoryCapacity};
         bool prompt_painted = false;
+        bool awaiting_result = false;  // a line is executing; hold further input
+        std::string pending_line;     // one line finished while awaiting_result
 
-        // Hand-off fields, guarded by lock_.
+        // Hand-off fields, guarded by lock_. Every critical section that holds
+        // lock_ is now just a handful of field reads/writes plus one bounded
+        // string swap -- never an allocation loop, an editor call or a
+        // reset() -- so the Wi-Fi RX task never spin-waits here for long.
         std::string in;            // TERMINAL_IN bytes awaiting the editor
         std::string pending_out;   // command output awaiting the editor
         bool result_ready = false;
-        bool awaiting_result = false;  // a line is executing; hold further input
+        bool needs_editor_reset = false;  // slot just (re)allocated; pump() resets
     };
 
-    void lock() noexcept;
+    // Bound for try_lock()'s spin. Large only because every critical section
+    // is O(1) field work -- if this is ever exhausted the caller's fallback
+    // (skip a pass / drop bytes) is still far better than a core-0 hang.
+    static constexpr unsigned kMaxLockSpins = 100000U;
+
+    void lock() noexcept;      // unbounded spin -- shell task only (see .cpp)
+    bool try_lock() noexcept;  // bounded -- comms and Wi-Fi tasks
     void unlock() noexcept;
 
     // lock_ held by caller.
@@ -130,6 +147,12 @@ private:
     // Chops `bytes` into <= one-sealed-ESP-NOW-frame pieces and sends each as
     // its own TERMINAL_OUT logical message (mirrors Logger::send_log_direct).
     void emit_terminal_out(const std::string& bytes, std::uint64_t now_us) noexcept;
+
+    // pump()-only: submit one completed line for execution, or write a
+    // "busy" notice into `out` if the command queue refused it. `src`/`boot`
+    // are the origin ids pump() snapshotted under lock_.
+    void submit_line(Slot& s, std::uint32_t src, std::uint32_t boot,
+                     const std::string& line, std::string& out) noexcept;
 
     BtpEndpoint* endpoint_ = nullptr;
     BtpSealFn seal_ = nullptr;

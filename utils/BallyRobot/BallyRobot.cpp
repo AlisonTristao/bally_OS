@@ -257,6 +257,19 @@ void ROBOT::buildSourceInfo() {
                                     "%u.%u", chip.revision / 100U, chip.revision % 100U);
         if (n > 0 && cursor + n + 1 <= scratch_end) { chip_rev = cursor; cursor += n + 1; }
     }
+    // ota_endpoint: the mDNS name TraceView's OTA tab can resolve directly.
+    // The robot advertises ota_hostname over mDNS, which always answers as
+    // "<name>.local" -- report the FQDN so "Use reported" fills a value the
+    // OTA client accepts as-is (it only treats a *.local host as mDNS).
+    const char* ota_endpoint = "";
+    {
+        const char* host = settings.data().ota_hostname;
+        if (host != nullptr && host[0] != '\0') {
+            const char* fmt = (std::strstr(host, ".local") != nullptr) ? "%s" : "%s.local";
+            const int n = std::snprintf(cursor, static_cast<size_t>(scratch_end - cursor), fmt, host);
+            if (n > 0 && cursor + n + 1 <= scratch_end) { ota_endpoint = cursor; cursor += n + 1; }
+        }
+    }
 
     std::size_t i = 0U;
     const auto add = [&](const char* key, const char* label, const char* value) {
@@ -274,6 +287,7 @@ void ROBOT::buildSourceInfo() {
     add("chip",         "Chip",              "ESP32-S3");
     add("chip_revision", "Chip revision",    chip_rev);
     add("ota_partition", "Running partition", running != nullptr ? running->label : "");
+    add("ota_endpoint",  "OTA endpoint",     ota_endpoint);
 
     source_info_count_ = i;
 }

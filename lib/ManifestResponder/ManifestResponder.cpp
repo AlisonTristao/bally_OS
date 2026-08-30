@@ -74,6 +74,16 @@ public:
         out_[offset + 3U] = static_cast<std::uint8_t>(value >> 24U);
     }
 
+    bool reserveU16(std::size_t* offset_out) noexcept {
+        *offset_out = pos_;
+        return u16(0U);
+    }
+
+    void patchU16(std::size_t offset, std::uint16_t value) noexcept {
+        out_[offset] = static_cast<std::uint8_t>(value);
+        out_[offset + 1U] = static_cast<std::uint8_t>(value >> 8U);
+    }
+
 private:
     bool raw(const std::uint8_t* data, std::size_t n) noexcept {
         if (pos_ + n > capacity_) return false;
@@ -188,28 +198,39 @@ std::size_t build_manifest_data(const btp::Header& request_header, std::uint8_t 
     // informational, not a descriptor, and is not gated by config_revision,
     // so a consumer always gets the current values. An error (REJECTED)
     // response describes nothing and writes an empty block. An entry with an
-    // empty value is skipped entirely -- that is what makes name/description
-    // optional: the field just does not appear until it is set.
+    // empty value is skipped -- that is what makes name/description optional.
+    //
+    // Entries are written whole, only while they fit within a budget that
+    // leaves kRecordsReserveBytes for the topic records after them. A device
+    // configured with a long name/description hits that budget before it
+    // overruns the frame: the trailing info entries are dropped (info_count
+    // reflects what was actually written) rather than failing the whole
+    // response -- the schema a consumer needs to decode telemetry always wins
+    // over a human-facing info row.
     const std::size_t infoClamped =
         (error || source_info == nullptr)
             ? 0U
             : (source_info_count > ManifestResponder::kMaxSourceInfoEntries
                    ? ManifestResponder::kMaxSourceInfoEntries
                    : source_info_count);
-    std::uint16_t infoCount = 0U;
+    const std::size_t infoBudgetEnd = (capacity > ManifestResponder::kRecordsReserveBytes)
+                                          ? (capacity - ManifestResponder::kRecordsReserveBytes)
+                                          : writer.size();
+    std::size_t infoCountOffset = 0U;
+    if (!writer.reserveU16(&infoCountOffset)) return 0U;
+    std::uint16_t infoWritten = 0U;
     for (std::size_t i = 0U; i < infoClamped; ++i) {
-        const char* value = source_info[i].value;
-        if (value != nullptr && value[0] != '\0') ++infoCount;
-    }
-    if (!writer.u16(infoCount)) return 0U;
-    for (std::size_t i = 0U; i < infoClamped; ++i) {
+        const char* key = source_info[i].key;
+        const char* label = source_info[i].label;
         const char* value = source_info[i].value;
         if (value == nullptr || value[0] == '\0') continue;
-        if (!writer.utf8(source_info[i].key) || !writer.utf8(source_info[i].label) ||
-            !writer.utf8(value)) {
-            return 0U;
-        }
+        const std::size_t entrySize = 6U + std::strlen(key != nullptr ? key : "") +
+                                      std::strlen(label != nullptr ? label : "") + std::strlen(value);
+        if (writer.size() + entrySize > infoBudgetEnd) break;  // keep room for the records
+        if (!writer.utf8(key) || !writer.utf8(label) || !writer.utf8(value)) return 0U;
+        ++infoWritten;
     }
+    writer.patchU16(infoCountOffset, infoWritten);
 
     for (std::size_t i = 0U; i < topicCount; ++i) {
         if (!write_topic_record(writer, schemas[i])) return 0U;

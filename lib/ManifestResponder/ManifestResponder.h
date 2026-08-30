@@ -59,6 +59,13 @@ public:
     // section 6 caps the wire at 32. A caller passing more is truncated here
     // rather than overrunning the payload buffer.
     static constexpr std::size_t kMaxSourceInfoEntries = 16U;
+    // Octets build_manifest_data keeps in reserve for the topic records after
+    // the source_info block. The two current schemas total ~200; the slack
+    // covers a third small topic. A device with more info than fits in
+    // (payload budget - this) has its trailing info entries dropped, never
+    // the schema. Raise both this and kMaxManifestPayloadSize together if a
+    // future schema genuinely needs more.
+    static constexpr std::size_t kRecordsReserveBytes = 256U;
     // The two current schemas (protocol.test, robot.state) are ~200 octets;
     // prefix + source_name take ~275, which leaves room for a compact
     // source_info block. Sized to BtpEndpoint::send_logical's own

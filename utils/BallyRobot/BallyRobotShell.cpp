@@ -672,6 +672,28 @@ void ROBOT::registerLinkCommands() {
     }, "cmd_stats", "Command intake: dedup, replay and rejection counters", "link");
 
     shell.add([]() -> uint8_t {
+        const TerminalResponder::Stats t = instance_->terminal_responder.stats();
+        // origins_seen  = terminal sessions allocated (1 per TraceView terminal;
+        //                 climbing means boot_id churn / a reconnect loop)
+        // lines_submitted vs lines_dropped_busy = commands that reached the shell
+        //                 vs. those refused because one was still running
+        // in_bytes_dropped = TERMINAL_IN bytes lost because s.in was full while a
+        //                 command ran -- must stay 0, a lost '\r' wedges a line
+        // frames_out     = TERMINAL_OUT frames handed to the TX scheduler
+        ROBOT::logger.insert_logf(
+            logType::INFO,
+            "origins_seen=%lu origins_evicted=%lu lines_submitted=%lu "
+            "lines_dropped_busy=%lu frames_out=%lu in_bytes_dropped=%lu",
+            static_cast<unsigned long>(t.origins_seen),
+            static_cast<unsigned long>(t.origins_evicted),
+            static_cast<unsigned long>(t.lines_submitted),
+            static_cast<unsigned long>(t.lines_dropped_busy),
+            static_cast<unsigned long>(t.frames_out),
+            static_cast<unsigned long>(t.in_bytes_dropped));
+        return RESULT_OK;
+    }, "terminal", "BTP terminal channel: sessions, submitted/dropped lines, bytes lost", "link");
+
+    shell.add([]() -> uint8_t {
         uint8_t channel = 0;
         wifi_second_chan_t second = WIFI_SECOND_CHAN_NONE;
         const bool read_ok = esp_wifi_get_channel(&channel, &second) == ESP_OK;

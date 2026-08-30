@@ -51,9 +51,29 @@ std::string render_command_output(const std::string& text, std::uint8_t status) 
 
 }  // namespace
 
+// Unbounded spin. Safe ONLY for a caller whose every possible lock holder runs
+// at >= its own priority on the same core, so the holder always makes progress
+// and releases: deliver_command_output() (shell task, the lowest-priority user)
+// qualifies -- pump() (comms) and on_terminal_in() (Wi-Fi) both outrank it and
+// both now hold the lock for only a handful of field ops.
 void TerminalResponder::lock() noexcept {
     while (lock_.test_and_set(std::memory_order_acquire)) {
     }
+}
+
+// Bounded try, for callers that would otherwise deadlock spin-waiting on a
+// LOWER-priority holder pinned to the same core: pump() (comms, priority 4)
+// and on_terminal_in() (Wi-Fi, priority ~23) can both be blocked behind the
+// shell task (priority 2) on core 0. kMaxLockSpins is generous because every
+// critical section is now O(1) field work -- exhausting it means real trouble,
+// and the caller's fallback (skip this pass / drop these bytes) beats a hang.
+bool TerminalResponder::try_lock() noexcept {
+    for (unsigned spins = 0U; spins < kMaxLockSpins; ++spins) {
+        if (!lock_.test_and_set(std::memory_order_acquire)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void TerminalResponder::unlock() noexcept {
@@ -110,13 +130,16 @@ TerminalResponder::Slot* TerminalResponder::find_or_alloc(std::uint32_t source_i
     victim->source_id = source_id;
     victim->boot_id = boot_id;
     victim->last_used_us = now_us;
-    victim->editor.reset();
-    victim->editor.setCompletionProvider(completion_);
-    victim->prompt_painted = false;
+    // Touch only the lock_-guarded fields here. The editor and the other
+    // pump()-owned fields (prompt_painted, awaiting_result, pending_line) are
+    // reset by pump() itself when it observes needs_editor_reset -- this runs
+    // on the Wi-Fi RX task, and ShellLineEditor::reset() is neither fast nor
+    // concurrency-safe, so doing it here (while pump() may be mid-edit) is
+    // exactly the race the deferral removes.
+    victim->needs_editor_reset = true;
     victim->in.clear();
     victim->pending_out.clear();
     victim->result_ready = false;
-    victim->awaiting_result = false;
     origins_seen_.fetch_add(1U, std::memory_order_relaxed);
     return victim;
 }
@@ -126,7 +149,16 @@ void TerminalResponder::on_terminal_in(const btp::Header& header, btp::ByteView 
         return;
     }
 
-    lock();
+    // Wi-Fi RX task, priority ~23, pinned to core 0 alongside pump() (comms)
+    // and deliver_command_output() (shell). A spin-wait here on a lock held by
+    // either lower-priority task would wedge core 0 for good, so give up
+    // instead -- the dropped bytes are counted, and with O(1) critical
+    // sections everywhere this is effectively never reached.
+    if (!try_lock()) {
+        in_bytes_dropped_.fetch_add(static_cast<std::uint32_t>(plaintext.size),
+                                    std::memory_order_relaxed);
+        return;
+    }
     Slot* s = find_or_alloc(header.source_id, header.boot_id, header.timestamp_us);
     if (s != nullptr) {
         const std::size_t room = (s->in.size() < kMaxPendingIn) ? (kMaxPendingIn - s->in.size()) : 0U;
@@ -144,15 +176,23 @@ void TerminalResponder::on_terminal_in(const btp::Header& header, btp::ByteView 
 
 void TerminalResponder::deliver_command_output(std::uint32_t source_id, std::uint32_t boot_id,
                                                const char* text, std::uint8_t status) noexcept {
+    // Render BEFORE taking lock_. This runs on the shell task (priority 2);
+    // render_command_output() is an allocation loop over the whole capture.
+    // Holding lock_ across it let the Wi-Fi RX task (on_terminal_in(), priority
+    // ~23, same core) spin-wait on a lock this task could not release until it
+    // was rescheduled -- which, being lower priority on a pinned core, never
+    // happened: a hard core-0 deadlock. The critical section below is now just
+    // two field writes.
+    std::string rendered =
+        render_command_output((text != nullptr) ? std::string(text) : std::string(), status);
+    if (rendered.size() > kMaxCommandOut) {
+        rendered.resize(kMaxCommandOut);
+        rendered += "\r\n! [output truncated]\r\n";
+    }
+
     lock();
     Slot* s = find(source_id, boot_id);
     if (s != nullptr) {
-        std::string rendered = render_command_output((text != nullptr) ? std::string(text) : std::string(),
-                                                     status);
-        if (rendered.size() > kMaxCommandOut) {
-            rendered.resize(kMaxCommandOut);
-            rendered += "\r\n! [output truncated]\r\n";
-        }
         s->pending_out = std::move(rendered);
         s->result_ready = true;
     }
@@ -161,54 +201,118 @@ void TerminalResponder::deliver_command_output(std::uint32_t source_id, std::uin
 
 void TerminalResponder::pump(std::uint64_t now_us) noexcept {
     for (Slot& s : slots_) {
-        // The whole editor section runs under lock_: on_terminal_in() (Wi-Fi
-        // task) can evict this very slot -- reset()ing its editor -- and
-        // ShellLineEditor is not concurrency-safe. Everything here is fast and
-        // non-blocking (std::string edits, one non-blocking xQueueSend via
-        // submit_); the one heavy step, emit_terminal_out()'s AEAD seal, runs
-        // after unlock().
-        std::string out;
-        lock();
-        if (!s.used) {
-            unlock();
+        // Take lock_ only to snapshot the hand-off fields on_terminal_in()
+        // (Wi-Fi task) and deliver_command_output() (shell task) also touch.
+        // The editor section that follows runs UNLOCKED: s.editor and the
+        // pump()-owned flags below are never touched off this task, so nothing
+        // there can race, and the Wi-Fi task never spin-waits on pump().
+        bool used = false;
+        bool needs_reset = false;
+        bool have_result = false;
+        std::uint32_t src = 0U;
+        std::uint32_t boot = 0U;
+        std::string result;
+        std::string input;
+
+        // Comms task, priority 4, core 0. deliver_command_output() on the
+        // shell task (priority 2) also takes lock_, so a spin-wait here could
+        // deadlock core 0. Its critical section is O(1), so a bounded try that
+        // fails just means "come back next pass" -- pump() runs every comms
+        // loop anyway.
+        if (!try_lock()) {
             continue;
         }
-        s.last_used_us = now_us;
-
-        if (!s.prompt_painted) {
-            s.editor.setPrompt(prompt_, out);
-            s.prompt_painted = true;
-        }
-        if (s.result_ready) {
-            std::string result;
-            result.swap(s.pending_out);
-            s.result_ready = false;
-            s.awaiting_result = false;
-            s.editor.writeResponse(result, out);
-        }
-        if (!s.awaiting_result) {
-            if (!s.in.empty()) {
-                std::string input;
-                input.swap(s.in);
-                s.editor.feed(input);
+        used = s.used;
+        if (used) {
+            s.last_used_us = now_us;
+            src = s.source_id;
+            boot = s.boot_id;
+            needs_reset = s.needs_editor_reset;
+            s.needs_editor_reset = false;
+            if (s.result_ready) {
+                result.swap(s.pending_out);
+                s.result_ready = false;
+                have_result = true;
             }
-            std::string line;
-            while (s.editor.poll(out, &line)) {
-                const bool ok = (submit_ != nullptr) &&
-                                submit_(submit_context_, s.source_id, s.boot_id, line.c_str());
-                if (ok) {
-                    lines_submitted_.fetch_add(1U, std::memory_order_relaxed);
-                    s.awaiting_result = true;
-                    break;  // one command at a time; leftover input stays in the editor
-                }
-                lines_dropped_busy_.fetch_add(1U, std::memory_order_relaxed);
-                s.editor.writeResponse("! busy, command dropped", out);
+            if (!s.in.empty()) {
+                input.swap(s.in);
             }
         }
         unlock();
 
+        if (!used) {
+            continue;
+        }
+
+        std::string out;
+
+        if (needs_reset) {
+            s.editor.reset();
+            s.editor.setCompletionProvider(completion_);
+            s.prompt_painted = false;
+            s.awaiting_result = false;
+            s.pending_line.clear();
+        }
+        if (!s.prompt_painted) {
+            s.editor.setPrompt(prompt_, out);
+            s.prompt_painted = true;
+        }
+        if (have_result) {
+            s.awaiting_result = false;
+            s.editor.writeResponse(result, out);
+        }
+
+        // Feed the editor EVERY pass, even while a command is still executing:
+        // it must keep echoing keystrokes and completing lines, or s.in fills
+        // (kMaxPendingIn) while the command runs and on_terminal_in() starts
+        // dropping bytes -- a dropped '\r' wedges the line editor forever. Only
+        // SUBMITTING waits on awaiting_result.
+        if (!input.empty()) {
+            s.editor.feed(input);
+        }
+
+        // A line typed ahead while the previous command ran: submit it now
+        // that its result has landed, before pulling anything new from the
+        // editor, so commands run in the order they were entered.
+        if (!s.awaiting_result && !s.pending_line.empty()) {
+            std::string next;
+            next.swap(s.pending_line);
+            submit_line(s, src, boot, next, out);
+        }
+
+        std::string line;
+        while (s.editor.poll(out, &line)) {
+            if (s.awaiting_result) {
+                // One command already in flight. Hold exactly one line behind
+                // it; a second means whole commands are arriving faster than
+                // the robot's shell drains them.
+                if (s.pending_line.empty()) {
+                    s.pending_line.swap(line);
+                } else {
+                    lines_dropped_busy_.fetch_add(1U, std::memory_order_relaxed);
+                    s.editor.writeResponse("! busy, command dropped", out);
+                }
+                continue;
+            }
+            submit_line(s, src, boot, line, out);
+        }
+
         emit_terminal_out(out, now_us);
     }
+}
+
+// pump()-only helper: submit one completed line, or report the queue full.
+// Never touches lock_ -- s.awaiting_result is pump-owned, src/boot are the
+// values pump() snapshotted under the lock.
+void TerminalResponder::submit_line(Slot& s, std::uint32_t src, std::uint32_t boot,
+                                    const std::string& line, std::string& out) noexcept {
+    if (submit_ != nullptr && submit_(submit_context_, src, boot, line.c_str())) {
+        lines_submitted_.fetch_add(1U, std::memory_order_relaxed);
+        s.awaiting_result = true;
+        return;
+    }
+    lines_dropped_busy_.fetch_add(1U, std::memory_order_relaxed);
+    s.editor.writeResponse("! busy, command dropped", out);
 }
 
 void TerminalResponder::emit_terminal_out(const std::string& bytes, std::uint64_t now_us) noexcept {

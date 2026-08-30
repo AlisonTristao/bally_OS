@@ -215,6 +215,52 @@ void test_pool_evicts_lru_and_isolates_origins() {
     TEST_ASSERT_TRUE(found);
 }
 
+// Back-to-back commands from one origin: the second must run and mirror its
+// output too. Regression for "the terminal works exactly once" -- a command's
+// result left the origin unable to submit the next line.
+void test_consecutive_commands_each_run() {
+    const std::uint32_t src = 0xAAAA0006U;
+    const std::uint32_t boot = 0xBBBB0006U;
+
+    feed(src, boot, "one\r");
+    pump();
+    TEST_ASSERT_EQUAL(1U, g_submit.lines.size());
+    g_responder->deliver_command_output(src, boot, "first output", 0U);
+    pump();
+
+    g_sent.clear();
+    feed(src, boot, "two\r");
+    pump();
+    TEST_ASSERT_EQUAL(2U, g_submit.lines.size());
+    TEST_ASSERT_EQUAL_STRING("two", g_submit.lines[1].c_str());
+    g_responder->deliver_command_output(src, boot, "second output", 0U);
+    pump();
+    TEST_ASSERT_TRUE(all_sent().find("second output") != std::string::npos);
+}
+
+// Keystrokes typed while a command is still running are echoed immediately
+// (the editor is fed every pass), and the completed line is submitted once the
+// running command's result lands -- input is never buffered until it is lost.
+void test_input_while_command_in_flight_is_echoed_and_then_runs() {
+    const std::uint32_t src = 0xAAAA0007U;
+    const std::uint32_t boot = 0xBBBB0007U;
+
+    feed(src, boot, "slow\r");
+    pump();  // submits "slow"; awaiting its result
+
+    g_sent.clear();
+    feed(src, boot, "next\r");
+    pump();  // command still running: "next" is echoed but not yet submitted
+    TEST_ASSERT_TRUE(all_sent().find("next") != std::string::npos);  // echoed
+    TEST_ASSERT_EQUAL(1U, g_submit.lines.size());                    // not submitted
+
+    g_responder->deliver_command_output(src, boot, "slow done", 0U);
+    pump();  // result lands -> held line runs
+    TEST_ASSERT_EQUAL(2U, g_submit.lines.size());
+    TEST_ASSERT_EQUAL_STRING("next", g_submit.lines[1].c_str());
+    TEST_ASSERT_EQUAL(0U, g_responder->stats().in_bytes_dropped);
+}
+
 // submit() refusing (queue full) is reported and does not wedge the origin.
 void test_submit_busy_is_reported() {
     g_submit.accept = false;
@@ -232,6 +278,8 @@ int main(int, char**) {
     RUN_TEST(test_line_submits_and_output_mirrors_back);
     RUN_TEST(test_tab_completion);
     RUN_TEST(test_nonzero_status_is_reported);
+    RUN_TEST(test_consecutive_commands_each_run);
+    RUN_TEST(test_input_while_command_in_flight_is_echoed_and_then_runs);
     RUN_TEST(test_pool_evicts_lru_and_isolates_origins);
     RUN_TEST(test_submit_busy_is_reported);
     return UNITY_END();

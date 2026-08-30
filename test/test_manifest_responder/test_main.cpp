@@ -616,6 +616,62 @@ void test_source_info_block_round_trips_and_skips_empty_values() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// A device with more source_info than fits (a long name + description on top
+// of the build/chip fields) does not fail the whole response: the trailing
+// info entries are dropped so the topic records the consumer needs still fit.
+// info_count reflects what was actually written, and the records parse.
+// ---------------------------------------------------------------------------
+void test_source_info_truncates_before_crowding_out_the_topic_records() {
+    BtpEndpoint endpoint;
+    ManifestResponder responder;
+    TEST_ASSERT_TRUE(endpoint.configure(kLocalSourceId, kLocalBootId));
+    endpoint.set_send_callback(capture_send);
+
+    // 16 entries of ~50 octets each = ~800, well past the payload budget.
+    static const char* kLong = "0123456789012345678901234567890123456789";  // 40
+    SourceInfoEntry info[ManifestResponder::kMaxSourceInfoEntries];
+    for (auto& entry : info) {
+        entry = SourceInfoEntry{"k", "label", kLong};
+    }
+    responder.configure(endpoint, kUuid, nullptr, nullptr, info,
+                        sizeof(info) / sizeof(info[0]));
+
+    std::size_t expected_topic_count = 0U;
+    TelemetryPublisher::schemas(&expected_topic_count);
+
+    const auto header = manifest_request_header(kRequesterSourceId, kRequesterBootId,
+                                                kRequestSequence);
+    const auto logical = send_and_reassemble(
+        endpoint, responder, header, manifest_request_payload(0U, 0U, 0U));
+
+    TEST_ASSERT_LESS_OR_EQUAL_UINT32(ManifestResponder::kMaxManifestPayloadSize, logical.size());
+
+    Reader reader(logical);
+    std::uint16_t topic_count = 0U;
+    skip_prefix_and_name_to_source_info(reader, &topic_count);
+    TEST_ASSERT_EQUAL_UINT32(expected_topic_count, topic_count);
+
+    const std::uint16_t info_count = reader.u16();
+    TEST_ASSERT_GREATER_THAN_UINT16(0U, info_count);   // some fit
+    TEST_ASSERT_LESS_THAN_UINT16(ManifestResponder::kMaxSourceInfoEntries, info_count);  // not all
+    for (std::uint16_t i = 0U; i < info_count; ++i) {
+        reader.utf8();  // key
+        reader.utf8();  // label
+        TEST_ASSERT_EQUAL_STRING(kLong, reader.utf8().c_str());
+    }
+
+    // The topic records after the (truncated) block still frame cleanly: each
+    // record_size prefix lands within bounds and consumption is exact.
+    for (std::size_t t = 0U; t < expected_topic_count; ++t) {
+        const std::uint32_t record_size = reader.u32();
+        for (std::uint32_t b = 0U; b < record_size; ++b) {
+            reader.u8();
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT32(logical.size(), reader.pos());
+}
+
 void test_short_payload_is_rejected_without_sending() {
     BtpEndpoint endpoint;
     ManifestResponder responder;
@@ -646,6 +702,7 @@ int main(int, char**) {
     RUN_TEST(test_request_for_different_source_is_rejected_not_found);
     RUN_TEST(test_request_with_stale_boot_id_is_rejected);
     RUN_TEST(test_source_info_block_round_trips_and_skips_empty_values);
+    RUN_TEST(test_source_info_truncates_before_crowding_out_the_topic_records);
     RUN_TEST(test_reply_is_sealed_when_configured_with_a_seal_function);
     RUN_TEST(test_short_payload_is_rejected_without_sending);
     return UNITY_END();
