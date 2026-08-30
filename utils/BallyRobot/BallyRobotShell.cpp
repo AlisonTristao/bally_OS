@@ -605,13 +605,13 @@ void ROBOT::registerLinkCommands() {
 
     shell.add([]() -> uint8_t {
         const TxScheduler::Stats tx = instance_->tx_scheduler.stats();
-        // Priority order is COMMAND_RESULT > STATUS > LOG > TELEMETRY > DEBUG
-        // (see TxScheduler). Printed per class because "which class is being
-        // dropped" is the whole diagnostic value here.
+        // Priority order is COMMAND_RESULT > STATUS > TERMINAL > CRIT_LOG >
+        // TELEMETRY > DEBUG (see TxScheduler). Printed per class because
+        // "which class is being dropped" is the whole diagnostic value here.
         ROBOT::logger.insert_logf(
             logType::INFO,
             "accepted=%lu delivered=%lu timeouts=%lu dropped=%lu delivery_failed=%lu "
-            "queued=%lu/%lu/%lu/%lu/%lu dropped_by_class=%lu/%lu/%lu/%lu/%lu",
+            "queued=%lu/%lu/%lu/%lu/%lu/%lu dropped_by_class=%lu/%lu/%lu/%lu/%lu/%lu",
             static_cast<unsigned long>(tx.accepted),
             static_cast<unsigned long>(tx.delivered),
             static_cast<unsigned long>(tx.timeouts),
@@ -622,11 +622,13 @@ void ROBOT::registerLinkCommands() {
             static_cast<unsigned long>(tx.queued_by_priority[2]),
             static_cast<unsigned long>(tx.queued_by_priority[3]),
             static_cast<unsigned long>(tx.queued_by_priority[4]),
+            static_cast<unsigned long>(tx.queued_by_priority[5]),
             static_cast<unsigned long>(tx.dropped_by_priority[0]),
             static_cast<unsigned long>(tx.dropped_by_priority[1]),
             static_cast<unsigned long>(tx.dropped_by_priority[2]),
             static_cast<unsigned long>(tx.dropped_by_priority[3]),
-            static_cast<unsigned long>(tx.dropped_by_priority[4]));
+            static_cast<unsigned long>(tx.dropped_by_priority[4]),
+            static_cast<unsigned long>(tx.dropped_by_priority[5]));
         return RESULT_OK;
     }, "tx", "Transmit scheduler counters, per priority class", "link");
 

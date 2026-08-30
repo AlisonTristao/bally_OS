@@ -16,10 +16,16 @@ public:
     enum class Priority : std::uint8_t {
         CommandResult = 0,
         Status = 1,
-        CriticalLog = 2,
-        Telemetry = 3,
-        Debug = 4,
-        Count = 5,
+        // Interactive shell I/O (TERMINAL_IN/OUT). Kept above the log/
+        // telemetry/debug bulk and its own queue, so a command's mirrored
+        // output does not fight for the 8-deep Debug queue with every LOG
+        // line the same command emits -- pump() sends one frame per pass at
+        // strict priority, and Debug is last.
+        Terminal = 2,
+        CriticalLog = 3,
+        Telemetry = 4,
+        Debug = 5,
+        Count = 6,
     };
 
     struct Stats {
@@ -28,8 +34,8 @@ public:
         std::uint32_t timeouts;
         std::uint32_t dropped;
         std::uint32_t delivery_failed;
-        std::uint32_t queued_by_priority[5];
-        std::uint32_t dropped_by_priority[5];
+        std::uint32_t queued_by_priority[6];
+        std::uint32_t dropped_by_priority[6];
     };
 
     static constexpr std::uint64_t kDefaultDeliveryTimeoutMs = 250U;
@@ -58,7 +64,8 @@ private:
     static constexpr std::size_t kPriorityCount =
         static_cast<std::size_t>(Priority::Count);
     static constexpr std::size_t kQueueCapacity[kPriorityCount] = {
-        8U, 4U, 8U, 16U, 8U,
+        //  cmd  status  terminal  crit-log  telemetry  debug
+        8U,  4U,     16U,      8U,       16U,       8U,
     };
     static constexpr std::size_t kMaxCapacity = 16U;
 

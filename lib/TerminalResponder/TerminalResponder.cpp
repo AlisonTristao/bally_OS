@@ -161,42 +161,35 @@ void TerminalResponder::deliver_command_output(std::uint32_t source_id, std::uin
 
 void TerminalResponder::pump(std::uint64_t now_us) noexcept {
     for (Slot& s : slots_) {
-        // --- structural section under the lock ---
+        // The whole editor section runs under lock_: on_terminal_in() (Wi-Fi
+        // task) can evict this very slot -- reset()ing its editor -- and
+        // ShellLineEditor is not concurrency-safe. Everything here is fast and
+        // non-blocking (std::string edits, one non-blocking xQueueSend via
+        // submit_); the one heavy step, emit_terminal_out()'s AEAD seal, runs
+        // after unlock().
+        std::string out;
         lock();
         if (!s.used) {
             unlock();
             continue;
         }
-
-        std::string result;
-        bool have_result = false;
-        if (s.result_ready) {
-            result.swap(s.pending_out);
-            s.result_ready = false;
-            s.awaiting_result = false;
-            have_result = true;
-        }
-
-        std::string input;
-        if (!s.awaiting_result) {
-            input.swap(s.in);
-        }
-        const bool need_prompt = !s.prompt_painted;
-        const bool awaiting = s.awaiting_result;
         s.last_used_us = now_us;
-        unlock();
 
-        // --- editor section: only pump() touches s.editor ---
-        std::string out;
-        if (need_prompt) {
+        if (!s.prompt_painted) {
             s.editor.setPrompt(prompt_, out);
             s.prompt_painted = true;
         }
-        if (have_result) {
+        if (s.result_ready) {
+            std::string result;
+            result.swap(s.pending_out);
+            s.result_ready = false;
+            s.awaiting_result = false;
             s.editor.writeResponse(result, out);
         }
-        if (!awaiting) {
-            if (!input.empty()) {
+        if (!s.awaiting_result) {
+            if (!s.in.empty()) {
+                std::string input;
+                input.swap(s.in);
                 s.editor.feed(input);
             }
             std::string line;
@@ -205,15 +198,14 @@ void TerminalResponder::pump(std::uint64_t now_us) noexcept {
                                 submit_(submit_context_, s.source_id, s.boot_id, line.c_str());
                 if (ok) {
                     lines_submitted_.fetch_add(1U, std::memory_order_relaxed);
-                    lock();
                     s.awaiting_result = true;
-                    unlock();
                     break;  // one command at a time; leftover input stays in the editor
                 }
                 lines_dropped_busy_.fetch_add(1U, std::memory_order_relaxed);
                 s.editor.writeResponse("! busy, command dropped", out);
             }
         }
+        unlock();
 
         emit_terminal_out(out, now_us);
     }

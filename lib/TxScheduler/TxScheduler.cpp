@@ -28,6 +28,9 @@ TxScheduler::Priority TxScheduler::classify(
     if (frame.header.type == btp::MessageType::Control) {
         return Priority::Status;
     }
+    if (frame.header.type == btp::MessageType::Terminal) {
+        return Priority::Terminal;
+    }
     if (frame.header.type == btp::MessageType::Log &&
         (frame.header.object_id == 2U || frame.header.object_id == 3U)) {
         return Priority::CriticalLog;
