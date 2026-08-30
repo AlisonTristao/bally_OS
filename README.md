@@ -160,7 +160,7 @@ No segundo núcleo, é executada a rotina paralela do robô, responsável por:
 - Verificar as *flags* dos botões, sensores laterais, sinais PWM e LEDs.
 - Gerir as transições da máquina de estados, de acordo com as *flags*.
 - Gerenciar a fila estática de comandos recebidos por ESP-NOW.
-- Antes da fila, validar o frame BTP (magic, versão, tamanhos, CRC e fragmentação), o MAC/source da origem, o alvo do boot e o payload `COMMAND_REQUEST`. Somente a ação de shell `0x0001`, versão 1, chega ao **TinyShell**; `TELEMETRY`, `LOG`, `TERMINAL`, `CONTROL` e demais objetos são rejeitados.
+- Antes da fila, validar o frame BTP (magic, versão, tamanhos, CRC e fragmentação), o MAC/source da origem, o alvo do boot e abrir o selo AEAD (canal B key E ou canal C key L). Chegam ao **TinyShell**: a ação de shell `0x0001` v1 de um `COMMAND_REQUEST`, e as linhas de `TERMINAL_IN` (`0x0001`) que o `TerminalResponder` edita server-side e cuja saída é espelhada de volta como `TERMINAL_OUT`. `TELEMETRY`, `LOG`, `CONTROL` não previstos e demais objetos são rejeitados.
 - Reservar a identidade `(source_id, boot_id, sequence)` antes de executar; retries idênticos reutilizam o resultado armazenado, conflitos são rejeitados e fila cheia gera `BUSY/CAPACITY_EXHAUSTED` estruturado.
 - Drenar o scheduler de transmissão sem deixar telemetria ou debug atrasarem resultados de comando; o callback ESP-NOW apenas confirma ou falha o único frame pendente.
 - Gerenciar o Filtro de Kalman Estendido, fazendo a amostragem, o cálculo de predição e a atualização do estado. 

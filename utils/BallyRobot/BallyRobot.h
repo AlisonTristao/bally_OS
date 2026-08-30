@@ -29,6 +29,7 @@
 #include <CommandProcessor.h>
 #include <ManifestResponder.h>
 #include <SubscriptionResponder.h>
+#include <TerminalResponder.h>
 #include <StatusReporter.h>
 #include <TelemetryPublisher.h>
 #include <TxScheduler.h>
@@ -169,6 +170,7 @@ public:
     ManifestResponder manifest_responder;
     TelemetryPublisher telemetry;
     SubscriptionResponder subscription_responder;
+    TerminalResponder terminal_responder;
     StatusReporter status_reporter;
     StateMachine machine;
     TinyShell shell;
@@ -528,6 +530,11 @@ private:
     struct QueuedCommand {
         uint8_t cache_slot;
         char text[btp_command::kMaxShellCommandSize + 1U];
+        // Only meaningful when cache_slot == kTerminalCommandSlot: the
+        // TERMINAL origin runShell() routes the captured output back to via
+        // TerminalResponder::deliver_command_output().
+        uint32_t terminal_source_id = 0U;
+        uint32_t terminal_boot_id = 0U;
     };
 
     // cache_slot for a command that did not come from the radio: a job firing
@@ -536,12 +543,28 @@ private:
     // runShell() uses it to skip the COMMAND_RESULT step — there is no
     // request to correlate a result with.
     static constexpr uint8_t kLocalCommandSlot = 0xFFU;
+    // Same idea for a line typed at TraceView's terminal (topico 19bis):
+    // no COMMAND_REQUEST to correlate, but its output is captured and mirrored
+    // back to the origin as TERMINAL_OUT instead of only going out as LOG.
+    static constexpr uint8_t kTerminalCommandSlot = 0xFEU;
 
     // Enqueue one shell line from inside the firmware. Returns false when the
     // queue is full (the caller decides whether to drop or retry — the job
     // scheduler drops, the script runner retries) or the line does not fit.
     bool submitLocalCommand(const char* command_line);
     static bool submitLocalCommandStatic(void* context, const char* command_line);
+
+    // Enqueue one shell line from TraceView's terminal, tagged with the origin
+    // so runShell() can hand its captured output back to TerminalResponder.
+    bool submitTerminalCommand(uint32_t source_id, uint32_t boot_id,
+                               const char* command_line);
+    static bool submitTerminalCommandStatic(void* context, uint32_t source_id,
+                                            uint32_t boot_id, const char* command_line);
+
+    // The shell task's own handle, captured at the top of runShell(). Logger's
+    // command-output capture is gated on it so only shell-task log lines
+    // (i.e. the running command's own output) are mirrored to the terminal.
+    TaskHandle_t shell_task_handle_ = nullptr;
 
     // ---- SD script runner ("job -run_file", and JOB_AUTOEXEC_FILE at boot) --
     //

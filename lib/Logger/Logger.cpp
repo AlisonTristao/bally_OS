@@ -100,6 +100,7 @@ void Logger::insert_logf(logType type, const char* format, ...) {
 
         insert_log_impl(reinterpret_cast<const uint8_t*>(buffer), final_len, type,
                         static_cast<uint64_t>(esp_timer_get_time()));
+        capture_text(reinterpret_cast<const uint8_t*>(buffer), final_len);
     }
 
     free_mutex();
@@ -110,10 +111,46 @@ void Logger::insert_log(logType type, const char* msg) {
 
     if (!wait_for_mutex()) return;
 
-    insert_log_impl(reinterpret_cast<const uint8_t*>(msg), strlen(msg), type,
+    const size_t len = strlen(msg);
+    insert_log_impl(reinterpret_cast<const uint8_t*>(msg), len, type,
                     static_cast<uint64_t>(esp_timer_get_time()));
+    capture_text(reinterpret_cast<const uint8_t*>(msg), len);
 
     free_mutex();
+}
+
+void Logger::begin_capture(TaskHandle_t task) {
+    if (!wait_for_mutex()) return;
+    capture_active_ = true;
+    capture_task_ = task;
+    capture_buf_.clear();
+    free_mutex();
+}
+
+void Logger::end_capture(std::string& out) {
+    if (!wait_for_mutex()) {
+        out.clear();
+        return;
+    }
+    out.swap(capture_buf_);
+    capture_buf_.clear();
+    capture_active_ = false;
+    capture_task_ = nullptr;
+    free_mutex();
+}
+
+// caller holds mutex_
+void Logger::capture_text(const uint8_t* data, size_t len) {
+    if (!capture_active_ || data == nullptr || len == 0) return;
+    if (xTaskGetCurrentTaskHandle() != capture_task_) return;
+    if (capture_buf_.size() >= kCaptureCapacity) return;
+
+    size_t take = len;
+    if (capture_buf_.size() + take > kCaptureCapacity) {
+        take = kCaptureCapacity - capture_buf_.size();
+    }
+    capture_buf_.append(reinterpret_cast<const char*>(data), take);
+    capture_buf_.push_back('\n');
 }
 
 bool Logger::send_log_direct(logType type, const char* msg) {
@@ -125,6 +162,7 @@ bool Logger::send_log_direct(logType type, const char* msg) {
     endpoint = endpoint_;
     seal = endpoint_seal_;
     seal_context = endpoint_seal_context_;
+    capture_text(reinterpret_cast<const uint8_t*>(msg), strlen(msg));
     free_mutex();
     if (endpoint == nullptr) return false;
 

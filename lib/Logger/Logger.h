@@ -7,8 +7,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <string>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
+#include <freertos/task.h>
 #include <LogTypes.h>
 #include <Settings.h>
 
@@ -85,6 +87,23 @@ public:
      * Used for shell responses while the SD card belongs to the USB host.
      */
     bool send_log_direct(logType type, const char* msg);
+
+    /**
+     * @brief BTP terminal channel output capture (topico 19bis).
+     *
+     * Between begin_capture() and end_capture(), every insert_log/insert_logf/
+     * send_log_direct issued FROM @p task is ALSO appended (text + '\n') to an
+     * internal buffer bounded at kCaptureCapacity. TerminalResponder mirrors
+     * that buffer back to the origin as TERMINAL_OUT, so a command typed at
+     * TraceView's terminal shows its output inline the way bally_dongle does.
+     *
+     * The capture is additive: the same lines still go out as LOG frames.
+     * Only one capture is active at a time (the shell task runs one command
+     * at a time); a second begin_capture() replaces the first.
+     */
+    static constexpr size_t kCaptureCapacity = 4096;
+    void begin_capture(TaskHandle_t task);
+    void end_capture(std::string& out);
 
     /*
     * @brief Send the log messages that are currently in the logger's buffer using the configured send callback.
@@ -185,6 +204,14 @@ private:
 
     // Only one consumer (ESP-NOW or SD) may walk the ring at a time.
     bool consumer_busy_ = false;
+
+    // Terminal-output capture (begin_capture/end_capture). Guarded by mutex_
+    // like endpoint_. capture_buf_ is bounded at kCaptureCapacity.
+    bool capture_active_ = false;
+    TaskHandle_t capture_task_ = nullptr;
+    std::string capture_buf_;
+    // caller must hold mutex_
+    void capture_text(const uint8_t* data, size_t len);
 
     SemaphoreHandle_t mutex_ = NULL;
     BtpEndpoint* endpoint_ = nullptr;

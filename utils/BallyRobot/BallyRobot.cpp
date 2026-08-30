@@ -323,6 +323,23 @@ bool ROBOT::configureProtocolIdentity() {
     // STATUS (heartbeat) is channel C by definition (bally_channels.h), so
     // it seals for real too.
     status_reporter.configure(protocol, telemetry, RadioSeal::seal, nullptr);
+    // TERMINAL_OUT is channel B (topico 19bis): TraceView's terminal widget
+    // holds key E, the dongle relays the stream verbatim. Sealed with E or not
+    // sent, same as TELEMETRY/LOG. Tab completion runs against this robot's
+    // real TinyShell catalog, exactly like bally_dongle's console does.
+    terminal_responder.configure(
+        protocol, RadioSeal::seal_e, nullptr,
+        [this](const std::string& input, std::string* out, size_t max_out) -> size_t {
+            if (out == nullptr || max_out == 0U) return 0U;
+            const std::vector<std::string> matches = shell.complete_line(input, max_out);
+            size_t written = 0U;
+            for (const std::string& match : matches) {
+                if (written >= max_out) break;
+                out[written++] = match;
+            }
+            return written;
+        },
+        &ROBOT::submitTerminalCommandStatic, this, "bally> ");
     logger.insert_logf(
         logType::INFO,
         "BTP v%u, bally_protocol %u.%u.%u, source=%08lx boot=%08lx",
@@ -784,6 +801,9 @@ void ROBOT::handleReceiveStatic(const esp_now_recv_info_t *recv_info, const uint
     const std::size_t ciphertext_size = instance_->rx_routed_.payload_size;
     const bool classify_by_peer =
         header.type == btp::MessageType::Command ||
+        // TERMINAL_IN comes from TraceView's terminal widget through the hub,
+        // sealed with key E (channel B) exactly like a COMMAND_REQUEST does.
+        header.type == btp::MessageType::Terminal ||
         (header.type == btp::MessageType::Control &&
          (header.object_id == SubscriptionResponder::kSubscribeObjectId ||
           header.object_id == SubscriptionResponder::kUnsubscribeObjectId));
@@ -812,11 +832,11 @@ void ROBOT::handleReceiveStatic(const esp_now_recv_info_t *recv_info, const uint
 
     // Stage three: route. Explicit MessageType filter -- no other channel can
     // fall through to the shell path, even if its payload happens to look
-    // like text. A type the robot has no handler for (TELEMETRY, LOG and
-    // TERMINAL today) is dropped HERE rather than before reassembly, so a
-    // fragmented one costs a slot until it completes or times out. That is
-    // the price of the ordering above, bounded by RxRouter::kSlotCount and
-    // its 4000 ms timeout; filtering earlier is what loses real messages.
+    // like text. A type the robot has no handler for (TELEMETRY and LOG
+    // today) is dropped HERE rather than before reassembly, so a fragmented
+    // one costs a slot until it completes or times out. That is the price of
+    // the ordering above, bounded by RxRouter::kSlotCount and its 4000 ms
+    // timeout; filtering earlier is what loses real messages.
     switch (header.type) {
         case btp::MessageType::Command:
             if (header.object_id != btp_command::kCommandRequestObjectId) {
@@ -832,9 +852,17 @@ void ROBOT::handleReceiveStatic(const esp_now_recv_info_t *recv_info, const uint
                 return;
             }
             break;
+        case btp::MessageType::Terminal:
+            // TERMINAL_IN is the interactive shell channel (topico 19bis):
+            // TraceView -> hub -> here, server-side line editing in
+            // TerminalResponder, output mirrored back as TERMINAL_OUT.
+            if (header.object_id != TerminalResponder::kTerminalInObjectId) {
+                instance_->command_processor.note_drop();
+                return;
+            }
+            break;
         case btp::MessageType::Telemetry:
         case btp::MessageType::Log:
-        case btp::MessageType::Terminal:
         case btp::MessageType::Invalid:
             instance_->command_processor.note_drop();
             return;
@@ -851,6 +879,12 @@ void ROBOT::handleReceiveStatic(const esp_now_recv_info_t *recv_info, const uint
 // unreachable in practice but kept as a safe no-op rather than an assert.
 void ROBOT::dispatchDecoded(const btp::Header& header, btp::ByteView payload,
                            bally::Channel channel) {
+    if (header.type == btp::MessageType::Terminal) {
+        // Runs on the Wi-Fi RX task: TerminalResponder only buffers the bytes
+        // here; runComms() drives the editor and runShell() the command.
+        terminal_responder.on_terminal_in(header, payload);
+        return;
+    }
     if (header.type == btp::MessageType::Control) {
         if (header.object_id == ManifestResponder::kManifestRequestObjectId) {
             processManifestRequest(header, payload);
@@ -1142,6 +1176,33 @@ bool ROBOT::submitLocalCommandStatic(void* context, const char* command_line) {
     ROBOT* self = static_cast<ROBOT*>(context);
     if (self == nullptr) return false;
     return self->submitLocalCommand(command_line);
+}
+
+bool ROBOT::submitTerminalCommand(uint32_t source_id, uint32_t boot_id,
+                                  const char* command_line) {
+    if (command_line == nullptr || command_line[0] == '\0') return false;
+    if (receivedDataQueue == nullptr) return false;
+
+    const size_t length = std::strlen(command_line);
+    if (length > btp_command::kMaxShellCommandSize) return false;
+
+    QueuedCommand command{};
+    command.cache_slot = kTerminalCommandSlot;
+    command.terminal_source_id = source_id;
+    command.terminal_boot_id = boot_id;
+    std::memcpy(command.text, command_line, length);
+    command.text[length] = '\0';
+
+    // Never block (comms task): a full queue is a "no" that TerminalResponder
+    // reports back to the operator as "! busy, command dropped".
+    return xQueueSend(receivedDataQueue, &command, 0) == pdTRUE;
+}
+
+bool ROBOT::submitTerminalCommandStatic(void* context, uint32_t source_id,
+                                        uint32_t boot_id, const char* command_line) {
+    ROBOT* self = static_cast<ROBOT*>(context);
+    if (self == nullptr) return false;
+    return self->submitTerminalCommand(source_id, boot_id, command_line);
 }
 
 void ROBOT::pollJobs() {
@@ -1489,13 +1550,18 @@ void ROBOT::initInterruptions(void *param){
 void ROBOT::runShell(void *param) {
     (void)param; // Suppress unused parameter warning
 
-    while (instance_->receivedDataQueue == nullptr)
-        vTaskDelay(100 / portTICK_PERIOD_MS); // wait 
+    // Logger's terminal-output capture is gated on this handle, so only this
+    // task's log lines (a running command's own output) are mirrored back to
+    // TraceView's terminal.
+    instance_->shell_task_handle_ = xTaskGetCurrentTaskHandle();
 
-    // log the task 
+    while (instance_->receivedDataQueue == nullptr)
+        vTaskDelay(100 / portTICK_PERIOD_MS); // wait
+
+    // log the task
     logger.insert_log(logType::INFO, "Shell task started and ready to receive commands");
 
-    // run the task 
+    // run the task
     while (true) {
         // delay for wathdog timer and to allow other tasks to run
         // in the begin of the loop to wait when no one command is received
@@ -1504,12 +1570,32 @@ void ROBOT::runShell(void *param) {
         QueuedCommand received_command{};
         if (xQueueReceive(instance_->receivedDataQueue, &received_command, 0) != pdTRUE)
             continue;
-        
+
+        const bool from_terminal =
+            received_command.cache_slot == kTerminalCommandSlot;
+
+        // A terminal command's output is mirrored back to its origin as
+        // TERMINAL_OUT (topico 19bis), so capture every log line it emits --
+        // both the shell's own output_callback text and the insert_log()
+        // calls inside the command bodies.
+        if (from_terminal) {
+            logger.begin_capture(instance_->shell_task_handle_);
+        }
+
         // Execute exactly once, then publish the final correlated result. A
         // repeated request is answered from CommandProcessor's boot-lifetime
         // cache and never reaches TinyShell again.
         const uint8_t shell_status =
             instance_->shell.run_command_line(received_command.text);
+
+        if (from_terminal) {
+            std::string captured;
+            logger.end_capture(captured);
+            instance_->terminal_responder.deliver_command_output(
+                received_command.terminal_source_id,
+                received_command.terminal_boot_id, captured.c_str(), shell_status);
+            continue;
+        }
 
         // A job firing or a script line has no COMMAND_REQUEST behind it, so
         // there is nothing to correlate a COMMAND_RESULT with and no cache
@@ -1616,6 +1702,10 @@ void ROBOT::runComms(void *param) {
         // Same OTA guard routine() uses: while OTA holds the radio on the
         // target Wi-Fi channel, ESP-NOW frames never reach the peer.
         if (!instance_->ota.is_active()) {
+            // Drive the terminal editors before pumping the scheduler so a
+            // keystroke echo / command output queued now leaves on this pass.
+            instance_->terminal_responder.pump(
+                static_cast<uint64_t>(esp_timer_get_time()));
             instance_->tx_scheduler.pump(
                 static_cast<uint64_t>(esp_timer_get_time() / 1000ULL));
             instance_->publishStatus();
