@@ -339,6 +339,8 @@ void test_publisher_registers_static_schemas_and_rejects_nan() {
         static_cast<std::uint8_t>(TelemetryPublisher::Encoding::Utf8),
         static_cast<std::uint8_t>(schemas[2].encoding));
     TEST_ASSERT_EQUAL_UINT32(0U, schemas[2].field_count);
+    TEST_ASSERT_EQUAL_UINT32(1000U, schemas[2].max_rate_millihz);
+    TEST_ASSERT_EQUAL_UINT32(333U, schemas[2].default_rate_millihz);
 
     BtpEndpoint endpoint;
     TEST_ASSERT_TRUE(endpoint.configure(1U, 2U));

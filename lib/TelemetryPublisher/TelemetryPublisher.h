@@ -250,7 +250,7 @@ public:
     // Publishes one complete replace-in-place dashboard document (the full
     // `sys -health` report). `text` is UTF-8 without a terminator and must fit
     // kMaxSystemMonitorTextSize. Unlike the numeric topics this does NOT go
-    // through queue_[]: the document is large and low-rate (0.33 Hz), so it
+    // through queue_[]: the document is large and low-rate (up to 1 Hz), so it
     // gets its own single staging slot. A document produced while the previous
     // one is still unflushed is dropped (QueueFull) -- the next tick refreshes
     // it -- rather than racing flush().

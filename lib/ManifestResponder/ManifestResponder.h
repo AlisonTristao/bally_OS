@@ -22,9 +22,9 @@ class BtpEndpoint;
 // Deliberately pure C++ (no Arduino/FreeRTOS), same shape as BtpTransport, so
 // it links into env:native if a future topico wants to test it there. This
 // robot has exactly one static, compile-time catalog (no runtime schema
-// changes), so config_revision is a fixed constant (1) rather than a
-// persisted counter -- "a revisao e monotonica e comeca em 1" is satisfied
-// trivially by never changing it within one firmware build.
+// changes), so config_revision is a compile-time constant rather than a
+// persisted counter. It is bumped whenever a firmware build changes the
+// catalog and remains fixed for that build.
 //
 // Every response is single-shot: MANIFEST_REQUEST addressed to this boot (or
 // to the wildcard target 0, which for a leaf node with no gateway role below
@@ -53,7 +53,7 @@ public:
     // response, so the fleet moves together -- there is no format negotiation
     // in MANIFEST_REQUEST.
     static constexpr std::uint16_t kManifestFormatVersion = 2U;
-    static constexpr std::uint32_t kConfigRevision = 1U;
+    static constexpr std::uint32_t kConfigRevision = 2U;
     static constexpr std::uint8_t kSourceRoleRobot = 0x01U;
     // Upper bound on source_info entries this responder will emit; commands.md
     // section 6 caps the wire at 32. A caller passing more is truncated here

@@ -50,9 +50,9 @@ constexpr TelemetryPublisher::TopicSchema kSchemas[] = {
      nullptr,
      0U,  // UTF8 is the complete topic body; it has no structured fields
      TelemetryPublisher::kMaxSystemMonitorPayloadSize,
-     333U,  // max/default: approximately 0.33 Hz (one report every 3 s)
+     1000U,  // max: 1 Hz (one report per second)
      1U,    // min: 0.001 Hz; slower dashboard periods remain valid
-     333U},
+     333U},  // default: approximately 0.33 Hz (one report every 3 s)
 };
 
 void write_u16_le(std::uint8_t* output, std::uint16_t value) noexcept {
@@ -179,7 +179,7 @@ std::size_t TelemetryPublisher::flush(std::size_t max_samples) noexcept {
 
     // The out-of-band system.monitor document is one logical sample no matter
     // how many wire fragments it needs. Drain it before the numeric queue:
-    // its sequence was reserved earlier (0.33 Hz topic), so sending it first
+    // its sequence was reserved earlier (low-rate topic), so sending it first
     // keeps sequences ascending on the wire in the common case. send_logical_
     // reserved() seals the whole document once, then fragments it; a failed
     // seal stays fail-closed.
