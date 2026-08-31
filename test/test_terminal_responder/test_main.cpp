@@ -42,6 +42,23 @@ std::string all_sent() {
     return out;
 }
 
+std::string strip_sgr(const std::string& text) {
+    std::string out;
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        if (text[i] != '\x1b') {
+            out += text[i];
+            continue;
+        }
+        if (i + 1 < text.size() && text[i + 1] == '[') {
+            i += 2;
+            while (i < text.size() && !(text[i] >= '@' && text[i] <= '~')) {
+                ++i;
+            }
+        }
+    }
+    return out;
+}
+
 // --- submit stub -------------------------------------------------------------
 struct SubmitLog {
     std::vector<std::string> lines;
@@ -133,6 +150,16 @@ void test_keystrokes_are_echoed() {
     TEST_ASSERT_TRUE(all_sent().find("ls") != std::string::npos);
 }
 
+void test_keystrokes_are_coloured_by_command_token() {
+    feed(0xAAAA0008U, 0xBBBB0008U, "motor -set 10");
+    pump();
+    const std::string out = all_sent();
+    TEST_ASSERT_TRUE(out.find("\x1b[33mmotor") != std::string::npos);
+    TEST_ASSERT_TRUE(out.find("\x1b[34m-set") != std::string::npos);
+    TEST_ASSERT_TRUE(out.find("\x1b[30m 10") != std::string::npos);
+    TEST_ASSERT_TRUE(out.find("10\x1b[0m") != std::string::npos);
+}
+
 // A completed line is submitted and its output mirrored back inline.
 void test_line_submits_and_output_mirrors_back() {
     const std::uint32_t src = 0xAAAA0002U;
@@ -167,7 +194,7 @@ void test_line_submits_and_output_mirrors_back() {
 void test_tab_completion() {
     feed(0xAAAA0003U, 0xBBBB0003U, "he\t");
     pump();
-    TEST_ASSERT_TRUE(all_sent().find("help ") != std::string::npos);
+    TEST_ASSERT_TRUE(strip_sgr(all_sent()).find("help ") != std::string::npos);
 }
 
 // A non-zero shell status is reported as a trailing note.
@@ -275,6 +302,7 @@ int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_first_contact_paints_prompt_then_echoes);
     RUN_TEST(test_keystrokes_are_echoed);
+    RUN_TEST(test_keystrokes_are_coloured_by_command_token);
     RUN_TEST(test_line_submits_and_output_mirrors_back);
     RUN_TEST(test_tab_completion);
     RUN_TEST(test_nonzero_status_is_reported);
