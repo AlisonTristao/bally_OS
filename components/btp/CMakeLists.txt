@@ -11,16 +11,15 @@
 #
 # Registering BTP here, with REQUIRES mbedtls, is what puts <psa/crypto.h> on
 # aead.cpp's include path. This ESP-IDF is mbedtls 4.x / TF-PSA-Crypto, where
-# <mbedtls/gcm.h> moved to mbedtls/private/ -- so only the PSA backend links,
-# and that backend does not exist in the BTP v2.0.0 tag. See the sibling
-# checkout's src/aead.cpp "Backend selection" comment.
+# <mbedtls/gcm.h> moved to mbedtls/private/ -- so only the PSA backend links.
+# See the sibling checkout's src/aead.cpp "Backend selection" comment.
 #
 # Sources come from the sibling checkout c:/git/BTP -- the SAME tree
 # [env:native] builds through `symlink://../BTP` -- so the firmware and the
 # host test suite can never diverge on the protocol. Expected revision:
-# d96896a ("cap 9 pronto", = v2.0.0 + the PSA backend). Keep this in step with
-# [env:native]'s symlink; when BTP cuts a tag past v2.0.0, this can become a
-# submodule pinned to it.
+# v2.2.0 (btp::messages) -- v2.0.0 + the PSA backend + the COMMAND/CONTROL
+# payload layer. Keep this in step with [env:native]'s symlink; this can
+# become a submodule pinned to the tag.
 #
 # The btp lib_deps entry is removed from [env:esp32-s3] for the same reason a
 # component and a lib_deps library of the same name would fight over codec.o.
@@ -39,6 +38,7 @@ idf_component_register(
         "${btp_root}/src/codec.cpp"
         "${btp_root}/src/fragmentation.cpp"
         "${btp_root}/src/stream.cpp"
+        "${btp_root}/src/messages.cpp"
         "${btp_root}/src/aead.cpp"
     INCLUDE_DIRS "${btp_root}/include"
     REQUIRES mbedtls)

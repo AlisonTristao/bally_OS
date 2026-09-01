@@ -1,25 +1,10 @@
 #include <BtpTransport.h>
 
 #include <btp/fragmentation.hpp>
+#include <btp/messages.hpp>
 
 #include <cstring>
 #include <limits>
-
-namespace {
-
-std::uint16_t read_u16_le(const std::uint8_t* data) noexcept {
-    return static_cast<std::uint16_t>(data[0]) |
-           static_cast<std::uint16_t>(static_cast<std::uint16_t>(data[1]) << 8U);
-}
-
-std::uint32_t read_u32_le(const std::uint8_t* data) noexcept {
-    return static_cast<std::uint32_t>(data[0]) |
-           (static_cast<std::uint32_t>(data[1]) << 8U) |
-           (static_cast<std::uint32_t>(data[2]) << 16U) |
-           (static_cast<std::uint32_t>(data[3]) << 24U);
-}
-
-}  // namespace
 
 bool BtpEndpoint::default_send(void*, const std::uint8_t*, std::size_t) noexcept {
     return false;
@@ -318,36 +303,41 @@ ParseError parse_request(const btp::Header& header,
         header.boot_id == 0U) {
         return ParseError::InvalidEnvelope;
     }
-    if (payload.size < kRequestPrefixSize) return ParseError::PayloadTooShort;
 
-    RequestView request{
-        .target_source_id = read_u32_le(payload.data),
-        .target_boot_id = read_u32_le(payload.data + 4U),
-        .action_id = read_u16_le(payload.data + 8U),
-        .action_version = read_u16_le(payload.data + 10U),
-        .parameters = {payload.data + kRequestPrefixSize, 0U},
-    };
-    const std::uint16_t flags = read_u16_le(payload.data + 12U);
-    const std::uint16_t reserved = read_u16_le(payload.data + 14U);
-    const std::uint32_t parameter_size = read_u32_le(payload.data + 16U);
+    // The COMMAND_REQUEST payload layout (commands.md section 2.1) is
+    // btp::decode_command_request: the 20-octet prefix, the zero flags/reserved
+    // words, every id non-zero and "parameter_size consumes the payload
+    // exactly" all live in the library now.
+    btp::CommandRequest cmd{};
+    const btp::MessageError err = btp::decode_command_request(payload.data, payload.size, &cmd);
+    if (err != btp::MessageError::Ok) {
+        switch (err) {
+            case btp::MessageError::PayloadTooShort:
+                return ParseError::PayloadTooShort;
+            case btp::MessageError::ReservedNotZero:
+                return ParseError::InvalidFlags;
+            case btp::MessageError::TrailingBytes:
+            case btp::MessageError::LengthOverflow:
+                return ParseError::SizeMismatch;
+            case btp::MessageError::CountTooLarge:
+                return ParseError::ParametersTooLarge;
+            default:  // ZeroField: a zero target or action id
+                return ParseError::InvalidEnvelope;
+        }
+    }
 
-    if (request.target_source_id != local_source_id ||
-        request.target_boot_id != local_boot_id) {
+    if (cmd.target_source_id != local_source_id || cmd.target_boot_id != local_boot_id) {
         return ParseError::WrongTarget;
     }
-    if (request.action_id == 0U || request.action_version == 0U) {
-        return ParseError::InvalidAction;
-    }
-    if (flags != 0U || reserved != 0U) return ParseError::InvalidFlags;
-    if (parameter_size != payload.size - kRequestPrefixSize) {
-        return ParseError::SizeMismatch;
-    }
-    if (parameter_size > kMaxShellCommandSize) {
-        return ParseError::ParametersTooLarge;
+    if (cmd.parameters.size > kMaxShellCommandSize) {
+        return ParseError::ParametersTooLarge;  // stricter local ceiling than the wire's
     }
 
-    request.parameters.size = parameter_size;
-    *request_out = request;
+    request_out->target_source_id = cmd.target_source_id;
+    request_out->target_boot_id = cmd.target_boot_id;
+    request_out->action_id = cmd.action_id;
+    request_out->action_version = cmd.action_version;
+    request_out->parameters = cmd.parameters;
     return ParseError::Ok;
 }
 

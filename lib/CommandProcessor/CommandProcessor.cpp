@@ -1,5 +1,7 @@
 #include <CommandProcessor.h>
 
+#include <btp/messages.hpp>
+
 #include <cstring>
 
 void CommandProcessor::configure(BtpEndpoint& endpoint, BtpSealFn seal_link,
@@ -17,20 +19,6 @@ bool CommandProcessor::same_key(const RequestKey& left,
                                 const RequestKey& right) noexcept {
     return left.source_id == right.source_id && left.boot_id == right.boot_id &&
            left.sequence == right.sequence;
-}
-
-void CommandProcessor::write_u16(std::uint8_t* output,
-                                 std::uint16_t value) noexcept {
-    output[0] = static_cast<std::uint8_t>(value);
-    output[1] = static_cast<std::uint8_t>(value >> 8U);
-}
-
-void CommandProcessor::write_u32(std::uint8_t* output,
-                                 std::uint32_t value) noexcept {
-    output[0] = static_cast<std::uint8_t>(value);
-    output[1] = static_cast<std::uint8_t>(value >> 8U);
-    output[2] = static_cast<std::uint8_t>(value >> 16U);
-    output[3] = static_cast<std::uint8_t>(value >> 24U);
 }
 
 std::uint16_t CommandProcessor::read_u16(const std::uint8_t* input) noexcept {
@@ -94,23 +82,22 @@ bool CommandProcessor::encode_result(
     if (output == nullptr || size_out == nullptr || message == nullptr) {
         return false;
     }
-    const std::size_t message_size = std::strlen(message);
-    // Fixed fields (20), utf8_u16 prefix (2), bytes_u32 prefix (4).
-    const std::size_t total = 26U + message_size;
-    if (message_size > 512U || total > capacity) return false;
 
-    write_u32(output, key.source_id);
-    write_u32(output + 4U, key.boot_id);
-    write_u32(output + 8U, key.sequence);
-    write_u16(output + 12U, action_id);
-    write_u16(output + 14U, action_version);
-    output[16U] = static_cast<std::uint8_t>(status);
-    output[17U] = 0U;
-    write_u16(output + 18U, static_cast<std::uint16_t>(error));
-    write_u16(output + 20U, static_cast<std::uint16_t>(message_size));
-    std::memcpy(output + 22U, message, message_size);
-    write_u32(output + 22U + message_size, 0U);
-    *size_out = static_cast<std::uint16_t>(total);
+    // COMMAND_RESULT layout (commands.md section 2.4) is btp::encode_command_result.
+    // A shell result never carries a bytes_u32 result body -- only the message.
+    btp::CommandResult out{};
+    out.request = {key.source_id, key.boot_id, key.sequence};
+    out.action_id = action_id;
+    out.action_version = action_version;
+    out.status = static_cast<std::uint8_t>(status);
+    out.error_code = static_cast<std::uint16_t>(error);
+    out.message = {reinterpret_cast<const std::uint8_t*>(message), std::strlen(message)};
+
+    std::size_t written = 0U;
+    if (btp::encode_command_result(out, output, capacity, &written) != btp::MessageError::Ok) {
+        return false;
+    }
+    *size_out = static_cast<std::uint16_t>(written);
     return true;
 }
 

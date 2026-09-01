@@ -144,8 +144,9 @@ private:
 
     static bool same_key(const RequestKey& left,
                          const RequestKey& right) noexcept;
-    static void write_u16(std::uint8_t* output, std::uint16_t value) noexcept;
-    static void write_u32(std::uint8_t* output, std::uint32_t value) noexcept;
+    // The one field peek kept out of btp::decode_command_request: action_id /
+    // action_version are needed for the dedup-conflict and cache-exhausted
+    // transient results, which are built before the request is parsed.
     static std::uint16_t read_u16(const std::uint8_t* input) noexcept;
     static const char* parse_message(btp_command::ParseError error) noexcept;
     static Status parse_status(btp_command::ParseError error) noexcept;

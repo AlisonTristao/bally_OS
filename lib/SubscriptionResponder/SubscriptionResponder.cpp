@@ -2,6 +2,7 @@
 
 #include <BtpTransport.h>
 #include <TelemetryPublisher.h>
+#include <btp/messages.hpp>
 
 namespace {
 
@@ -21,32 +22,17 @@ constexpr std::size_t kSubscribeResultSize = 28U;
 constexpr std::size_t kUnsubscribeRequestSize = 12U;
 constexpr std::size_t kUnsubscribeResultSize = 16U;
 
+// The one hand read kept out of btp::messages: UNSUBSCRIBE's three u32 fields,
+// because handle_unsubscribe stays deliberately lenient (btp::decode_unsubscribe
+// would additionally reject a zero subscription_id, turning a spec-defined
+// idempotent retry into an error).
 std::uint32_t read_u32_le(const std::uint8_t* data) noexcept {
     return static_cast<std::uint32_t>(data[0]) | (static_cast<std::uint32_t>(data[1]) << 8U) |
            (static_cast<std::uint32_t>(data[2]) << 16U) | (static_cast<std::uint32_t>(data[3]) << 24U);
 }
 
-std::uint16_t read_u16_le(const std::uint8_t* data) noexcept {
-    return static_cast<std::uint16_t>(static_cast<std::uint16_t>(data[0]) |
-                                      (static_cast<std::uint16_t>(data[1]) << 8U));
-}
-
-void write_u16_le(std::uint8_t* out, std::uint16_t value) noexcept {
-    out[0] = static_cast<std::uint8_t>(value);
-    out[1] = static_cast<std::uint8_t>(value >> 8U);
-}
-
-void write_u32_le(std::uint8_t* out, std::uint32_t value) noexcept {
-    out[0] = static_cast<std::uint8_t>(value);
-    out[1] = static_cast<std::uint8_t>(value >> 8U);
-    out[2] = static_cast<std::uint8_t>(value >> 16U);
-    out[3] = static_cast<std::uint8_t>(value >> 24U);
-}
-
-void write_reference(std::uint8_t* out, const btp::Header& request_header) noexcept {
-    write_u32_le(out, request_header.source_id);
-    write_u32_le(out + 4U, request_header.boot_id);
-    write_u32_le(out + 8U, request_header.sequence);
+btp::RequestRef reference_of(const btp::Header& request_header) noexcept {
+    return {request_header.source_id, request_header.boot_id, request_header.sequence};
 }
 
 }  // namespace
@@ -96,11 +82,12 @@ bool SubscriptionResponder::handle_subscribe(const btp::Header& request_header, 
         return false;
     }
 
-    const std::uint32_t targetSourceId = read_u32_le(payload.data);
-    const std::uint32_t targetBootId = read_u32_le(payload.data + 4U);
-    const std::uint16_t topicId = read_u16_le(payload.data + 8U);
-    const std::uint32_t requestedRateMillihz = read_u32_le(payload.data + 12U);
-    const std::uint32_t requestedLeaseMs = read_u32_le(payload.data + 16U);
+    // The 20-octet SUBSCRIBE layout (commands.md section 4), the zero flags word
+    // and "every field non-zero" are btp::decode_subscribe. A well-formed
+    // payload whose values are unusable still gets a REJECTED reply, as before.
+    btp::Subscribe sub{};
+    const bool subOk =
+        btp::decode_subscribe(payload.data, payload.size, &sub) == btp::MessageError::Ok;
 
     const std::uint32_t localSourceId = endpoint_->source_id();
     const std::uint32_t localBootId = endpoint_->boot_id();
@@ -111,19 +98,19 @@ bool SubscriptionResponder::handle_subscribe(const btp::Header& request_header, 
     std::uint32_t effectiveRateMillihz = 0U;
     std::uint32_t grantedLeaseMs = 0U;
 
-    if (targetSourceId != 0U && targetSourceId != localSourceId) {
-        status = kStatusRejected;
-        errorCode = kErrorNotFound;
-    } else if (targetBootId == 0U || targetBootId != localBootId) {
-        status = kStatusRejected;
-        errorCode = kErrorStaleTargetBoot;
-    } else if (topicId == 0U || requestedRateMillihz == 0U || requestedLeaseMs == 0U) {
+    if (!subOk) {
         status = kStatusRejected;
         errorCode = kErrorInvalidArgument;
+    } else if (sub.target_source_id != localSourceId) {  // decode already guaranteed != 0
+        status = kStatusRejected;
+        errorCode = kErrorNotFound;
+    } else if (sub.target_boot_id != localBootId) {  // decode already guaranteed != 0
+        status = kStatusRejected;
+        errorCode = kErrorStaleTargetBoot;
     } else {
         const TelemetryPublisher::SubscribeOutcome outcome = publisher_->subscribe(
-            topicId, request_header.source_id, request_header.boot_id, requestedRateMillihz,
-            requestedLeaseMs, timestamp_us);
+            sub.topic_id, request_header.source_id, request_header.boot_id,
+            sub.requested_rate_millihz, sub.requested_lease_ms, timestamp_us);
         if (!outcome.topic_known) {
             status = kStatusRejected;
             errorCode = kErrorNotFound;
@@ -146,17 +133,22 @@ bool SubscriptionResponder::handle_subscribe(const btp::Header& request_header, 
         }
     }
 
-    std::uint8_t responsePayload[kSubscribeResultSize];
-    write_reference(responsePayload, request_header);
-    responsePayload[12] = status;
-    responsePayload[13] = 0U;  // reserved
-    write_u16_le(responsePayload + 14U, errorCode);
-    write_u32_le(responsePayload + 16U, subscriptionId);
-    write_u32_le(responsePayload + 20U, effectiveRateMillihz);
-    write_u32_le(responsePayload + 24U, grantedLeaseMs);
+    btp::SubscribeResult result{};
+    result.request = reference_of(request_header);
+    result.status = status;
+    result.error_code = errorCode;
+    result.subscription_id = subscriptionId;
+    result.effective_rate_millihz = effectiveRateMillihz;
+    result.granted_lease_ms = grantedLeaseMs;
 
+    std::uint8_t responsePayload[kSubscribeResultSize];
+    std::size_t written = 0U;
+    if (btp::encode_subscribe_result(result, responsePayload, sizeof(responsePayload), &written) !=
+        btp::MessageError::Ok) {
+        return false;
+    }
     return endpoint_->send_logical(btp::MessageType::Control, kSubscribeResultObjectId, responsePayload,
-                                   sizeof(responsePayload), timestamp_us, seal, seal_context);
+                                   written, timestamp_us, seal, seal_context);
 }
 
 bool SubscriptionResponder::handle_unsubscribe(const btp::Header& request_header, btp::ByteView payload,
@@ -196,12 +188,17 @@ bool SubscriptionResponder::handle_unsubscribe(const btp::Header& request_header
         (void)publisher_->unsubscribe(subscriptionId);
     }
 
-    std::uint8_t responsePayload[kUnsubscribeResultSize];
-    write_reference(responsePayload, request_header);
-    responsePayload[12] = status;
-    responsePayload[13] = 0U;  // reserved
-    write_u16_le(responsePayload + 14U, errorCode);
+    btp::ControlResult result{};
+    result.request = reference_of(request_header);
+    result.status = status;
+    result.error_code = errorCode;
 
+    std::uint8_t responsePayload[kUnsubscribeResultSize];
+    std::size_t written = 0U;
+    if (btp::encode_unsubscribe_result(result, responsePayload, sizeof(responsePayload), &written) !=
+        btp::MessageError::Ok) {
+        return false;
+    }
     return endpoint_->send_logical(btp::MessageType::Control, kUnsubscribeResultObjectId, responsePayload,
-                                   sizeof(responsePayload), timestamp_us, seal, seal_context);
+                                   written, timestamp_us, seal, seal_context);
 }

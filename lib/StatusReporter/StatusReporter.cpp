@@ -2,28 +2,14 @@
 
 #include <BtpTransport.h>
 #include <TelemetryPublisher.h>
+#include <btp/messages.hpp>
 
-namespace {
-
-void write_u16_le(std::uint8_t* output, std::uint16_t value) noexcept {
-    output[0] = static_cast<std::uint8_t>(value);
-    output[1] = static_cast<std::uint8_t>(value >> 8U);
-}
-
-void write_u32_le(std::uint8_t* output, std::uint32_t value) noexcept {
-    output[0] = static_cast<std::uint8_t>(value);
-    output[1] = static_cast<std::uint8_t>(value >> 8U);
-    output[2] = static_cast<std::uint8_t>(value >> 16U);
-    output[3] = static_cast<std::uint8_t>(value >> 24U);
-}
-
-void write_u64_le(std::uint8_t* output, std::uint64_t value) noexcept {
-    for (std::size_t i = 0U; i < 8U; ++i) {
-        output[i] = static_cast<std::uint8_t>(value >> (8U * i));
-    }
-}
-
-}  // namespace
+// The module's wire constants must equal the library's -- callers size buffers
+// off the StatusReporter names, btp::messages does the serialization.
+static_assert(StatusReporter::kBaseSize == btp::kStatusV1Size,
+              "kBaseSize must match btp::kStatusV1Size");
+static_assert(StatusReporter::kTopicStatusRecordSize == btp::kTopicStatusRecordSize,
+              "kTopicStatusRecordSize must match btp::kTopicStatusRecordSize");
 
 std::size_t StatusReporter::serialize(std::uint16_t flags,
                                       std::uint64_t uptime_us,
@@ -33,65 +19,64 @@ std::size_t StatusReporter::serialize(std::uint16_t flags,
                                       std::uint8_t* output,
                                       std::size_t output_capacity,
                                       bool version1) noexcept {
-    if (output == nullptr || output_capacity < kBaseSize) return 0U;
-    if (version1) topic_count = 0U;
-    if (topics == nullptr) topic_count = 0U;
-    if (topic_count > kMaxTopicRecords) topic_count = kMaxTopicRecords;
+    if (output == nullptr) return 0U;
 
-    // Section 5, unchanged layout in version 2.
-    write_u16_le(output + 0U, version1 ? kStatusVersion1 : kStatusVersion2);
-    // "flags | bit 0 DEGRADED, demais zero": every reserved bit MUST be zero
-    // on the wire (model.md section 7), so anything else the caller passes
-    // is dropped
-    // here rather than emitted and rejected by the peer.
-    write_u16_le(output + 2U, static_cast<std::uint16_t>(flags & kFlagDegraded));
-    write_u64_le(output + 4U, uptime_us);
-    write_u64_le(output + 12U, counters.frames_rx);
-    write_u64_le(output + 20U, counters.frames_tx);
-    write_u64_le(output + 28U, counters.frames_dropped);
-    write_u64_le(output + 36U, counters.crc_errors);
-    write_u64_le(output + 44U, counters.decode_errors);
-    write_u64_le(output + 52U, counters.reassembly_completed);
-    write_u64_le(output + 60U, counters.reassembly_timeouts);
-    write_u64_le(output + 68U, counters.reassembly_rejected);
-    write_u64_le(output + 76U, counters.command_duplicates);
-    write_u64_le(output + 84U, counters.telemetry_dropped);
-
-    // "Uma mensagem com status_version=1 MUST NOT incluir esses campos."
-    if (version1) return kBaseSize;
-
-    if (output_capacity < kBaseSize + kTopicStatusCountSize) return 0U;
+    btp::StatusV1 base{};
+    // model.md section 7: every reserved flags bit MUST be zero on the wire, so
+    // anything but DEGRADED the caller passes is dropped here.
+    base.flags = static_cast<std::uint16_t>(flags & kFlagDegraded);
+    base.uptime_us = uptime_us;
+    base.frames_rx = counters.frames_rx;
+    base.frames_tx = counters.frames_tx;
+    base.frames_dropped = counters.frames_dropped;
+    base.crc_errors = counters.crc_errors;
+    base.decode_errors = counters.decode_errors;
+    base.reassembly_completed = counters.reassembly_completed;
+    base.reassembly_timeouts = counters.reassembly_timeouts;
+    base.reassembly_rejected = counters.reassembly_rejected;
+    base.command_duplicates = counters.command_duplicates;
+    base.telemetry_dropped = counters.telemetry_dropped;
 
     std::size_t written = 0U;
-    std::size_t offset = kBaseSize + kTopicStatusCountSize;
-    for (std::size_t i = 0U; i < topic_count; ++i) {
-        const TopicRecord& record = topics[i];
-        if (record.source_id == 0U || record.topic_id == 0U) continue;
-
-        // (source_id, topic_id) MUST be unique inside one STATUS message.
-        bool duplicate = false;
-        for (std::size_t j = 0U; j < i; ++j) {
-            if (topics[j].source_id == record.source_id &&
-                topics[j].topic_id == record.topic_id) {
-                duplicate = true;
-                break;
-            }
-        }
-        if (duplicate) continue;
-
-        if (offset + kTopicStatusRecordSize > output_capacity) break;
-        write_u32_le(output + offset + 0U, record.source_id);
-        write_u16_le(output + offset + 4U, record.topic_id);
-        write_u16_le(output + offset + 6U, record.subscriber_count);
-        write_u32_le(output + offset + 8U, record.effective_rate_millihz);
-        write_u64_le(output + offset + 12U, record.bytes_total);
-        write_u64_le(output + offset + 20U, record.samples_dropped_total);
-        offset += kTopicStatusRecordSize;
-        ++written;
+    if (version1) {
+        return (btp::encode_status_v1(base, output, output_capacity, &written) == btp::MessageError::Ok)
+                   ? written
+                   : 0U;
     }
 
-    write_u16_le(output + kBaseSize, static_cast<std::uint16_t>(written));
-    return offset;
+    // The section 5.1 rules btp::messages leaves to the caller: skip a record
+    // with a zero source_id / topic_id, and drop a repeated (source_id,
+    // topic_id) pair -- it must be unique within one message.
+    btp::TopicStatusRecord kept_records[kMaxTopicRecords];
+    std::size_t kept = 0U;
+    if (topics != nullptr) {
+        const std::size_t limit = (topic_count < kMaxTopicRecords) ? topic_count : kMaxTopicRecords;
+        for (std::size_t i = 0U; i < limit; ++i) {
+            const TopicRecord& record = topics[i];
+            if (record.source_id == 0U || record.topic_id == 0U) continue;
+            bool duplicate = false;
+            for (std::size_t j = 0U; j < kept; ++j) {
+                if (kept_records[j].source_id == record.source_id &&
+                    kept_records[j].topic_id == record.topic_id) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (duplicate) continue;
+            kept_records[kept].source_id = record.source_id;
+            kept_records[kept].topic_id = record.topic_id;
+            kept_records[kept].subscriber_count = record.subscriber_count;
+            kept_records[kept].effective_rate_millihz = record.effective_rate_millihz;
+            kept_records[kept].bytes_total = record.bytes_total;
+            kept_records[kept].samples_dropped_total = record.samples_dropped_total;
+            ++kept;
+        }
+    }
+
+    return (btp::encode_status_v2(base, kept_records, kept, output, output_capacity, &written) ==
+            btp::MessageError::Ok)
+               ? written
+               : 0U;
 }
 
 void StatusReporter::configure(BtpEndpoint& endpoint,

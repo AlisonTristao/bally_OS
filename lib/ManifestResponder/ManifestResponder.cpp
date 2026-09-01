@@ -2,6 +2,7 @@
 
 #include <BtpTransport.h>
 #include <TelemetryPublisher.h>
+#include <btp/messages.hpp>
 
 #include <cstring>
 
@@ -22,86 +23,6 @@ constexpr std::uint8_t kFlagNotModified = 0x01U;
 constexpr std::uint8_t kFlagCatalogComplete = 0x02U;
 constexpr std::uint8_t kSourceFlagOnline = 0x01U;
 
-// Small append-only cursor over a fixed output buffer. Every append method
-// returns false (and leaves the buffer untouched beyond what already
-// succeeded) on overflow, so a caller can bail out cleanly rather than
-// overrun kMaxManifestPayloadSize.
-class Writer {
-public:
-    Writer(std::uint8_t* out, std::size_t capacity) noexcept : out_(out), capacity_(capacity) {}
-
-    bool u8(std::uint8_t value) noexcept { return raw(&value, 1U); }
-
-    bool u16(std::uint16_t value) noexcept {
-        const std::uint8_t bytes[2] = {static_cast<std::uint8_t>(value),
-                                       static_cast<std::uint8_t>(value >> 8U)};
-        return raw(bytes, 2U);
-    }
-
-    bool u32(std::uint32_t value) noexcept {
-        const std::uint8_t bytes[4] = {
-            static_cast<std::uint8_t>(value), static_cast<std::uint8_t>(value >> 8U),
-            static_cast<std::uint8_t>(value >> 16U), static_cast<std::uint8_t>(value >> 24U)};
-        return raw(bytes, 4U);
-    }
-
-    bool f64(double value) noexcept {
-        std::uint8_t bytes[8];
-        std::memcpy(bytes, &value, sizeof(bytes));  // host is little-endian (ESP32/x86)
-        return raw(bytes, 8U);
-    }
-
-    bool bytes16(const std::uint8_t* data, std::size_t size) noexcept { return raw(data, size); }
-
-    bool utf8(const char* text) noexcept {
-        const std::size_t len = (text == nullptr) ? 0U : std::strlen(text);
-        if (len > 0xFFFFU) return false;
-        if (!u16(static_cast<std::uint16_t>(len))) return false;
-        return len == 0U || raw(reinterpret_cast<const std::uint8_t*>(text), len);
-    }
-
-    std::size_t size() const noexcept { return pos_; }
-
-    bool reserveU32(std::size_t* offset_out) noexcept {
-        *offset_out = pos_;
-        return u32(0U);
-    }
-
-    void patchU32(std::size_t offset, std::uint32_t value) noexcept {
-        out_[offset] = static_cast<std::uint8_t>(value);
-        out_[offset + 1U] = static_cast<std::uint8_t>(value >> 8U);
-        out_[offset + 2U] = static_cast<std::uint8_t>(value >> 16U);
-        out_[offset + 3U] = static_cast<std::uint8_t>(value >> 24U);
-    }
-
-    bool reserveU16(std::size_t* offset_out) noexcept {
-        *offset_out = pos_;
-        return u16(0U);
-    }
-
-    void patchU16(std::size_t offset, std::uint16_t value) noexcept {
-        out_[offset] = static_cast<std::uint8_t>(value);
-        out_[offset + 1U] = static_cast<std::uint8_t>(value >> 8U);
-    }
-
-private:
-    bool raw(const std::uint8_t* data, std::size_t n) noexcept {
-        if (pos_ + n > capacity_) return false;
-        std::memcpy(out_ + pos_, data, n);
-        pos_ += n;
-        return true;
-    }
-
-    std::uint8_t* out_;
-    std::size_t capacity_;
-    std::size_t pos_ = 0U;
-};
-
-std::uint32_t read_u32_le(const std::uint8_t* data) noexcept {
-    return static_cast<std::uint32_t>(data[0]) | (static_cast<std::uint32_t>(data[1]) << 8U) |
-           (static_cast<std::uint32_t>(data[2]) << 16U) | (static_cast<std::uint32_t>(data[3]) << 24U);
-}
-
 std::uint8_t wire_type_code(TelemetryPublisher::WireType type) noexcept {
     switch (type) {
         case TelemetryPublisher::WireType::Uint8: return 0x01U;
@@ -111,73 +32,23 @@ std::uint8_t wire_type_code(TelemetryPublisher::WireType type) noexcept {
     return 0U;
 }
 
-bool write_field_record(Writer& writer, const TelemetryPublisher::FieldSchema& field) noexcept {
-    std::size_t size_offset = 0U;
-    if (!writer.reserveU32(&size_offset)) return false;
-    const std::size_t content_start = writer.size();
-
-    const bool ok = writer.u16(field.field_id) && writer.u16(field.order) &&
-                    writer.u8(wire_type_code(field.type)) &&
-                    writer.u8(field.nullable ? 0x01U : 0x00U) &&  // flags: bit0 NULLABLE
-                    writer.u16(field.element_count) &&
-                    writer.u16(0U) &&  // max_element_count: fixed-size, always zero
-                    writer.f64(static_cast<double>(field.scale)) &&
-                    writer.f64(static_cast<double>(field.offset)) &&
-                    writer.u16(0U) &&  // enum_count: no enum fields yet
-                    writer.utf8(field.name) && writer.utf8(field.unit) && writer.utf8("");
-    if (!ok) return false;
-
-    writer.patchU32(size_offset, static_cast<std::uint32_t>(writer.size() - content_start));
-    return true;
+btp::ByteView view_of(const char* text) noexcept {
+    return {reinterpret_cast<const std::uint8_t*>(text),
+            (text == nullptr) ? 0U : std::strlen(text)};
 }
 
-bool write_topic_record(Writer& writer, const TelemetryPublisher::TopicSchema& topic) noexcept {
-    std::size_t size_offset = 0U;
-    if (!writer.reserveU32(&size_offset)) return false;
-    const std::size_t content_start = writer.size();
-
-    const bool ok = writer.u16(topic.topic_id) && writer.u16(topic.schema_version) &&
-                    writer.u8(static_cast<std::uint8_t>(topic.encoding)) &&
-                    writer.u8(0x01U) &&  // flags: bit0 SUBSCRIBABLE
-                    writer.u16(static_cast<std::uint16_t>(topic.field_count)) &&
-                    writer.u32(topic.max_rate_millihz) && writer.utf8(topic.name) && writer.utf8("");
-    if (!ok) return false;
-
-    for (std::size_t i = 0U; i < topic.field_count; ++i) {
-        if (!write_field_record(writer, topic.fields[i])) return false;
-    }
-
-    writer.patchU32(size_offset, static_cast<std::uint32_t>(writer.size() - content_start));
-    return true;
-}
-
-// Writes the full MANIFEST_DATA payload. For an error status (REJECTED),
-// identity/role/flags/revision/topic&action counts are all zero and `name`
-// (if non-null) carries a short human diagnostic instead of the source name
-// -- commands.md section 3.2, the error case.
+// Writes the full MANIFEST_DATA payload via btp::ManifestWriter. For a
+// non-SUCCESS status (REJECTED / NOT_FOUND), the response describes no source:
+// identity / role / revision / counts are all zero and `name` (if non-null)
+// carries a short human diagnostic instead of the source name -- commands.md
+// section 3.2. Returns 0 on any capacity failure.
 std::size_t build_manifest_data(const btp::Header& request_header, std::uint8_t status, std::uint8_t flags,
                                 std::uint16_t error_code, const std::uint8_t uuid[16],
                                 std::uint32_t described_source_id, std::uint32_t described_boot_id,
                                 std::uint32_t config_revision, const char* name,
                                 const SourceInfoEntry* source_info, std::size_t source_info_count,
                                 std::uint8_t* output, std::size_t capacity) noexcept {
-    Writer writer(output, capacity);
     const bool error = (status != kStatusSuccess);
-
-    bool ok = writer.u32(request_header.source_id) && writer.u32(request_header.boot_id) &&
-             writer.u32(request_header.sequence) && writer.u8(status) && writer.u8(flags) &&
-             writer.u16(error_code) && writer.u16(ManifestResponder::kManifestFormatVersion) &&
-             writer.u16(0U) /*reserved*/ && writer.u32(error ? 0U : config_revision);
-    if (!ok) return 0U;
-
-    static const std::uint8_t kZeroUuid[16] = {0};
-    ok = writer.bytes16(error ? kZeroUuid : uuid, 16U) &&
-        writer.u32(error ? 0U : described_source_id) && writer.u32(error ? 0U : described_boot_id) &&
-        writer.u8(error ? 0U : ManifestResponder::kSourceRoleRobot) &&
-        writer.u8(error ? 0U : kSourceFlagOnline) && writer.u16(0U) /*catalog_index*/ &&
-        writer.u16(1U) /*catalog_count*/;
-    if (!ok) return 0U;
-
     const bool notModified = (flags & kFlagNotModified) != 0U;
 
     std::size_t topicCount = 0U;
@@ -186,27 +57,33 @@ std::size_t build_manifest_data(const btp::Header& request_header, std::uint8_t 
         schemas = TelemetryPublisher::schemas(&topicCount);
     }
 
-    if (!writer.u16(static_cast<std::uint16_t>(topicCount)) || !writer.u16(0U) /*action_count*/) {
-        return 0U;
-    }
-    if (!writer.utf8(error ? name : "bally_software")) {
-        return 0U;
-    }
+    static const std::uint8_t kZeroUuid[16] = {0};
+    btp::ManifestHeader header{};
+    header.request = {request_header.source_id, request_header.boot_id, request_header.sequence};
+    header.status = status;
+    header.flags = flags;
+    header.error_code = error_code;
+    header.manifest_format_version = ManifestResponder::kManifestFormatVersion;  // always 2
+    header.config_revision = error ? 0U : config_revision;
+    std::memcpy(header.source_uuid, error ? kZeroUuid : uuid, 16U);
+    header.described_source_id = error ? 0U : described_source_id;
+    header.described_boot_id = error ? 0U : described_boot_id;
+    header.source_role = error ? 0U : ManifestResponder::kSourceRoleRobot;
+    header.source_flags = error ? 0U : kSourceFlagOnline;
+    header.catalog_index = 0U;
+    header.catalog_count = 1U;  // content zeroed on error, but still one entry
+    header.topic_count = static_cast<std::uint16_t>(topicCount);
+    header.action_count = 0U;
+    header.source_name = view_of(error ? name : "bally_software");
 
-    // source_info block -- manifest_format_version 2 (commands.md section
-    // 3.12). Written on every SUCCESS response, NOT_MODIFIED included: it is
-    // informational, not a descriptor, and is not gated by config_revision,
-    // so a consumer always gets the current values. An error (REJECTED)
-    // response describes nothing and writes an empty block. An entry with an
-    // empty value is skipped -- that is what makes name/description optional.
-    //
-    // Entries are written whole, only while they fit within a budget that
-    // leaves kRecordsReserveBytes for the topic records after them. A device
-    // configured with a long name/description hits that budget before it
-    // overruns the frame: the trailing info entries are dropped (info_count
-    // reflects what was actually written) rather than failing the whole
-    // response -- the schema a consumer needs to decode telemetry always wins
-    // over a human-facing info row.
+    btp::ManifestWriter writer(output, capacity);
+    if (writer.begin(header) != btp::MessageError::Ok) return 0U;
+
+    // source_info block (commands.md 3.12): informational, rides SUCCESS and
+    // NOT_MODIFIED alike, empty on an error. Whole entries only, and only while
+    // they leave kRecordsReserveBytes for the topic records after them -- the
+    // schema a consumer needs to decode telemetry wins over a human-facing row.
+    // writer.size() is the running position; an unset value is skipped.
     const std::size_t infoClamped =
         (error || source_info == nullptr)
             ? 0U
@@ -216,9 +93,6 @@ std::size_t build_manifest_data(const btp::Header& request_header, std::uint8_t 
     const std::size_t infoBudgetEnd = (capacity > ManifestResponder::kRecordsReserveBytes)
                                           ? (capacity - ManifestResponder::kRecordsReserveBytes)
                                           : writer.size();
-    std::size_t infoCountOffset = 0U;
-    if (!writer.reserveU16(&infoCountOffset)) return 0U;
-    std::uint16_t infoWritten = 0U;
     for (std::size_t i = 0U; i < infoClamped; ++i) {
         const char* key = source_info[i].key;
         const char* label = source_info[i].label;
@@ -226,18 +100,48 @@ std::size_t build_manifest_data(const btp::Header& request_header, std::uint8_t 
         if (value == nullptr || value[0] == '\0') continue;
         const std::size_t entrySize = 6U + std::strlen(key != nullptr ? key : "") +
                                       std::strlen(label != nullptr ? label : "") + std::strlen(value);
-        if (writer.size() + entrySize > infoBudgetEnd) break;  // keep room for the records
-        if (!writer.utf8(key) || !writer.utf8(label) || !writer.utf8(value)) return 0U;
-        ++infoWritten;
+        if (writer.size() + entrySize > infoBudgetEnd) break;
+        const btp::SourceInfoEntry entry{view_of(key), view_of(label), view_of(value)};
+        if (writer.add_source_info(entry) != btp::MessageError::Ok) return 0U;
     }
-    writer.patchU16(infoCountOffset, infoWritten);
 
-    for (std::size_t i = 0U; i < topicCount; ++i) {
-        if (!write_topic_record(writer, schemas[i])) return 0U;
+    for (std::size_t t = 0U; t < topicCount; ++t) {
+        const TelemetryPublisher::TopicSchema& topic = schemas[t];
+        btp::TopicRecord record{};
+        record.topic_id = topic.topic_id;
+        record.schema_version = topic.schema_version;
+        record.encoding = static_cast<std::uint8_t>(topic.encoding);
+        record.flags = btp::kTopicSubscribable;
+        record.field_count = static_cast<std::uint16_t>(topic.field_count);
+        record.max_rate_millihz = topic.max_rate_millihz;
+        record.name = view_of(topic.name);
+        record.description = view_of("");
+        if (writer.begin_topic(record) != btp::MessageError::Ok) return 0U;
+
+        for (std::size_t f = 0U; f < topic.field_count; ++f) {
+            const TelemetryPublisher::FieldSchema& field = topic.fields[f];
+            btp::FieldRecord fr{};
+            fr.field_id = field.field_id;
+            fr.order = field.order;
+            fr.type = wire_type_code(field.type);
+            fr.flags = field.nullable ? btp::kFieldNullable : static_cast<std::uint8_t>(0U);
+            fr.element_count = field.element_count;
+            fr.max_element_count = 0U;  // fixed-size
+            fr.scale = static_cast<double>(field.scale);
+            fr.offset = static_cast<double>(field.offset);
+            fr.enum_count = 0U;  // no enum fields yet
+            fr.name = view_of(field.name);
+            fr.unit = view_of(field.unit);
+            fr.description = view_of("");
+            if (writer.add_field(fr) != btp::MessageError::Ok) return 0U;
+        }
+        if (writer.end_topic() != btp::MessageError::Ok) return 0U;
     }
-    // No action records yet (action_count=0 above; topico 18's territory).
+    // No action records yet (action_count = 0; topico 18's territory).
 
-    return writer.size();
+    std::size_t written = 0U;
+    if (writer.finish(&written) != btp::MessageError::Ok) return 0U;
+    return written;
 }
 
 }  // namespace
@@ -255,11 +159,17 @@ void ManifestResponder::configure(BtpEndpoint& endpoint, const std::uint8_t uuid
 
 bool ManifestResponder::handle_request(const btp::Header& request_header, btp::ByteView payload,
                                        std::uint64_t timestamp_us) noexcept {
-    if (endpoint_ == nullptr || payload.data == nullptr || payload.size < 12U) return false;
+    if (endpoint_ == nullptr) return false;
 
-    const std::uint32_t targetSourceId = read_u32_le(payload.data);
-    const std::uint32_t targetBootId = read_u32_le(payload.data + 4U);
-    const std::uint32_t knownRevision = read_u32_le(payload.data + 8U);
+    // The 12-octet MANIFEST_REQUEST layout (commands.md section 3.1) is
+    // btp::decode_manifest_request.
+    btp::ManifestRequest request{};
+    if (btp::decode_manifest_request(payload.data, payload.size, &request) != btp::MessageError::Ok) {
+        return false;
+    }
+    const std::uint32_t targetSourceId = request.target_source_id;
+    const std::uint32_t targetBootId = request.target_boot_id;
+    const std::uint32_t knownRevision = request.known_config_revision;
 
     const std::uint32_t localSourceId = endpoint_->source_id();
     const std::uint32_t localBootId = endpoint_->boot_id();
