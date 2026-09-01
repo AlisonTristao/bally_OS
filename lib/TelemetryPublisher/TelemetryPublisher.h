@@ -6,6 +6,7 @@
 #include <cstdint>
 
 #include <btp/codec.hpp>
+#include <btp/telemetry.hpp>  // btp::WireType, btp::FieldSpec, btp::SampleWriter
 
 // Needed for BtpSealFn (a file-scope type alias, not a member of BtpEndpoint),
 // which configure() below names -- same reason StatusReporter.h and
@@ -47,18 +48,34 @@ public:
         kMaxSystemMonitorTextSize + 2U;
 
     enum class Encoding : std::uint8_t { Utf8 = 0x02U, PackedLe = 0x05U };
-    enum class WireType : std::uint8_t { Uint8, Uint32, Float32 };
 
+    // The field's wire type is btp::WireType now (telemetry.md section 13's
+    // octet values). ManifestResponder serializes it straight into the field
+    // record; TelemetryPublisher::pack_* feeds it to btp::SampleWriter.
     struct FieldSchema {
         std::uint16_t field_id;
         std::uint16_t order;
         const char* name;
-        WireType type;
+        btp::WireType type;
         const char* unit;
         float scale;
         float offset;
         std::uint16_t element_count;
         bool nullable;
+
+        // The subset btp::SampleWriter / btp::SampleReader consume.
+        btp::FieldSpec spec() const noexcept {
+            btp::FieldSpec s{};
+            s.field_id = field_id;
+            s.order = order;
+            s.type = static_cast<std::uint8_t>(type);
+            s.flags = nullable ? btp::kFieldNullable : std::uint8_t{0};
+            s.element_count = element_count;
+            s.max_element_count = 0U;
+            s.scale = static_cast<double>(scale);
+            s.offset = static_cast<double>(offset);
+            return s;
+        }
     };
 
     struct TopicSchema {

@@ -23,15 +23,6 @@ constexpr std::uint8_t kFlagNotModified = 0x01U;
 constexpr std::uint8_t kFlagCatalogComplete = 0x02U;
 constexpr std::uint8_t kSourceFlagOnline = 0x01U;
 
-std::uint8_t wire_type_code(TelemetryPublisher::WireType type) noexcept {
-    switch (type) {
-        case TelemetryPublisher::WireType::Uint8: return 0x01U;
-        case TelemetryPublisher::WireType::Uint32: return 0x03U;
-        case TelemetryPublisher::WireType::Float32: return 0x09U;
-    }
-    return 0U;
-}
-
 btp::ByteView view_of(const char* text) noexcept {
     return {reinterpret_cast<const std::uint8_t*>(text),
             (text == nullptr) ? 0U : std::strlen(text)};
@@ -123,7 +114,7 @@ std::size_t build_manifest_data(const btp::Header& request_header, std::uint8_t 
             btp::FieldRecord fr{};
             fr.field_id = field.field_id;
             fr.order = field.order;
-            fr.type = wire_type_code(field.type);
+            fr.type = static_cast<std::uint8_t>(field.type);  // btp::WireType octet
             fr.flags = field.nullable ? btp::kFieldNullable : static_cast<std::uint8_t>(0U);
             fr.element_count = field.element_count;
             fr.max_element_count = 0U;  // fixed-size

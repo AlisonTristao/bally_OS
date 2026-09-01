@@ -2,22 +2,17 @@
 
 #include <BtpTransport.h>
 
-#include <cmath>
 #include <cstring>
-#include <limits>
 
 namespace {
 
 constexpr TelemetryPublisher::FieldSchema kProtocolTestFields[] = {
-    {1U, 0U, "counter", TelemetryPublisher::WireType::Uint32, "1", 1.0F,
-     0.0F, 1U, false},
-    {2U, 1U, "value", TelemetryPublisher::WireType::Float32, "1", 1.0F,
-     0.0F, 1U, false},
+    {1U, 0U, "counter", btp::WireType::Uint32, "1", 1.0F, 0.0F, 1U, false},
+    {2U, 1U, "value", btp::WireType::Float32, "1", 1.0F, 0.0F, 1U, false},
 };
 
 constexpr TelemetryPublisher::FieldSchema kRobotStateFields[] = {
-    {1U, 0U, "state", TelemetryPublisher::WireType::Uint8, "1", 1.0F,
-     0.0F, 1U, false},
+    {1U, 0U, "state", btp::WireType::Uint8, "1", 1.0F, 0.0F, 1U, false},
 };
 
 constexpr TelemetryPublisher::TopicSchema kSchemas[] = {
@@ -55,16 +50,12 @@ constexpr TelemetryPublisher::TopicSchema kSchemas[] = {
      333U},  // default: approximately 0.33 Hz (one report every 3 s)
 };
 
+// system.monitor (UTF8) is the one topic btp::SampleWriter does not build --
+// its body is opaque text, not schema fields -- so its two-octet
+// schema_version prefix is still written here.
 void write_u16_le(std::uint8_t* output, std::uint16_t value) noexcept {
     output[0] = static_cast<std::uint8_t>(value);
     output[1] = static_cast<std::uint8_t>(value >> 8U);
-}
-
-void write_u32_le(std::uint8_t* output, std::uint32_t value) noexcept {
-    output[0] = static_cast<std::uint8_t>(value);
-    output[1] = static_cast<std::uint8_t>(value >> 8U);
-    output[2] = static_cast<std::uint8_t>(value >> 16U);
-    output[3] = static_cast<std::uint8_t>(value >> 24U);
 }
 
 // Bounded spin: this lock is only ever held for a handful of field
@@ -269,26 +260,32 @@ bool TelemetryPublisher::pack_protocol_test(
     std::uint32_t counter,
     float value,
     std::uint8_t output[kProtocolTestPayloadSize]) noexcept {
-    static_assert(sizeof(float) == sizeof(std::uint32_t),
-                  "BTP float32 requires a 32-bit float");
-    static_assert(std::numeric_limits<float>::is_iec559,
-                  "BTP float32 requires IEEE-754");
-    if (output == nullptr || !std::isfinite(value)) return false;
+    if (output == nullptr) return false;
 
-    std::uint32_t value_bits = 0U;
-    std::memcpy(&value_bits, &value, sizeof(value_bits));
-    write_u16_le(output, kSchemaVersion);
-    write_u32_le(output + 2U, counter);
-    write_u32_le(output + 6U, value_bits);
-    return true;
+    // btp::SampleWriter writes the schema_version prefix, the two fields in
+    // `order` and (had there been one) the nullable bitmap; it also rejects a
+    // non-finite `value` (telemetry.md section 14.1).
+    const btp::FieldSpec specs[] = {kProtocolTestFields[0].spec(),
+                                    kProtocolTestFields[1].spec()};
+    btp::SampleWriter writer(output, kProtocolTestPayloadSize, specs, 2U);
+    std::size_t written = 0U;
+    return writer.begin(kSchemaVersion) == btp::MessageError::Ok &&
+           writer.put_u64(counter) == btp::MessageError::Ok &&
+           writer.put_f64(static_cast<double>(value)) == btp::MessageError::Ok &&
+           writer.finish(&written) == btp::MessageError::Ok;
 }
 
 void TelemetryPublisher::pack_robot_state(
     std::uint8_t state,
     std::uint8_t output[kRobotStatePayloadSize]) noexcept {
     if (output == nullptr) return;
-    write_u16_le(output, kSchemaVersion);
-    output[2] = state;
+    const btp::FieldSpec specs[] = {kRobotStateFields[0].spec()};
+    btp::SampleWriter writer(output, kRobotStatePayloadSize, specs, 1U);
+    std::size_t written = 0U;
+    if (writer.begin(kSchemaVersion) == btp::MessageError::Ok &&
+        writer.put_u64(state) == btp::MessageError::Ok) {
+        (void)writer.finish(&written);
+    }
 }
 
 bool TelemetryPublisher::pack_system_monitor(

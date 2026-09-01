@@ -73,17 +73,12 @@ void write_u32(std::uint8_t* out, std::uint32_t value) {
     out[3] = static_cast<std::uint8_t>(value >> 24U);
 }
 
-// Field type codes MANIFEST_DATA puts on the wire (BTP/docs/commands.md
-// field-type table), same numbers ManifestResponder.cpp's local
-// wire_type_code() uses. Kept here too so a topic/field record can be
-// checked byte-for-byte, not just "some type was written".
-std::uint8_t expected_wire_type_code(TelemetryPublisher::WireType type) {
-    switch (type) {
-        case TelemetryPublisher::WireType::Uint8: return 0x01U;
-        case TelemetryPublisher::WireType::Uint32: return 0x03U;
-        case TelemetryPublisher::WireType::Float32: return 0x09U;
-    }
-    return 0U;
+// Field type code MANIFEST_DATA puts on the wire (telemetry.md section 13):
+// FieldSchema::type is btp::WireType now, whose octet value is the wire code
+// itself. Kept as a named helper so a field record can be checked
+// byte-for-byte, not just "some type was written".
+std::uint8_t expected_wire_type_code(btp::WireType type) {
+    return static_cast<std::uint8_t>(type);
 }
 
 // A request payload is exactly the 12-octet

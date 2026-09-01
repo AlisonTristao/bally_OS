@@ -17,9 +17,10 @@
 # Sources come from the sibling checkout c:/git/BTP -- the SAME tree
 # [env:native] builds through `symlink://../BTP` -- so the firmware and the
 # host test suite can never diverge on the protocol. Expected revision:
-# v2.2.0 (btp::messages) -- v2.0.0 + the PSA backend + the COMMAND/CONTROL
-# payload layer. Keep this in step with [env:native]'s symlink; this can
-# become a submodule pinned to the tag.
+# v2.5.0 -- v2.0.0 + the PSA backend + btp::messages (2.2.0) + the manifest
+# verbatim relay (2.3.0) + btp::telemetry, the PACKED_LE / TLV_LE sample codec
+# (2.4.0) + its body-only mode (2.5.0). Keep this in step with [env:native]'s
+# symlink; this can become a submodule pinned to the tag.
 #
 # The btp lib_deps entry is removed from [env:esp32-s3] for the same reason a
 # component and a lib_deps library of the same name would fight over codec.o.
@@ -39,6 +40,7 @@ idf_component_register(
         "${btp_root}/src/fragmentation.cpp"
         "${btp_root}/src/stream.cpp"
         "${btp_root}/src/messages.cpp"
+        "${btp_root}/src/telemetry.cpp"
         "${btp_root}/src/aead.cpp"
     INCLUDE_DIRS "${btp_root}/include"
     REQUIRES mbedtls)
