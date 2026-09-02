@@ -7,10 +7,16 @@
 
 #include <BtpTransport.h>
 #include <bally_channels.h>
+#include <btp/session.hpp>
 
 class CommandProcessor {
 public:
     static constexpr std::size_t kCacheCapacity = 16U;
+    // Distinct requester devices whose deduplication high-water marks are
+    // tracked at once: the dongle on channel C, plus a few desktop clients
+    // relayed on channel B. A new boot_id from a known source reuses its row
+    // (btp::DedupCache), so dongle reboots do not consume extra rows.
+    static constexpr std::size_t kRequesterCapacity = 4U;
     static constexpr std::uint16_t kCommandResultObjectId = 0x0002U;
     static constexpr std::size_t kMaxResultPayloadSize = 128U;
 
@@ -76,6 +82,8 @@ public:
         std::uint32_t unauthorized;
     };
 
+    CommandProcessor() noexcept;
+
     // `seal_link`/`seal_endpoint` (both default nullptr) are forwarded
     // verbatim to BtpEndpoint::send_fragment -- see BtpSealFn. Each reply is
     // sealed with whichever one matches the ORIGINAL request's channel (see
@@ -121,51 +129,67 @@ public:
     Stats stats() const noexcept;
 
 private:
-    struct RequestKey {
-        std::uint32_t source_id = 0U;
-        std::uint32_t boot_id = 0U;
-        std::uint32_t sequence = 0U;
-    };
+    // btp::DedupCache stores the verbatim request then the COMMAND_RESULT in
+    // one region per slot. The result is prefixed with the 12 octets the
+    // replay needs that the payload does not carry -- the result frame's own
+    // sequence and timestamp -- so a retransmission is answered byte for byte.
+    static constexpr std::size_t kReplayPrefix = 12U;  // sequence:u32 + timestamp_us:u64
+    static constexpr std::size_t kSlotStorageBytes =
+        btp_command::kMaxLogicalRequestSize + kReplayPrefix + kMaxResultPayloadSize;
 
-    struct CacheEntry {
-        bool used = false;
-        bool complete = false;
-        RequestKey key{};
+    // Per reserved slot, the fields complete()/reject_busy() need to encode a
+    // COMMAND_RESULT and that btp::DedupCache does not surface. Rewritten on
+    // every Fresh verdict, so it always matches the slot's current occupant.
+    struct SlotMeta {
+        btp::DedupKey key{};
         std::uint16_t action_id = 0U;
         std::uint16_t action_version = 0U;
         bally::Channel channel = bally::Channel::C_Link;
-        std::uint16_t request_size = 0U;
-        std::uint8_t request[btp_command::kMaxLogicalRequestSize]{};
-        std::uint32_t result_sequence = 0U;
-        std::uint64_t result_timestamp_us = 0U;
-        std::uint16_t result_size = 0U;
-        std::uint8_t result[kMaxResultPayloadSize]{};
     };
 
-    static bool same_key(const RequestKey& left,
-                         const RequestKey& right) noexcept;
     // The one field peek kept out of btp::decode_command_request: action_id /
     // action_version are needed for the dedup-conflict and cache-exhausted
     // transient results, which are built before the request is parsed.
     static std::uint16_t read_u16(const std::uint8_t* input) noexcept;
+    static std::uint32_t read_u32(const std::uint8_t* input) noexcept;
+    static std::uint64_t read_u64(const std::uint8_t* input) noexcept;
+    static void write_u32(std::uint8_t* output, std::uint32_t value) noexcept;
+    static void write_u64(std::uint8_t* output, std::uint64_t value) noexcept;
     static const char* parse_message(btp_command::ParseError error) noexcept;
     static Status parse_status(btp_command::ParseError error) noexcept;
     static ErrorCode parse_error_code(btp_command::ParseError error) noexcept;
 
-    ResultView view(const CacheEntry& entry) const noexcept;
-    bool finish(CacheEntry& entry, Status status, ErrorCode error,
-                const char* message, std::uint64_t now_us,
-                ResultView* result_out) noexcept;
-    bool make_transient(const RequestKey& key, std::uint16_t action_id,
-                        std::uint16_t action_version, Status status,
-                        ErrorCode error, const char* message,
-                        std::uint64_t now_us, bally::Channel channel,
-                        ResultView* result_out) noexcept;
-    bool encode_result(const RequestKey& key, std::uint16_t action_id,
+    btp::DedupCache bind_dedup() noexcept;
+
+    // Encode a COMMAND_RESULT (docs/commands.md 2.4) via
+    // btp::encode_command_result. A shell result never carries a bytes_u32
+    // result body -- only the message.
+    bool encode_result(const btp::DedupKey& key, std::uint16_t action_id,
                        std::uint16_t action_version, Status status,
                        ErrorCode error, const char* message,
                        std::uint8_t* output, std::size_t capacity,
                        std::uint16_t* size_out) noexcept;
+
+    // complete()/reject_busy()/the parse-failure path: reserve a sequence,
+    // encode the result, prefix it with (sequence, now_us), store it in the
+    // dedup slot for replay, and hand back a ResultView over `view_buf` (a
+    // stable per-task buffer -- never the slot storage, which can be evicted
+    // while send_result runs).
+    bool finish(std::size_t slot, Status status, ErrorCode error,
+                const char* message, std::uint64_t now_us,
+                std::uint8_t* view_buf, ResultView* result_out) noexcept;
+
+    // Conflict / cache-exhausted / evicted: a reply that is NOT cached (it is
+    // not a completed execution). Built into rx_view_.
+    bool make_transient(const btp::DedupKey& key, std::uint16_t action_id,
+                        std::uint16_t action_version, Status status,
+                        ErrorCode error, const char* message,
+                        std::uint64_t now_us, bally::Channel channel,
+                        ResultView* result_out) noexcept;
+
+    // Unpack a stored (sequence, timestamp_us, payload) blob into a ResultView
+    // whose payload is copied into rx_view_.
+    ResultView replay_view(btp::ByteView stored, bally::Channel channel) noexcept;
 
     BtpEndpoint* endpoint_ = nullptr;
     BtpSealFn seal_link_ = nullptr;
@@ -173,11 +197,22 @@ private:
     BtpSealFn seal_endpoint_ = nullptr;
     void* seal_endpoint_context_ = nullptr;
     std::atomic_flag cache_lock_ = ATOMIC_FLAG_INIT;
-    CacheEntry cache_[kCacheCapacity]{};
-    std::uint8_t transient_result_[kMaxResultPayloadSize]{};
-    std::uint32_t transient_sequence_ = 0U;
-    std::uint64_t transient_timestamp_us_ = 0U;
-    std::uint16_t transient_size_ = 0U;
+
+    btp::DedupSlot dedup_slots_[kCacheCapacity]{};
+    std::uint8_t dedup_bytes_[kCacheCapacity][kSlotStorageBytes]{};
+    btp::DedupStorage dedup_storage_[kCacheCapacity]{};
+    btp::DedupRequester dedup_requesters_[kRequesterCapacity]{};
+    btp::DedupCache dedup_;
+    SlotMeta slot_meta_[kCacheCapacity]{};
+
+    // Stable payload storage for a returned ResultView. rx_view_ backs every
+    // reply built on the RX task (intake's replay/conflict/exhausted results
+    // and reject_busy); shell_view_ backs complete()'s, on the shell task.
+    // The two tasks never share a buffer, and each rebuilds its own before the
+    // next send_result on that task. Never point a ResultView at the dedup
+    // slot storage: a later intake can evict it while send_result runs.
+    std::uint8_t rx_view_[kMaxResultPayloadSize]{};
+    std::uint8_t shell_view_[kMaxResultPayloadSize]{};
 
     std::atomic<std::uint32_t> accepted_{0U};
     std::atomic<std::uint32_t> executed_{0U};

@@ -696,6 +696,64 @@ void test_saturated_execution_queue_returns_cached_busy_result() {
     TEST_ASSERT_EQUAL_UINT32(0U, processor.stats().executed);
 }
 
+// btp::DedupCache is a ring: once every slot holds a completed command, the
+// next fresh identity evicts the OLDEST completed one so the executor keeps
+// working -- and the evicted identity can never re-run
+// (docs/commands.md 2.6 via btp::DedupCache's per-requester high-water mark).
+void test_dedup_ring_evicts_oldest_and_never_re_executes_it() {
+    BtpEndpoint endpoint;
+    TEST_ASSERT_TRUE(endpoint.configure(1U, 2U));
+    CommandProcessor processor;
+    processor.configure(endpoint);
+    const auto request = shell_request_payload(1U, 2U, "help -modules");
+    const btp::ByteView bytes{request.data(), request.size()};
+
+    // Fill every dedup slot with a distinct, completed command (seq 1..16).
+    for (std::uint32_t seq = 1U; seq <= CommandProcessor::kCacheCapacity; ++seq) {
+        const auto in = processor.intake(command_header(seq), bytes, seq * 10U);
+        TEST_ASSERT_EQUAL_UINT8(
+            static_cast<std::uint8_t>(CommandProcessor::IntakeKind::Ready),
+            static_cast<std::uint8_t>(in.kind));
+        CommandProcessor::ResultView done{};
+        TEST_ASSERT_TRUE(
+            processor.complete(in.work.cache_slot, 0U, seq * 10U + 1U, &done));
+    }
+    TEST_ASSERT_EQUAL_UINT32(CommandProcessor::kCacheCapacity,
+                             processor.stats().executed);
+
+    // A brand-new identity is still served -- seq 1 is evicted to make room.
+    const std::uint32_t fresh_seq = CommandProcessor::kCacheCapacity + 1U;
+    const auto fresh = processor.intake(command_header(fresh_seq), bytes, 5000U);
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<std::uint8_t>(CommandProcessor::IntakeKind::Ready),
+        static_cast<std::uint8_t>(fresh.kind));
+    CommandProcessor::ResultView fresh_done{};
+    TEST_ASSERT_TRUE(
+        processor.complete(fresh.work.cache_slot, 0U, 5001U, &fresh_done));
+    TEST_ASSERT_EQUAL_UINT32(fresh_seq, processor.stats().executed);
+
+    // seq 2 is still cached: a retransmission replays, never re-executes.
+    const auto still_cached = processor.intake(command_header(2U), bytes, 6000U);
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<std::uint8_t>(CommandProcessor::IntakeKind::ResultReady),
+        static_cast<std::uint8_t>(still_cached.kind));
+
+    // seq 1 was evicted: BUSY / CAPACITY_EXHAUSTED, and the shell never runs it.
+    const auto evicted = processor.intake(command_header(1U), bytes, 7000U);
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<std::uint8_t>(CommandProcessor::IntakeKind::ResultReady),
+        static_cast<std::uint8_t>(evicted.kind));
+    TEST_ASSERT_EQUAL_HEX8(
+        static_cast<std::uint8_t>(CommandProcessor::Status::Busy),
+        evicted.result.payload[16U]);
+    TEST_ASSERT_EQUAL_HEX16(
+        static_cast<std::uint16_t>(
+            CommandProcessor::ErrorCode::CapacityExhausted),
+        static_cast<std::uint16_t>(evicted.result.payload[18U]) |
+            static_cast<std::uint16_t>(evicted.result.payload[19U] << 8U));
+    TEST_ASSERT_EQUAL_UINT32(fresh_seq, processor.stats().executed);
+}
+
 void test_full_telemetry_queue_cannot_block_command_result() {
     sent_count = 0U;
     TxScheduler scheduler;
@@ -1297,6 +1355,7 @@ int main(int, char**) {
     RUN_TEST(test_channel_b_reply_without_endpoint_key_configured_is_dropped);
     RUN_TEST(test_conflicting_duplicate_is_rejected_without_execution);
     RUN_TEST(test_saturated_execution_queue_returns_cached_busy_result);
+    RUN_TEST(test_dedup_ring_evicts_oldest_and_never_re_executes_it);
     RUN_TEST(test_full_telemetry_queue_cannot_block_command_result);
     RUN_TEST(test_scheduler_counts_delivery_timeout_and_link_delivery);
     RUN_TEST(test_subscribe_above_max_is_clamped_and_below_min_is_rejected);

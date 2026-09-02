@@ -26,7 +26,7 @@ Este projeto implementa o controle de um robô baseado em ESP32-S3, utilizando a
 - **Format**: Header-only, sem dependências — formatação de tamanhos em bytes (`"12.34 MB"`) reaproveitada por SDCard, USBMassStorage e Logger.
 - **HBridge**: Controle dos motores via ponte H, incluindo direção e PWM.
 - **BtpTransport**: Endpoint BTP v1 com identidade de boot, sequência atômica, codec, CRC e fragmentação comuns.
-- **CommandProcessor**: Valida `COMMAND_REQUEST`, reserva uma chave de deduplicação por boot, executa cada intenção uma vez e reproduz o mesmo `COMMAND_RESULT` correlacionado nos retries.
+- **CommandProcessor**: Valida `COMMAND_REQUEST`, executa cada intenção uma vez e reproduz o mesmo `COMMAND_RESULT` correlacionado nos retries. A deduplicação por boot (cache em anel, high-water mark por requester) é o `btp::DedupCache` da lib BTP (2.6.0); o que fica aqui é executar a ação, selar/enviar a resposta e escolher as capacidades.
 - **ManifestResponder**: Responde `CONTROL/MANIFEST_REQUEST` descrevendo os schemas estáticos de `TelemetryPublisher` (`protocol.test`, `robot.state`, `system.monitor`) como `MANIFEST_DATA`; `config_revision` é uma constante por build e é incrementada quando o catálogo muda.
 - **TxScheduler**: Filas estáticas separadas e FIFO por classe; transmite `COMMAND_RESULT > STATUS > LOG` crítico `> TELEMETRY > DEBUG`, com um único envio ESP-NOW pendente e contadores de aceite, entrega, timeout e drop.
 - **Logger**: Ring de eventos em PSRAM; emite exclusivamente frames `LOG` BTP de tamanho real via ESP-NOW.

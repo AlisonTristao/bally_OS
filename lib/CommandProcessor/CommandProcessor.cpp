@@ -4,6 +4,26 @@
 
 #include <cstring>
 
+namespace {
+
+struct Unlock {
+    std::atomic_flag& lock;
+    ~Unlock() { lock.clear(std::memory_order_release); }
+};
+
+}  // namespace
+
+CommandProcessor::CommandProcessor() noexcept : dedup_(bind_dedup()) {}
+
+btp::DedupCache CommandProcessor::bind_dedup() noexcept {
+    for (std::size_t i = 0U; i < kCacheCapacity; ++i) {
+        dedup_storage_[i].data = dedup_bytes_[i];
+        dedup_storage_[i].capacity = kSlotStorageBytes;
+    }
+    return btp::DedupCache(dedup_slots_, dedup_storage_, kCacheCapacity,
+                           dedup_requesters_, kRequesterCapacity);
+}
+
 void CommandProcessor::configure(BtpEndpoint& endpoint, BtpSealFn seal_link,
                                  void* seal_link_context,
                                  BtpSealFn seal_endpoint,
@@ -15,16 +35,40 @@ void CommandProcessor::configure(BtpEndpoint& endpoint, BtpSealFn seal_link,
     seal_endpoint_context_ = seal_endpoint_context;
 }
 
-bool CommandProcessor::same_key(const RequestKey& left,
-                                const RequestKey& right) noexcept {
-    return left.source_id == right.source_id && left.boot_id == right.boot_id &&
-           left.sequence == right.sequence;
-}
-
 std::uint16_t CommandProcessor::read_u16(const std::uint8_t* input) noexcept {
     return static_cast<std::uint16_t>(input[0]) |
            static_cast<std::uint16_t>(
                static_cast<std::uint16_t>(input[1]) << 8U);
+}
+
+std::uint32_t CommandProcessor::read_u32(const std::uint8_t* input) noexcept {
+    return static_cast<std::uint32_t>(input[0]) |
+           (static_cast<std::uint32_t>(input[1]) << 8U) |
+           (static_cast<std::uint32_t>(input[2]) << 16U) |
+           (static_cast<std::uint32_t>(input[3]) << 24U);
+}
+
+std::uint64_t CommandProcessor::read_u64(const std::uint8_t* input) noexcept {
+    std::uint64_t value = 0U;
+    for (std::size_t i = 0U; i < 8U; ++i) {
+        value |= static_cast<std::uint64_t>(input[i]) << (i * 8U);
+    }
+    return value;
+}
+
+void CommandProcessor::write_u32(std::uint8_t* output,
+                                 std::uint32_t value) noexcept {
+    output[0] = static_cast<std::uint8_t>(value);
+    output[1] = static_cast<std::uint8_t>(value >> 8U);
+    output[2] = static_cast<std::uint8_t>(value >> 16U);
+    output[3] = static_cast<std::uint8_t>(value >> 24U);
+}
+
+void CommandProcessor::write_u64(std::uint8_t* output,
+                                 std::uint64_t value) noexcept {
+    for (std::size_t i = 0U; i < 8U; ++i) {
+        output[i] = static_cast<std::uint8_t>(value >> (i * 8U));
+    }
 }
 
 const char* CommandProcessor::parse_message(
@@ -63,19 +107,8 @@ CommandProcessor::ErrorCode CommandProcessor::parse_error_code(
     }
 }
 
-CommandProcessor::ResultView CommandProcessor::view(
-    const CacheEntry& entry) const noexcept {
-    return {
-        entry.result_sequence,
-        entry.result_timestamp_us,
-        entry.result,
-        entry.result_size,
-        entry.channel,
-    };
-}
-
 bool CommandProcessor::encode_result(
-    const RequestKey& key, std::uint16_t action_id,
+    const btp::DedupKey& key, std::uint16_t action_id,
     std::uint16_t action_version, Status status, ErrorCode error,
     const char* message, std::uint8_t* output, std::size_t capacity,
     std::uint16_t* size_out) noexcept {
@@ -91,55 +124,91 @@ bool CommandProcessor::encode_result(
     out.action_version = action_version;
     out.status = static_cast<std::uint8_t>(status);
     out.error_code = static_cast<std::uint16_t>(error);
-    out.message = {reinterpret_cast<const std::uint8_t*>(message), std::strlen(message)};
+    out.message = {reinterpret_cast<const std::uint8_t*>(message),
+                   std::strlen(message)};
 
     std::size_t written = 0U;
-    if (btp::encode_command_result(out, output, capacity, &written) != btp::MessageError::Ok) {
+    if (btp::encode_command_result(out, output, capacity, &written) !=
+        btp::MessageError::Ok) {
         return false;
     }
     *size_out = static_cast<std::uint16_t>(written);
     return true;
 }
 
-bool CommandProcessor::finish(CacheEntry& entry, Status status,
-                              ErrorCode error, const char* message,
-                              std::uint64_t now_us,
+bool CommandProcessor::finish(std::size_t slot, Status status, ErrorCode error,
+                              const char* message, std::uint64_t now_us,
+                              std::uint8_t* view_buf,
                               ResultView* result_out) noexcept {
-    if (endpoint_ == nullptr || result_out == nullptr || entry.complete) {
+    if (endpoint_ == nullptr || result_out == nullptr ||
+        slot >= kCacheCapacity) {
         return false;
     }
+    const SlotMeta& meta = slot_meta_[slot];
+
+    std::uint8_t packed[kReplayPrefix + kMaxResultPayloadSize];
     std::uint32_t sequence = 0U;
+    std::uint16_t payload_size = 0U;
     if (!endpoint_->reserve_sequence(&sequence) ||
-        !encode_result(entry.key, entry.action_id, entry.action_version,
-                       status, error, message, entry.result,
-                       sizeof(entry.result), &entry.result_size)) {
+        !encode_result(meta.key, meta.action_id, meta.action_version, status,
+                       error, message, packed + kReplayPrefix,
+                       kMaxResultPayloadSize, &payload_size)) {
         dropped_.fetch_add(1U, std::memory_order_relaxed);
         return false;
     }
-    entry.result_sequence = sequence;
-    entry.result_timestamp_us = now_us;
-    entry.complete = true;
-    *result_out = view(entry);
+
+    // Prefix the stored copy with the frame fields a retransmission replays
+    // verbatim and the payload does not carry.
+    write_u32(packed, sequence);
+    write_u64(packed + 4U, now_us);
+    if (dedup_.record_result(slot, packed, kReplayPrefix + payload_size) !=
+        btp::MessageError::Ok) {
+        dropped_.fetch_add(1U, std::memory_order_relaxed);
+        return false;
+    }
+
+    std::memcpy(view_buf, packed + kReplayPrefix, payload_size);
+    *result_out = {sequence, now_us, view_buf, payload_size, meta.channel};
     return true;
 }
 
 bool CommandProcessor::make_transient(
-    const RequestKey& key, std::uint16_t action_id,
+    const btp::DedupKey& key, std::uint16_t action_id,
     std::uint16_t action_version, Status status, ErrorCode error,
     const char* message, std::uint64_t now_us, bally::Channel channel,
     ResultView* result_out) noexcept {
-    if (endpoint_ == nullptr || result_out == nullptr ||
-        !endpoint_->reserve_sequence(&transient_sequence_) ||
+    if (endpoint_ == nullptr || result_out == nullptr) {
+        return false;
+    }
+    std::uint32_t sequence = 0U;
+    std::uint16_t size = 0U;
+    if (!endpoint_->reserve_sequence(&sequence) ||
         !encode_result(key, action_id, action_version, status, error, message,
-                       transient_result_, sizeof(transient_result_),
-                       &transient_size_)) {
+                       rx_view_, sizeof(rx_view_), &size)) {
         dropped_.fetch_add(1U, std::memory_order_relaxed);
         return false;
     }
-    transient_timestamp_us_ = now_us;
-    *result_out = {transient_sequence_, transient_timestamp_us_,
-                   transient_result_, transient_size_, channel};
+    *result_out = {sequence, now_us, rx_view_, size, channel};
     return true;
+}
+
+CommandProcessor::ResultView CommandProcessor::replay_view(
+    btp::ByteView stored, bally::Channel channel) noexcept {
+    ResultView view{};
+    if (stored.data == nullptr || stored.size < kReplayPrefix) {
+        return view;
+    }
+    std::size_t payload_size = stored.size - kReplayPrefix;
+    if (payload_size > sizeof(rx_view_)) {
+        payload_size = sizeof(rx_view_);
+    }
+    std::memcpy(rx_view_, stored.data + kReplayPrefix, payload_size);
+    view.sequence = read_u32(stored.data);
+    view.timestamp_us = read_u64(stored.data + 4U);
+    view.payload = rx_view_;
+    view.payload_size = payload_size;
+    view.channel = channel;
+    return view;
 }
 
 CommandProcessor::Intake CommandProcessor::intake(
@@ -152,10 +221,7 @@ CommandProcessor::Intake CommandProcessor::intake(
         note_drop();
         return intake;
     }
-    struct Unlock {
-        std::atomic_flag& lock;
-        ~Unlock() { lock.clear(std::memory_order_release); }
-    } unlock{cache_lock_};
+    Unlock unlock{cache_lock_};
 
     if (endpoint_ == nullptr || header.type != btp::MessageType::Command ||
         header.object_id != btp_command::kCommandRequestObjectId ||
@@ -166,7 +232,7 @@ CommandProcessor::Intake CommandProcessor::intake(
         return intake;
     }
 
-    const RequestKey key{header.source_id, header.boot_id, header.sequence};
+    const btp::DedupKey key{header.source_id, header.boot_id, header.sequence};
     std::uint16_t action_id = 0U;
     std::uint16_t action_version = 0U;
     if (payload.size >= 12U) {
@@ -174,57 +240,60 @@ CommandProcessor::Intake CommandProcessor::intake(
         action_version = read_u16(payload.data + 10U);
     }
 
-    CacheEntry* free_entry = nullptr;
-    for (CacheEntry& entry : cache_) {
-        if (!entry.used) {
-            if (free_entry == nullptr) free_entry = &entry;
-            continue;
-        }
-        if (!same_key(entry.key, key)) continue;
+    std::size_t slot = 0U;
+    btp::ByteView stored{};
+    const btp::DedupVerdict verdict = dedup_.classify(
+        key, payload.data, payload.size, &slot, &stored);
 
-        duplicates_.fetch_add(1U, std::memory_order_relaxed);
-        const bool identical = entry.request_size == payload.size &&
-            std::memcmp(entry.request, payload.data, payload.size) == 0;
-        if (!identical) {
+    switch (verdict) {
+        case btp::DedupVerdict::DuplicateComplete:
+            duplicates_.fetch_add(1U, std::memory_order_relaxed);
+            replayed_.fetch_add(1U, std::memory_order_relaxed);
+            intake.kind = IntakeKind::ResultReady;
+            intake.result = replay_view(stored, channel);
+            return intake;
+
+        case btp::DedupVerdict::DuplicateInFlight:
+            duplicates_.fetch_add(1U, std::memory_order_relaxed);
+            intake.kind = IntakeKind::DuplicateInProgress;
+            return intake;
+
+        case btp::DedupVerdict::Conflict:
+            duplicates_.fetch_add(1U, std::memory_order_relaxed);
             rejected_.fetch_add(1U, std::memory_order_relaxed);
-            if (make_transient(key, action_id, action_version,
-                               Status::Rejected, ErrorCode::RequestConflict,
+            if (make_transient(key, action_id, action_version, Status::Rejected,
+                               ErrorCode::RequestConflict,
                                "request identity conflict", now_us, channel,
                                &intake.result)) {
                 intake.kind = IntakeKind::ResultReady;
             }
             return intake;
-        }
-        if (!entry.complete) {
-            intake.kind = IntakeKind::DuplicateInProgress;
+
+        case btp::DedupVerdict::Evicted:
+        case btp::DedupVerdict::CapacityExhausted:
+            rejected_.fetch_add(1U, std::memory_order_relaxed);
+            if (make_transient(key, action_id, action_version, Status::Busy,
+                               ErrorCode::CapacityExhausted,
+                               "command cache exhausted", now_us, channel,
+                               &intake.result)) {
+                intake.kind = IntakeKind::ResultReady;
+            }
             return intake;
-        }
-        replayed_.fetch_add(1U, std::memory_order_relaxed);
-        intake.kind = IntakeKind::ResultReady;
-        intake.result = view(entry);
-        return intake;
+
+        case btp::DedupVerdict::InvalidArgument:
+            note_drop();
+            return intake;
+
+        case btp::DedupVerdict::Fresh:
+            break;
     }
 
-    if (free_entry == nullptr) {
-        rejected_.fetch_add(1U, std::memory_order_relaxed);
-        if (make_transient(key, action_id, action_version, Status::Busy,
-                           ErrorCode::CapacityExhausted,
-                           "command cache exhausted", now_us, channel,
-                           &intake.result)) {
-            intake.kind = IntakeKind::ResultReady;
-        }
-        return intake;
-    }
-
-    free_entry->used = true;
-    free_entry->complete = false;
-    free_entry->key = key;
-    free_entry->action_id = action_id;
-    free_entry->action_version = action_version;
-    free_entry->channel = channel;
-    free_entry->request_size = static_cast<std::uint16_t>(payload.size);
-    std::memcpy(free_entry->request, payload.data, payload.size);
-    const std::uint8_t slot = static_cast<std::uint8_t>(free_entry - cache_);
+    // Fresh: the slot is reserved. Record what complete()/reject_busy() will
+    // need, then parse -- a parse failure finishes the slot right here.
+    slot_meta_[slot].key = key;
+    slot_meta_[slot].action_id = action_id;
+    slot_meta_[slot].action_version = action_version;
+    slot_meta_[slot].channel = channel;
 
     btp_command::RequestView request{};
     btp_command::ParseError parse_error = btp_command::parse_request(
@@ -236,16 +305,16 @@ CommandProcessor::Intake CommandProcessor::intake(
     }
     if (parse_error != btp_command::ParseError::Ok) {
         rejected_.fetch_add(1U, std::memory_order_relaxed);
-        if (finish(*free_entry, parse_status(parse_error),
+        if (finish(slot, parse_status(parse_error),
                    parse_error_code(parse_error), parse_message(parse_error),
-                   now_us, &intake.result)) {
+                   now_us, rx_view_, &intake.result)) {
             intake.kind = IntakeKind::ResultReady;
         }
         return intake;
     }
 
     accepted_.fetch_add(1U, std::memory_order_relaxed);
-    intake.work.cache_slot = slot;
+    intake.work.cache_slot = static_cast<std::uint8_t>(slot);
     intake.kind = IntakeKind::Ready;
     return intake;
 }
@@ -255,16 +324,13 @@ bool CommandProcessor::complete(std::uint8_t cache_slot,
                                 std::uint64_t now_us,
                                 ResultView* result_out) noexcept {
     while (cache_lock_.test_and_set(std::memory_order_acquire)) {}
-    struct Unlock {
-        std::atomic_flag& lock;
-        ~Unlock() { lock.clear(std::memory_order_release); }
-    } unlock{cache_lock_};
-    if (cache_slot >= kCacheCapacity || !cache_[cache_slot].used) return false;
+    Unlock unlock{cache_lock_};
+    if (cache_slot >= kCacheCapacity) return false;
     const bool success = shell_status == 0U;
-    if (!finish(cache_[cache_slot],
-                success ? Status::Success : Status::Failed,
+    if (!finish(cache_slot, success ? Status::Success : Status::Failed,
                 success ? ErrorCode::None : ErrorCode::InternalError,
-                success ? "" : "shell command failed", now_us, result_out)) {
+                success ? "" : "shell command failed", now_us, shell_view_,
+                result_out)) {
         return false;
     }
     executed_.fetch_add(1U, std::memory_order_relaxed);
@@ -275,15 +341,11 @@ bool CommandProcessor::reject_busy(std::uint8_t cache_slot,
                                    std::uint64_t now_us,
                                    ResultView* result_out) noexcept {
     while (cache_lock_.test_and_set(std::memory_order_acquire)) {}
-    struct Unlock {
-        std::atomic_flag& lock;
-        ~Unlock() { lock.clear(std::memory_order_release); }
-    } unlock{cache_lock_};
-    if (cache_slot >= kCacheCapacity || !cache_[cache_slot].used) return false;
+    Unlock unlock{cache_lock_};
+    if (cache_slot >= kCacheCapacity) return false;
     rejected_.fetch_add(1U, std::memory_order_relaxed);
-    return finish(cache_[cache_slot], Status::Busy,
-                  ErrorCode::CapacityExhausted,
-                  "command execution queue full", now_us, result_out);
+    return finish(cache_slot, Status::Busy, ErrorCode::CapacityExhausted,
+                  "command execution queue full", now_us, rx_view_, result_out);
 }
 
 bool CommandProcessor::send_result(const ResultView& result) noexcept {
