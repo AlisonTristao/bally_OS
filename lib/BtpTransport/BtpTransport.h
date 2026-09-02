@@ -6,14 +6,15 @@
 #include <cstdint>
 
 #include <btp/codec.hpp>
+#include <btp/endpoint.hpp>
 
 // AEAD sealer for channel C (dongle<->robot, key L -- see
 // include/bally_channels.h and lib/RadioSeal, the only real implementation
-// of this). Mirrors bally_dongle's BtpTransport::SealFn exactly, so the
-// shape below is not a local invention. File scope, not a member of
-// BtpEndpoint, on purpose: StatusReporter.h and CommandProcessor.h need to
-// name this type while only forward-declaring `class BtpEndpoint`, which a
-// nested member typedef would not survive.
+// of this). This is btp::EndpointSealFn (BTP/include/btp/endpoint.hpp) under a
+// project-local name: file scope, not a member of BtpEndpoint, on purpose --
+// StatusReporter.h and CommandProcessor.h need to name this type while only
+// forward-declaring `class BtpEndpoint`, which a nested member typedef would
+// not survive.
 //
 // Called ONCE on the whole logical message, before any fragmenting -- never
 // once per fragment. The associated data is the CANONICAL logical header
@@ -38,114 +39,95 @@
 // StatusReporter and CommandProcessor::send_result's channel-C replies,
 // RadioSeal::seal_e (key E, channel B) for CommandProcessor::send_result's
 // channel-B replies.
-using BtpSealFn = bool (*)(void* context, const btp::Header& header,
-                           std::uint16_t payload_size,
-                           const std::uint8_t* plaintext, std::uint8_t* out);
+using BtpSealFn = btp::EndpointSealFn;
 
 // BTP/docs/encryption.md section 2: sealing always grows the payload by
 // exactly this many octets, regardless of cipher.
-constexpr std::size_t kBtpAeadTagSize = 16U;
+constexpr std::size_t kBtpAeadTagSize = btp::kEndpointAeadTagSize;
 
-class BtpEndpoint {
+// The robot's BTP transmit endpoint: btp::Endpoint (identity, the outgoing
+// sequence counter and the seal -> fragment -> encode pipeline -- all now in
+// BTP/src/endpoint.cpp, tested by BTP/tests/test_endpoint.cpp) plus the two
+// things that stay project-local:
+//
+//   * a STORED send callback. btp::Endpoint takes the transport as a per-call
+//     argument; every producer in this firmware sends the same way (through
+//     TxScheduler, installed once in main.cpp), so the callback lives here and
+//     the call sites do not thread it. The legacy no-context overload is kept
+//     because the native tests install a bare `bool(*)(bytes, size)` capture.
+//   * the ESP-NOW-only shape. Every frame this robot originates is a channel-C
+//     or channel-B ESP-NOW datagram, so the wrappers below pin
+//     btp::TransportProfile::EspNow and keep the old positional
+//     (type, object_id, ...) signatures, so CommandProcessor / TelemetryPublisher
+//     / StatusReporter / ManifestResponder / SubscriptionResponder / Logger /
+//     TerminalResponder are untouched.
+class BtpEndpoint : public btp::Endpoint {
 public:
-    using SendCallback = bool (*)(const std::uint8_t* data, std::size_t size);
-    using ContextSendCallback = bool (*)(void* context,
-                                         const std::uint8_t* data,
-                                         std::size_t size);
     using SealFn = BtpSealFn;
-    static constexpr std::size_t kAeadTagSize = kBtpAeadTagSize;
+    using SendCallback = bool (*)(const std::uint8_t* data, std::size_t size);
+    using ContextSendCallback = btp::EndpointSendFn;
 
-    // Bounds the sealed[] scratch buffer send_logical uses when sealing. The
-    // largest logical message this firmware sends is the UTF-8 system.monitor
-    // telemetry document (TelemetryPublisher::kMaxSystemMonitorPayloadSize) --
-    // a fragmented COMMAND_RESULT/STATUS/MANIFEST_DATA never gets close.
+    static constexpr std::size_t kAeadTagSize = btp::kEndpointAeadTagSize;
+
+    // Bounds the sealed[] scratch a sealed send_logical() cuts fragments from.
+    // The largest logical message this firmware sends is the UTF-8
+    // system.monitor telemetry document
+    // (TelemetryPublisher::kMaxSystemMonitorPayloadSize) -- a fragmented
+    // COMMAND_RESULT / STATUS / MANIFEST_DATA never gets close.
     // RxRouter::kMaxPayloadSize and btp_command::kMaxLogicalRequestSize are
-    // independent receive/command bounds and are NOT tied to this one.
+    // independent receive / command bounds and are NOT tied to this one.
     static constexpr std::size_t kMaxLogicalPayloadSize = 1920U;
 
-    bool configure(std::uint32_t source_id, std::uint32_t boot_id) noexcept;
     void set_send_callback(SendCallback callback) noexcept;
     void set_send_callback(ContextSendCallback callback, void* context) noexcept;
 
-    std::uint32_t source_id() const noexcept { return source_id_; }
-    std::uint32_t boot_id() const noexcept { return boot_id_; }
-
-    // A sequence is reserved once, when the logical message is created.
-    // Zero is never returned and becomes the permanent exhausted sentinel.
-    bool reserve_sequence(std::uint32_t* sequence_out) noexcept;
-
-    // Single-CAS variant for hard non-blocking producers. It may fail under
-    // contention even when sequences remain; callers should drop/count rather
-    // than retry on a time-critical task.
-    bool try_reserve_sequence(std::uint32_t* sequence_out) noexcept;
-
-    // Seals (when `seal` is non-null) before fragmenting -- see SealFn's
-    // contract on why fragment_count has to be computed from the sealed
-    // size, not the plaintext size. `payload`/`payload_size` are always the
-    // PLAINTEXT; callers never seal for themselves.
-    bool send_logical(btp::MessageType type,
-                      std::uint16_t object_id,
-                      const std::uint8_t* payload,
-                      std::size_t payload_size,
-                      std::uint64_t timestamp_us,
-                      SealFn seal = nullptr,
+    // A sealed message is sealed ONCE over the canonical header, then sliced
+    // for the wire from the sealed bytes; `payload` / `payload_size` are always
+    // the PLAINTEXT. A false from `seal` fails the whole send closed.
+    bool send_logical(btp::MessageType type, std::uint16_t object_id,
+                      const std::uint8_t* payload, std::size_t payload_size,
+                      std::uint64_t timestamp_us, SealFn seal = nullptr,
                       void* seal_context = nullptr) noexcept;
 
-    // Same whole-message seal/fragment path, using a sequence already
-    // reserved by a non-blocking producer. This keeps a queued large sample
-    // in the same producer sequence order as adjacent one-frame samples.
-    bool send_logical_reserved(btp::MessageType type,
-                               std::uint16_t object_id,
+    // Same pipeline with a sequence a non-blocking producer already reserved.
+    bool send_logical_reserved(btp::MessageType type, std::uint16_t object_id,
                                std::uint32_t sequence,
                                const std::uint8_t* payload,
                                std::size_t payload_size,
-                               std::uint64_t timestamp_us,
-                               SealFn seal = nullptr,
+                               std::uint64_t timestamp_us, SealFn seal = nullptr,
                                void* seal_context = nullptr) const noexcept;
 
-    // Encodes exactly one physical frame. When `seal` is non-null this frame
-    // MUST be the whole logical message (fragment_count == 1): the AEAD tag
-    // covers the whole logical payload, never a slice of one, so sealing a
-    // multi-fragment call here is refused rather than silently wrong.
-    bool encode_fragment(btp::MessageType type,
-                         std::uint16_t object_id,
-                         std::uint32_t sequence,
-                         std::uint64_t timestamp_us,
-                         const std::uint8_t* payload,
-                         std::size_t payload_size,
+    // Exactly one physical frame. When `seal` is non-null this frame MUST be
+    // the whole logical message (fragment_count == 1): the AEAD tag covers the
+    // whole logical payload, never a slice of one.
+    bool encode_fragment(btp::MessageType type, std::uint16_t object_id,
+                         std::uint32_t sequence, std::uint64_t timestamp_us,
+                         const std::uint8_t* payload, std::size_t payload_size,
                          std::uint8_t fragment_index,
-                         std::uint8_t fragment_count,
-                         std::uint8_t* output,
-                         std::size_t output_capacity,
-                         std::size_t* bytes_written,
+                         std::uint8_t fragment_count, std::uint8_t* output,
+                         std::size_t output_capacity, std::size_t* bytes_written,
                          SealFn seal = nullptr,
                          void* seal_context = nullptr) const noexcept;
 
-    bool send_fragment(btp::MessageType type,
-                       std::uint16_t object_id,
-                       std::uint32_t sequence,
-                       std::uint64_t timestamp_us,
-                       const std::uint8_t* payload,
-                       std::size_t payload_size,
-                       std::uint8_t fragment_index,
-                       std::uint8_t fragment_count,
+    bool send_fragment(btp::MessageType type, std::uint16_t object_id,
+                       std::uint32_t sequence, std::uint64_t timestamp_us,
+                       const std::uint8_t* payload, std::size_t payload_size,
+                       std::uint8_t fragment_index, std::uint8_t fragment_count,
                        SealFn seal = nullptr,
                        void* seal_context = nullptr) const noexcept;
 
     // Used by SD playback after a complete BTP frame has been decoded.
-    bool send_encoded(const std::uint8_t* frame, std::size_t frame_size) const noexcept;
+    bool send_encoded(const std::uint8_t* frame,
+                      std::size_t frame_size) const noexcept;
 
 private:
     static bool default_send(void*, const std::uint8_t*, std::size_t) noexcept;
     static bool legacy_send(void* context, const std::uint8_t* data,
                             std::size_t size) noexcept;
 
-    std::uint32_t source_id_ = 0;
-    std::uint32_t boot_id_ = 0;
-    std::atomic<std::uint32_t> next_sequence_{0};
     std::atomic<SendCallback> legacy_callback_{nullptr};
     std::atomic<void*> send_context_{nullptr};
-    std::atomic<ContextSendCallback> send_callback_{default_send};
+    std::atomic<ContextSendCallback> send_callback_{&default_send};
 };
 
 namespace btp_command {
