@@ -1,7 +1,5 @@
 #include "RxRouter.h"
 
-#include <cstring>
-
 namespace RxRouter {
 namespace {
 
@@ -14,134 +12,70 @@ std::array<btp::ReassemblyStorage, kSlotCount> make_storage_views(
     return views;
 }
 
-void fill_routed(const btp::Header& header,
-                 btp::ByteView payload,
-                 bool reassembled,
-                 RoutedMessage* out) noexcept {
-    out->header = header;
-    out->payload_size = payload.size;
-    if (payload.size > 0U && payload.data != nullptr) {
-        std::memcpy(out->payload, payload.data, payload.size);
+Outcome map_outcome(btp::ReceiveOutcome outcome) noexcept {
+    switch (outcome) {
+        case btp::ReceiveOutcome::Complete: return Outcome::Routed;
+        case btp::ReceiveOutcome::FragmentAccepted: return Outcome::FragmentAccepted;
+        case btp::ReceiveOutcome::DuplicateFragment: return Outcome::DuplicateFragment;
+        case btp::ReceiveOutcome::DroppedCrc: return Outcome::DroppedCrc;
+        case btp::ReceiveOutcome::DroppedDecode: return Outcome::DroppedDecode;
+        case btp::ReceiveOutcome::DroppedReassembly: return Outcome::DroppedReassembly;
+        case btp::ReceiveOutcome::InvalidArgument: return Outcome::DroppedInvalidArgument;
     }
-    out->reassembled = reassembled;
+    return Outcome::DroppedInvalidArgument;
 }
 
 }  // namespace
 
-// storage_views_ is declared before reassembler_ so that member
-// initialization order gives the Reassembler constructor a fully built view
-// table; reordering the two declarations in the header would hand it
-// uninitialized pointers.
+// storage_views_ is declared before receiver_ so member initialization order
+// gives the btp::Receiver constructor a fully built view table; reordering the
+// two declarations in the header would hand it uninitialized pointers.
 Router::Router() noexcept
     : slots_(),
       storage_(),
       storage_views_(make_storage_views(storage_)),
-      reassembler_(slots_, storage_views_.data(), kSlotCount,
-                   kReassemblyTimeoutMs) {}
+      receiver_(slots_, storage_views_.data(), kSlotCount, kReassemblyTimeoutMs,
+                btp::TransportProfile::EspNow) {}
 
-bool Router::valid() const noexcept { return reassembler_.valid(); }
+bool Router::valid() const noexcept { return receiver_.valid(); }
 
 Outcome Router::submit(const std::uint8_t* data,
                        std::size_t size,
                        std::uint64_t now_ms,
                        RoutedMessage* message_out) noexcept {
-    // Sweep here, on this context, rather than from a timer on another task.
-    // btp::Reassembler::push() would expire stale slots anyway further down;
-    // doing it explicitly first is what lets the loss be COUNTED without a
-    // second task ever touching the slot table. See the concurrency note in
-    // the header for what this replaced.
-    const std::size_t expired = reassembler_.expire(now_ms);
-    if (expired != 0U) {
-        reassembly_timeouts_.fetch_add(static_cast<std::uint32_t>(expired),
-                                       std::memory_order_relaxed);
-    }
-
-    if (data == nullptr || size == 0U || message_out == nullptr) {
-        dropped_invalid_argument_.fetch_add(1U, std::memory_order_relaxed);
+    if (message_out == nullptr) {
+        // btp::Receiver would report InvalidArgument here too, but it needs a
+        // non-null message_out to be handed one; short-circuit.
         return Outcome::DroppedInvalidArgument;
     }
 
-    btp::DecodedFrame decoded{};
-    const btp::Error decode_error = btp::decode(
-        data, size, btp::TransportProfile::EspNow, &decoded);
-    if (decode_error != btp::Error::Ok) {
-        // A frame rejected by CRC is never also counted as a decode error:
-        // STATUS reports the two separately because they mean different
-        // things (radio corruption versus a peer speaking the wrong dialect).
-        if (decode_error == btp::Error::CrcMismatch) {
-            dropped_crc_.fetch_add(1U, std::memory_order_relaxed);
-            return Outcome::DroppedCrc;
-        }
-        dropped_decode_.fetch_add(1U, std::memory_order_relaxed);
-        return Outcome::DroppedDecode;
-    }
+    btp::ReceivedMessage received{};
+    const btp::ReceiveOutcome outcome = receiver_.submit(
+        data, size, now_ms, message_out->payload, kMaxPayloadSize, &received);
 
-    if ((decoded.header.flags & btp::kFlagFragmented) == 0U) {
-        // decode()'s header validation already requires fragment_index == 0
-        // and fragment_count == 1 here, so this datagram IS the whole logical
-        // message and no slot is involved. Its payload still only points into
-        // the caller's transient RX buffer, so copy it out now.
-        fill_routed(decoded.header, decoded.payload, false, message_out);
-        routed_.fetch_add(1U, std::memory_order_relaxed);
-        return Outcome::Routed;
+    if (outcome == btp::ReceiveOutcome::Complete) {
+        message_out->header = received.header;
+        message_out->payload_size = received.payload.size;
+        message_out->reassembled = received.reassembled;
     }
-
-    btp::ReassembledMessage completed{};
-    const btp::ReassemblyEvent event =
-        reassembler_.push(decoded, now_ms, &completed);
-    switch (event) {
-        case btp::ReassemblyEvent::Accepted:
-            fragments_accepted_.fetch_add(1U, std::memory_order_relaxed);
-            return Outcome::FragmentAccepted;
-        case btp::ReassemblyEvent::Duplicate:
-            duplicate_fragments_.fetch_add(1U, std::memory_order_relaxed);
-            return Outcome::DuplicateFragment;
-        case btp::ReassemblyEvent::Complete:
-            fill_routed(completed.header, completed.payload, true,
-                        message_out);
-            // Release immediately. What travels onward is the copy above, not
-            // the slot, so a busy handler downstream never holds a slot that
-            // another sender needs -- the failure mode the four-slot pool is
-            // small enough to hit.
-            reassembler_.release(completed.slot_index);
-            routed_.fetch_add(1U, std::memory_order_relaxed);
-            return Outcome::Routed;
-        case btp::ReassemblyEvent::InvalidFragment:
-        case btp::ReassemblyEvent::Conflict:
-        case btp::ReassemblyEvent::MessageTooLarge:
-        case btp::ReassemblyEvent::NoSlot:
-            dropped_reassembly_.fetch_add(1U, std::memory_order_relaxed);
-            return Outcome::DroppedReassembly;
-        case btp::ReassemblyEvent::InvalidArgument:
-            dropped_invalid_argument_.fetch_add(1U, std::memory_order_relaxed);
-            return Outcome::DroppedInvalidArgument;
-    }
-
-    // Unreachable while the enum above is exhaustive; counted rather than
-    // asserted so a future BTP event can never silently become "accepted".
-    dropped_invalid_argument_.fetch_add(1U, std::memory_order_relaxed);
-    return Outcome::DroppedInvalidArgument;
+    return map_outcome(outcome);
 }
 
 std::size_t Router::expireForTest(std::uint64_t now_ms) noexcept {
-    const std::size_t expired = reassembler_.expire(now_ms);
-    if (expired != 0U) {
-        reassembly_timeouts_.fetch_add(static_cast<std::uint32_t>(expired),
-                                       std::memory_order_relaxed);
-    }
-    return expired;
+    return receiver_.expire(now_ms);
 }
 
 Stats Router::stats() const noexcept {
+    const btp::Receiver::Stats s = receiver_.stats();
     Stats snapshot{};
-    snapshot.routed = routed_.load(std::memory_order_relaxed);
-    snapshot.fragments_accepted = fragments_accepted_.load(std::memory_order_relaxed);
-    snapshot.duplicate_fragments = duplicate_fragments_.load(std::memory_order_relaxed);
-    snapshot.dropped_decode = dropped_decode_.load(std::memory_order_relaxed);
-    snapshot.dropped_crc = dropped_crc_.load(std::memory_order_relaxed);
-    snapshot.dropped_reassembly = dropped_reassembly_.load(std::memory_order_relaxed);
-    snapshot.dropped_invalid_argument = dropped_invalid_argument_.load(std::memory_order_relaxed);
-    snapshot.reassembly_timeouts = reassembly_timeouts_.load(std::memory_order_relaxed);
+    snapshot.routed = s.completed;
+    snapshot.fragments_accepted = s.fragments_accepted;
+    snapshot.duplicate_fragments = s.duplicate_fragments;
+    snapshot.dropped_decode = s.dropped_decode;
+    snapshot.dropped_crc = s.dropped_crc;
+    snapshot.dropped_reassembly = s.dropped_reassembly;
+    snapshot.dropped_invalid_argument = s.invalid_argument;
+    snapshot.reassembly_timeouts = s.reassembly_timeouts;
     return snapshot;
 }
 

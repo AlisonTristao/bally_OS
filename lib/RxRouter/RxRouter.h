@@ -3,9 +3,9 @@
 
 #include <btp/codec.hpp>
 #include <btp/fragmentation.hpp>
+#include <btp/receiver.hpp>
 
 #include <array>
-#include <atomic>
 #include <cstddef>
 #include <cstdint>
 
@@ -31,12 +31,15 @@
 // once its fragments are back together, because the tag was computed over
 // the whole logical payload).
 //
-// Plain C++ with no ESP-IDF/FreeRTOS dependency, so it runs under env:native
-// against BTP's canonical test vectors exactly as it does on-device. Mirrors
-// bally_dongle's lib/ProtocolRouter deliberately: same btp::Reassembler,
-// same four slots, same 4000 ms timeout, so the two ends of the radio link
-// tolerate the same amount of loss and reordering instead of each end
-// having its own idea of how long a half-arrived message lives.
+// It is now a thin adapter over btp::Receiver (BTP/include/btp/receiver.hpp,
+// tested by BTP/tests/test_receiver.cpp) -- the decode + CRC + reassembly
+// wiring, the timeout sweep and the STATUS counters all live there. What
+// stays here: the RxRouter::* names the robot already uses, the
+// RoutedMessage with its inline payload buffer, and the ESP-NOW profile.
+// bally_dongle's lib/ProtocolRouter is the same btp::Receiver with a
+// per-datagram MAC bolted on; keeping the four slots and the 4000 ms timeout
+// identical is what makes the two ends of the radio link tolerate the same
+// loss and reordering.
 namespace RxRouter {
 
 // Sized for the largest logical message the robot accepts today: a
@@ -94,38 +97,22 @@ struct Stats {
     std::uint32_t dropped_reassembly;
     std::uint32_t dropped_invalid_argument;
     // Partial messages abandoned because no further fragment arrived within
-    // kReassemblyTimeoutMs. Counted by submit() as it sweeps; this is what
-    // STATUS's reassembly_timeouts reports.
+    // kReassemblyTimeoutMs. Counted by btp::Receiver as it sweeps; this is
+    // what STATUS's reassembly_timeouts reports.
     std::uint32_t reassembly_timeouts;
 };
 
-// One receiver's worth of decode + reassembly state.
+// One receiver's worth of decode + reassembly state, over a btp::Receiver.
 //
-// CONCURRENCY. This class holds no lock, and does not need one, because
-// exactly one context ever MUTATES it: submit(). On the robot that is the
-// ESP-NOW receive callback.
-//
-// It did need one until recently. The arrangement inherited from the inline
-// btp::Reassembler this class replaced had the receive callback pushing
-// fragments while the routine task, once a second, swept expired slots -- two
-// tasks writing the same slot table and the same storage, with nothing
-// serializing them. What made that fixable without a lock is that the sweep
-// was never load-bearing: btp::Reassembler::push() expires stale slots itself
-// on every push (see fragmentation.cpp), so the separate sweep existed only to
-// COUNT what had been lost, for STATUS. Counting is now done by submit(), on
-// the same context that was already doing the sweeping, and the count is read
-// through stats().
-//
-// The consequence to know about: the timeout counter only advances when a
-// datagram arrives. A robot hearing nothing at all reports no new timeouts
-// until the next frame -- which is correct, because slot RELEASE was already
-// tied to arrivals in exactly the same way. Nothing is held longer than
-// before; only the moment the loss is reported moved.
-//
-// stats() is read from the routine task while submit() writes, which is a
-// read of counters and not of the slot table -- the same shape as the atomic
-// link_* counters BallyRobot already publishes, and why the counters below
-// are atomic rather than plain.
+// CONCURRENCY. Exactly one context MUTATES this: submit(), on the robot's
+// ESP-NOW receive callback -- btp::Receiver is not internally synchronised and
+// does not need to be here. stats() is read from the routine/shell task while
+// submit() writes; the counters are plain 32-bit words, so that read is a
+// relaxed view of monotonic values -- exactly what the previous
+// memory_order_relaxed atomics provided, and all a STATUS report needs. The
+// timeout counter still only advances when a datagram arrives (the sweep runs
+// inside submit()); a robot hearing nothing reports no new timeouts until the
+// next frame, which matches how slot release was always tied to arrivals.
 class Router {
 public:
     Router() noexcept;
@@ -144,14 +131,10 @@ public:
                    std::uint64_t now_ms,
                    RoutedMessage* message_out) noexcept;
 
-    // Deliberately NOT public: sweeping is submit()'s job, on submit()'s
-    // context, and a second caller on a second task is the race this class
-    // used to have. What a caller wants from it -- how many partial messages
-    // were lost -- is in Stats::reassembly_timeouts, which is safe to read
-    // from anywhere.
-    //
-    // Safe to call from a test, which is single-threaded, through
-    // expireForTest() below.
+    // Deliberately NOT a public sweep: sweeping is submit()'s job, on
+    // submit()'s context. What a caller wants from it -- how many partial
+    // messages were lost -- is in Stats::reassembly_timeouts. Safe to call
+    // from a single-threaded test through this name.
     std::size_t expireForTest(std::uint64_t now_ms) noexcept;
 
     // A snapshot, safe to read from a context other than submit()'s.
@@ -161,19 +144,7 @@ private:
     btp::ReassemblySlot slots_[kSlotCount];
     std::uint8_t storage_[kSlotCount][kMaxPayloadSize];
     std::array<btp::ReassemblyStorage, kSlotCount> storage_views_;
-    btp::Reassembler reassembler_;
-
-    // Written only by submit(), read from any context through stats().
-    // Relaxed because these are independent counters, not a protocol between
-    // tasks: a reader wants each number, never an ordering between them.
-    std::atomic<std::uint32_t> routed_{0};
-    std::atomic<std::uint32_t> fragments_accepted_{0};
-    std::atomic<std::uint32_t> duplicate_fragments_{0};
-    std::atomic<std::uint32_t> dropped_decode_{0};
-    std::atomic<std::uint32_t> dropped_crc_{0};
-    std::atomic<std::uint32_t> dropped_reassembly_{0};
-    std::atomic<std::uint32_t> dropped_invalid_argument_{0};
-    std::atomic<std::uint32_t> reassembly_timeouts_{0};
+    btp::Receiver receiver_;
 };
 
 }  // namespace RxRouter
