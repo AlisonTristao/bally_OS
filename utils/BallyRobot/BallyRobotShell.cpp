@@ -585,7 +585,11 @@ void ROBOT::registerLinkCommands() {
     shell.create_module("link", "Radio and protocol counters");
 
     shell.add([]() -> uint8_t {
-        const RxRouter::Stats rx = instance_->rx_router_.stats();
+        if (!instance_->node_) {
+            ROBOT::logger.insert_log(logType::ERRO, "protocol not bound yet");
+            return RESULT_ERROR;
+        }
+        const btp::Receiver::Stats rx = instance_->node_->receiver().stats();
         // Same aggregation publishStatus() does for the wire message, so the
         // two can be compared directly when something looks wrong.
         ROBOT::logger.insert_logf(
@@ -594,12 +598,12 @@ void ROBOT::registerLinkCommands() {
             "reassembly_completed=%llu reassembly_rejected=%llu reassembly_timeouts=%lu "
             "routed=%lu",
             static_cast<unsigned long long>(instance_->link_frames_rx_.load(std::memory_order_relaxed)),
-            static_cast<unsigned long long>(instance_->link_crc_errors_.load(std::memory_order_relaxed)),
-            static_cast<unsigned long long>(instance_->link_decode_errors_.load(std::memory_order_relaxed)),
-            static_cast<unsigned long long>(instance_->link_reassembly_completed_.load(std::memory_order_relaxed)),
-            static_cast<unsigned long long>(instance_->link_reassembly_rejected_.load(std::memory_order_relaxed)),
+            static_cast<unsigned long long>(rx.dropped_crc),
+            static_cast<unsigned long long>(rx.dropped_decode),
+            static_cast<unsigned long long>(rx.completed),
+            static_cast<unsigned long long>(rx.dropped_reassembly),
             static_cast<unsigned long>(rx.reassembly_timeouts),
-            static_cast<unsigned long>(rx.routed));
+            static_cast<unsigned long>(rx.completed));
         return RESULT_OK;
     }, "stats", "Receive-side link counters (same numbers CONTROL/STATUS carries)", "link");
 
@@ -633,21 +637,25 @@ void ROBOT::registerLinkCommands() {
     }, "tx", "Transmit scheduler counters, per priority class", "link");
 
     shell.add([]() -> uint8_t {
-        const RxRouter::Stats rx = instance_->rx_router_.stats();
+        if (!instance_->node_) {
+            ROBOT::logger.insert_log(logType::ERRO, "protocol not bound yet");
+            return RESULT_ERROR;
+        }
+        const btp::Receiver::Stats rx = instance_->node_->receiver().stats();
         ROBOT::logger.insert_logf(
             logType::INFO,
             "routed=%lu fragments_accepted=%lu duplicate_fragments=%lu "
             "dropped_decode=%lu dropped_crc=%lu dropped_reassembly=%lu "
             "dropped_invalid_argument=%lu reassembly_timeouts=%lu slots=%u",
-            static_cast<unsigned long>(rx.routed),
+            static_cast<unsigned long>(rx.completed),
             static_cast<unsigned long>(rx.fragments_accepted),
             static_cast<unsigned long>(rx.duplicate_fragments),
             static_cast<unsigned long>(rx.dropped_decode),
             static_cast<unsigned long>(rx.dropped_crc),
             static_cast<unsigned long>(rx.dropped_reassembly),
-            static_cast<unsigned long>(rx.dropped_invalid_argument),
+            static_cast<unsigned long>(rx.invalid_argument),
             static_cast<unsigned long>(rx.reassembly_timeouts),
-            static_cast<unsigned>(RxRouter::kSlotCount));
+            static_cast<unsigned>(ROBOT::kNodeSlotCount));
         return RESULT_OK;
     }, "rx", "Decode and reassembly counters", "link");
 
@@ -726,8 +734,12 @@ void ROBOT::registerLinkCommands() {
             return RESULT_ERROR;
         }
 
+        if (!instance_->node_) {
+            ROBOT::logger.insert_log(logType::ERRO, "protocol not bound yet");
+            return RESULT_ERROR;
+        }
         const LinkStatsBaseline& base = instance_->link_baseline_;
-        const RxRouter::Stats rx = instance_->rx_router_.stats();
+        const btp::Receiver::Stats rx = instance_->node_->receiver().stats();
         const TxScheduler::Stats tx = instance_->tx_scheduler.stats();
         const CommandProcessor::Stats cmd = instance_->command_processor.stats();
         const uint32_t now_ms =
@@ -741,10 +753,8 @@ void ROBOT::registerLinkCommands() {
             static_cast<unsigned long>(now_ms - base.uptime_ms),
             static_cast<unsigned long long>(
                 instance_->link_frames_rx_.load(std::memory_order_relaxed) - base.frames_rx),
-            static_cast<unsigned long long>(
-                instance_->link_crc_errors_.load(std::memory_order_relaxed) - base.crc_errors),
-            static_cast<unsigned long long>(
-                instance_->link_decode_errors_.load(std::memory_order_relaxed) - base.decode_errors),
+            static_cast<unsigned long long>(rx.dropped_crc - base.crc_errors),
+            static_cast<unsigned long long>(rx.dropped_decode - base.decode_errors),
             static_cast<unsigned long>(rx.reassembly_timeouts - base.rx.reassembly_timeouts),
             static_cast<unsigned long>(tx.accepted - base.tx.accepted),
             static_cast<unsigned long>(tx.dropped - base.tx.dropped),

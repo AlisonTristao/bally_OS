@@ -27,9 +27,15 @@
 # now uses to VALIDATE TelemetryPublisher::schemas() at boot (order/duplicate
 # checks) -- MANIFEST_DATA itself is still hand-built straight from
 # TelemetryPublisher::schemas() (btp::Catalog::add_topic() does not keep a
-# field's unit/description, only what btp::SampleReader/Writer need). Keep
-# this in step with [env:native]'s symlink; this can become a submodule
-# pinned to the tag.
+# field's unit/description, only what btp::SampleReader/Writer need) -- through
+# btp::node (2.16.0+), which BallyRobot's node_ now uses ONLY for its receive
+# pipeline (decode/CRC/reassembly/open) and to lend `protocol` a shared
+# btp::Endpoint -- see node_'s class comment in BallyRobot.h for why not more
+# (no session on this leg, MANIFEST_DATA staying hand-built as above,
+# CommandProcessor's async task model not fitting Node's synchronous
+# NodeActionFn). subscription.cpp is a link-time dependency of node.cpp even
+# though this firmware never calls Node's subscription API. Keep this in step
+# with [env:native]'s symlink; this can become a submodule pinned to the tag.
 #
 # The btp lib_deps entry is removed from [env:esp32-s3] for the same reason a
 # component and a lib_deps library of the same name would fight over codec.o.
@@ -54,6 +60,8 @@ idf_component_register(
         "${btp_root}/src/endpoint.cpp"
         "${btp_root}/src/receiver.cpp"
         "${btp_root}/src/catalog.cpp"
+        "${btp_root}/src/subscription.cpp"
+        "${btp_root}/src/node.cpp"
         "${btp_root}/src/aead.cpp"
     INCLUDE_DIRS "${btp_root}/include"
     REQUIRES mbedtls)

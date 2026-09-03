@@ -33,7 +33,7 @@
 #include <StatusReporter.h>
 #include <TelemetryPublisher.h>
 #include <TxScheduler.h>
-#include <RxRouter.h>
+#include <btp/node.hpp>
 #include <bally_channels.h>
 #include <OTAUpdater.h>
 #include <RobotSettings.h>
@@ -138,6 +138,18 @@ public:
 
     // initialize the robot, configure the pins, the wifi and the esp-now settings
     bool init();
+
+    // Constructs node_ (needs TxScheduler already configured -- see node_'s
+    // own comment) and points `protocol` at its btp::Endpoint, so every
+    // producer sending through `protocol` and node_'s own receive share one
+    // sequence counter for this robot's identity. Called once from main.cpp's
+    // setup_system_callbacks(), right after tx_scheduler.configure() (public,
+    // like protocol.set_send_callback() right next to it there -- init()
+    // itself runs too early, before TxScheduler exists). Returns false on a
+    // bad identity or storage (node_->begin() failing) -- a programming
+    // error, checked once at boot, same rule as rx_router_.valid() used to
+    // have.
+    bool bindProtocolTransport();
 
     // routine to be executed in parallel processing
     static void routine(void *param);
@@ -341,6 +353,13 @@ private:
     std::size_t source_info_count_ = 0U;
     char source_info_scratch_[96]{};
     void buildSourceInfo();
+
+    // This boot's identity, computed once by configureProtocolIdentity() (MAC
+    // + a fresh random boot_id from NVS) and consumed later by
+    // bindProtocolTransport(), which is what actually builds node_ -- see
+    // node_'s own comment for why the two cannot happen at the same time.
+    std::uint32_t protocol_source_id_ = 0U;
+    std::uint32_t protocol_boot_id_ = 0U;
 
     // Set once in init() from imu->begin()'s result. Gates the IMU read in
     // sampleEKF() — skipping it when the sensor never answered avoids
@@ -629,31 +648,63 @@ private:
     uint8_t received_data_queue_storage_[
         kCommandQueueLength * sizeof(QueuedCommand)]{};
 
-    // Receive pipeline, stage one: decode + reassemble. Every frame the
-    // radio hands us goes through here before anything looks at its type
-    // (see handleReceiveStatic).
+    // Receive pipeline: decode + CRC + reassembly + AEAD open, all now
+    // btp::Node's job (library 2.16.0+; RxRouter's decode/reassemble half and
+    // handleReceiveStatic's manual RadioSeal::open/open_e half both moved in
+    // here). Node also lends its btp::Endpoint (node_->endpoint()) to
+    // `protocol` via protocol.bind() -- see bindProtocolTransport() -- so
+    // there is exactly one sequence counter for this robot's identity, shared
+    // by every producer that sends through `protocol` and by whatever this
+    // Node itself would send (it never does: cfg.send is left null, see
+    // bindProtocolTransport()'s comment -- this Node exists to receive and to
+    // own that one Endpoint, nothing else. No session (this robot has no
+    // HELLO/session concept over ESP-NOW -- see SubscriptionResponder.h),
+    // no served/learned catalogue (ManifestResponder keeps answering
+    // MANIFEST_REQUEST by hand -- see its class comment: btp::Catalog cannot
+    // carry a field's unit/description, which the wire manifest still needs).
     //
-    // Two tasks touch it and it holds no lock: submit() from the ESP-NOW
-    // receive callback, expire() once a second from routine() via
-    // publishStatus(). Unchanged from the command_reassembler_ this replaced
-    // -- see the concurrency note on RxRouter::Router for why that is
-    // tolerated and what the worst case is.
-    RxRouter::Router rx_router_;
+    // Deferred (std::optional, like array_sensor/junkebox/motor_left/... just
+    // below): btp::NodeConfig bakes send/seal/identity in at construction, and
+    // send needs TxScheduler configured first, which only happens in
+    // main.cpp's setup_system_callbacks() -- after init() returns. Same
+    // reason `protocol` cannot own its send callback until then either
+    // (unchanged: still a late-bound atomic there).
+    //
+    // Sizes match RxRouter's own (4 slots, 600 octets, 4000 ms) -- the two
+    // ends of the radio link still need to tolerate the same loss and
+    // reordering. SealBytes/ScratchBytes/Catalog* are unused (this Node never
+    // calls send()/send_with()/publish()/serve_catalog()) and kept minimal.
+    static constexpr std::size_t kNodeSlotCount = 4U;
+    static constexpr std::size_t kNodeSlotBytes = 600U;
+    static constexpr std::uint64_t kNodeReassemblyTimeoutMs = 4000U;
+    std::optional<btp::StaticNode<kNodeSlotCount, kNodeSlotBytes,
+                                  /*SealBytes=*/16U, /*ScratchBytes=*/16U,
+                                  /*CatalogTopics=*/1U, /*CatalogFields=*/1U,
+                                  /*CatalogStringBytes=*/16U>> node_;
 
-    // The router's output lives here, not on the caller's stack: submit()
-    // copies up to RxRouter::kMaxPayloadSize octets into it, and
-    // handleReceiveStatic runs on the Wi-Fi task's stack, which is not ours
-    // to spend ~640 octets of. Single-writer/single-reader by the same rule
-    // as rx_router_ -- only the receive callback touches it, and only
-    // between submit() returning Routed and dispatchDecoded() returning.
-    RxRouter::RoutedMessage rx_routed_{};
+    // Two tasks touch node_ once it exists, and it holds no lock: receive()
+    // from the ESP-NOW receive callback, tick()'s reassembly sweep once a
+    // second from routine() via publishStatus(). Same tolerated single-
+    // writer-ish pattern RxRouter::Router documented; the worst case is
+    // unchanged too.
 
-    // Holds what RadioSeal::open() writes: rx_routed_.payload is the
-    // ciphertext, this is the plaintext handleReceiveStatic's type switch
-    // and dispatchDecoded() actually read. Same reasoning as rx_routed_
-    // itself (not a stack buffer -- see its comment) and the same
-    // single-writer/single-reader rule.
-    uint8_t rx_plaintext_[RxRouter::kMaxPayloadSize]{};
+    // Classifies one decoded header the same way for both protocolOpen()
+    // (which key opens it) and dispatchDecoded() (which key answers it) --
+    // one source of truth instead of two copies of channel_of_peer's call.
+    // CONTROL/MANIFEST_REQUEST is deliberately NOT included: only the
+    // dongle's own aggregation cache ever asks a robot for its manifest (see
+    // ManifestResponder's class comment), so it always classifies C_Link.
+    static bally::Channel classifyChannel(const btp::Header& header,
+                                          std::uint32_t dongle_source_id) noexcept;
+
+    // btp::NodeOpenFn bound to node_'s cfg.open: classifies by classifyChannel()
+    // then opens under RadioSeal::open (C_Link) or open_e (B_Endpoint), both
+    // fail-closed exactly as handleReceiveStatic's old stage two was. `ctx` is
+    // the ROBOT singleton -- note_unauthorized() on a failed open is the one
+    // side effect this callback has beyond returning false.
+    static bool protocolOpen(void* ctx, const btp::Header& header,
+                             std::uint16_t sealed_size, const std::uint8_t* sealed,
+                             std::uint8_t* out_plaintext) noexcept;
 
     // The dongle's BTP source_id, derived once in configureProtocolIdentity()
     // from the same MAC_ADDR build flag handleReceiveStatic's radio prefilter
@@ -698,7 +749,7 @@ private:
     // Zero point for "link -delta".
     //
     // The counters themselves are never reset, and there is deliberately no
-    // reset_stats() on TxScheduler/RxRouter/CommandProcessor: commands.md
+    // reset_stats() on TxScheduler/btp::Receiver/CommandProcessor: commands.md
     // section 5 defines the STATUS counters as monotonic since boot, so
     // zeroing them would make any consumer computing a delta see a negative
     // one. A snapshot on this side gives the bench the same "since I started
@@ -710,23 +761,22 @@ private:
         uint64_t crc_errors = 0U;
         uint64_t decode_errors = 0U;
         TxScheduler::Stats       tx{};
-        RxRouter::Stats          rx{};
+        btp::Receiver::Stats     rx{};
         CommandProcessor::Stats  command{};
     };
     LinkStatsBaseline link_baseline_{};
     void captureLinkBaseline();
 
-    // Link counters for STATUS section 5. Written only by the ESP-NOW
-    // receive callback (single writer) and read by publishStatus(); relaxed
-    // atomics keep the callback free of any lock. frames_tx/frames_dropped/
-    // telemetry_dropped/command_duplicates come from TxScheduler,
-    // TelemetryPublisher and CommandProcessor, which already count them.
+    // frames_rx (STATUS section 5): every octet stream the radio hands us is
+    // one received frame attempt, counted here before the MAC prefilter or
+    // node_->receive() even run -- neither is a Receiver::Stats counter, both
+    // only see what actually reaches receive(). crc_errors/decode_errors/
+    // reassembly_completed/timeouts/rejected all come from
+    // node_->receiver().stats() now (read live in publishStatus() /
+    // captureLinkBaseline()), so this is the only manually kept counter left.
+    // Written only by the ESP-NOW receive callback (single writer), read by
+    // publishStatus(); a relaxed atomic keeps the callback free of any lock.
     std::atomic<uint64_t> link_frames_rx_{0U};
-    std::atomic<uint64_t> link_crc_errors_{0U};
-    std::atomic<uint64_t> link_decode_errors_{0U};
-    std::atomic<uint64_t> link_reassembly_completed_{0U};
-    std::atomic<uint64_t> link_reassembly_timeouts_{0U};
-    std::atomic<uint64_t> link_reassembly_rejected_{0U};
 };
 
 #endif

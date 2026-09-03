@@ -61,13 +61,47 @@ constexpr std::size_t kBtpAeadTagSize = btp::kEndpointAeadTagSize;
 //     (type, object_id, ...) signatures, so CommandProcessor / TelemetryPublisher
 //     / StatusReporter / ManifestResponder / SubscriptionResponder / Logger /
 //     TerminalResponder are untouched.
-class BtpEndpoint : public btp::Endpoint {
+// btp::Endpoint owns the identity and the outgoing sequence counter, and
+// there must be exactly ONE of them live for this robot's source_id, or two
+// producers could hand out the same sequence number -- the dongle's dedup
+// keys on (source_id, boot_id, sequence). Historically BtpEndpoint WAS one
+// (public inheritance); it now WRAPS one instead, defaulting to a private
+// own_endpoint_ so every existing caller/test that builds a bare
+// `BtpEndpoint endpoint; endpoint.configure(...)` keeps working unchanged --
+// bind() below is the only new thing, and only the firmware composition root
+// calls it, once btp::Node exists, to point this wrapper at NODE'S endpoint
+// instead (topico 2.11+'s Round 2: btp::Node owns receive + MANIFEST_DATA
+// serving; this class stays the one send path every producer already uses).
+class BtpEndpoint {
 public:
     using SealFn = BtpSealFn;
     using SendCallback = bool (*)(const std::uint8_t* data, std::size_t size);
     using ContextSendCallback = btp::EndpointSendFn;
 
     static constexpr std::size_t kAeadTagSize = btp::kEndpointAeadTagSize;
+
+    // Identity + sequence forwarders -- see own_endpoint_/active_ below.
+    bool configure(std::uint32_t source_id, std::uint32_t boot_id) noexcept {
+        return active_->configure(source_id, boot_id);
+    }
+    bool configured() const noexcept { return active_->configured(); }
+    std::uint32_t source_id() const noexcept { return active_->source_id(); }
+    std::uint32_t boot_id() const noexcept { return active_->boot_id(); }
+    bool reserve_sequence(std::uint32_t* sequence_out) noexcept {
+        return active_->reserve_sequence(sequence_out);
+    }
+    bool try_reserve_sequence(std::uint32_t* sequence_out) noexcept {
+        return active_->try_reserve_sequence(sequence_out);
+    }
+
+    // Points every send below at `shared` instead of this wrapper's own,
+    // never-configured btp::Endpoint -- called once, after btp::Node::begin()
+    // has configured `shared`'s identity from the exact same (source_id,
+    // boot_id) this class's own configure() would otherwise have taken.
+    // Never call configure() on this object again afterward: it would
+    // reconfigure (and reset the sequence counter of) whichever btp::Endpoint
+    // `active_` currently points at, shared or not.
+    void bind(btp::Endpoint& shared) noexcept { active_ = &shared; }
 
     // Bounds the sealed[] scratch a sealed send_logical() cuts fragments from.
     // The largest logical message this firmware sends is the UTF-8
@@ -128,6 +162,13 @@ private:
     std::atomic<SendCallback> legacy_callback_{nullptr};
     std::atomic<void*> send_context_{nullptr};
     std::atomic<ContextSendCallback> send_callback_{&default_send};
+
+    // own_endpoint_ before active_ on purpose: active_'s default member
+    // initializer takes its address, which needs own_endpoint_ already built.
+    // Every method above goes through active_, never own_endpoint_ directly,
+    // so bind() redirecting it is the only difference the firmware path sees.
+    btp::Endpoint own_endpoint_;
+    btp::Endpoint* active_ = &own_endpoint_;
 };
 
 namespace btp_command {

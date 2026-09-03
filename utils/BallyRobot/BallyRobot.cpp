@@ -355,7 +355,7 @@ void ROBOT::buildSourceInfo() {
 }
 
 bool ROBOT::configureProtocolIdentity() {
-    if (protocol.source_id() != 0U && protocol.boot_id() != 0U) return true;
+    if (protocol_source_id_ != 0U && protocol_boot_id_ != 0U) return true;
 
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -387,7 +387,13 @@ bool ROBOT::configureProtocolIdentity() {
     ret = nvs_set_u32(handle, "last_boot", boot_id);
     if (ret == ESP_OK) ret = nvs_commit(handle);
     nvs_close(handle);
-    if (ret != ESP_OK || !protocol.configure(source_id, boot_id)) return false;
+    if (ret != ESP_OK) return false;
+
+    // `protocol` itself is not configured here any more -- bindProtocolTransport()
+    // (main.cpp, once TxScheduler exists) builds node_ from these two and
+    // points `protocol` at node_'s own btp::Endpoint. See node_'s comment.
+    protocol_source_id_ = source_id;
+    protocol_boot_id_ = boot_id;
 
     // Stable, opaque 16-byte identity for MANIFEST_DATA's source_uuid: the
     // MAC (6 bytes, already used for source_id) plus a fixed non-zero
@@ -486,6 +492,79 @@ bool ROBOT::configureProtocolIdentity() {
         btp::kV1Version, btp::kLibraryVersionMajor, btp::kLibraryVersionMinor,
         btp::kLibraryVersionPatch, static_cast<unsigned long>(source_id),
         static_cast<unsigned long>(boot_id));
+    return true;
+}
+
+bally::Channel ROBOT::classifyChannel(const btp::Header& header,
+                                      std::uint32_t dongle_source_id) noexcept {
+    // Mirrors handleReceiveStatic's old stage-two comment verbatim: COMMAND
+    // and CONTROL/SUBSCRIBE/UNSUBSCRIBE are classified by peer (topico 31.2
+    // widened these two alongside COMMAND, once SubscriptionResponder's own
+    // replies became channel-aware), TERMINAL_IN the same way (topico 19bis).
+    // CONTROL/MANIFEST_REQUEST stays forced to channel C: only the dongle's
+    // own aggregation cache legitimately sends one.
+    const bool classify_by_peer =
+        header.type == btp::MessageType::Command ||
+        header.type == btp::MessageType::Terminal ||
+        (header.type == btp::MessageType::Control &&
+         (header.object_id == SubscriptionResponder::kSubscribeObjectId ||
+          header.object_id == SubscriptionResponder::kUnsubscribeObjectId));
+    return classify_by_peer
+               ? bally::channel_of_peer(bally::Vantage::Robot, header.source_id,
+                                        dongle_source_id)
+               : bally::Channel::C_Link;
+}
+
+bool ROBOT::protocolOpen(void* ctx, const btp::Header& header,
+                         std::uint16_t sealed_size, const std::uint8_t* sealed,
+                         std::uint8_t* out_plaintext) noexcept {
+    ROBOT* self = static_cast<ROBOT*>(ctx);
+    if (self == nullptr || sealed_size < RadioSeal::kTagSize) return false;
+
+    // This is the robot's REAL authorization (the MAC prefilter in
+    // handleReceiveStatic is not -- see btp_command::authorized_source's
+    // comment): RadioSeal::open()/open_e() fail closed on every branch (no
+    // key loaded, ENCRYPTED not set, a cipher other than AES-128-GCM, or a
+    // tag that does not verify); there is no fallback to reading the still-
+    // sealed bytes as plaintext.
+    const bally::Channel channel =
+        classifyChannel(header, self->dongle_source_id_);
+    const bool opened =
+        channel == bally::Channel::B_Endpoint
+            ? RadioSeal::open_e(header, sealed_size, sealed, out_plaintext)
+            : RadioSeal::open(header, sealed_size, sealed, out_plaintext);
+    if (!opened) self->command_processor.note_unauthorized();
+    return opened;
+}
+
+bool ROBOT::bindProtocolTransport() {
+    btp::NodeConfig cfg{};
+    cfg.source_id = protocol_source_id_;
+    cfg.boot_id = protocol_boot_id_;
+    cfg.transport = btp::TransportProfile::EspNow;
+    // Left null on purpose: this Node never sends anything itself (no
+    // session, no served catalogue, no publish() -- see node_'s own
+    // comment). Every actual send still goes through `protocol`
+    // (BtpTransport.h), which TxScheduler is wired to separately in
+    // main.cpp's setup_system_callbacks(), same as before this existed.
+    cfg.send = nullptr;
+    cfg.send_ctx = nullptr;
+    // nullptr -> receive() / tick() take an explicit now_ms, same as every
+    // call site below already passes esp_timer_get_time()-derived values.
+    cfg.clock = nullptr;
+    cfg.clock_ctx = nullptr;
+    // Unused: this Node never sends (see cfg.send above).
+    cfg.seal = nullptr;
+    cfg.seal_ctx = nullptr;
+    cfg.open = &protocolOpen;
+    cfg.open_ctx = this;
+    cfg.reply_seal = nullptr;
+    cfg.reply_seal_ctx = nullptr;
+
+    node_.emplace(cfg, kNodeReassemblyTimeoutMs);
+    if (!node_->begin()) return false;
+
+    protocol.bind(node_->endpoint());
     return true;
 }
 
@@ -858,10 +937,12 @@ void ROBOT::updateSoundFeedback() {
 // against a piece of it.
 void ROBOT::handleReceiveStatic(const esp_now_recv_info_t *recv_info, const uint8_t *incomingData, int len) {
     // Partial or malformed radio payloads are rejected by btp::decode inside
-    // the router, before any field is read. Only the COMMAND_REQUEST route
-    // below can enqueue work for TinyShell.
+    // node_. Only the COMMAND_REQUEST route below can enqueue work for
+    // TinyShell.
     if (instance_ == nullptr || recv_info == nullptr || incomingData == nullptr ||
-        len <= 0 || instance_->receivedDataQueue == nullptr) return;
+        len <= 0 || instance_->receivedDataQueue == nullptr || !instance_->node_) {
+        return;
+    }
 
     // STATUS section 5 counters: every octet stream the radio hands us is one
     // received frame attempt.
@@ -871,12 +952,12 @@ void ROBOT::handleReceiveStatic(const esp_now_recv_info_t *recv_info, const uint
     // comment on btp_command::authorized_source. It no longer binds the
     // frame's source_id to the sender's MAC, because behind a hub every frame
     // legitimately arrives from the dongle's MAC carrying somebody else's
-    // source_id. The real authorization is the AEAD tag opened in stage two
-    // below (RadioSeal::open / open_e, fail-closed): a spoofed MAC clears this
+    // source_id. The real authorization is the AEAD tag protocolOpen() checks
+    // (RadioSeal::open / open_e, fail-closed): a spoofed MAC clears this
     // memcmp but cannot forge a tag, so it never reaches the shell.
     //
-    // It runs before btp::decode now, where it used to run after: a frame
-    // from a radio that is not our peer no longer moves the CRC or
+    // It runs before node_->receive() now, where it used to run after decode:
+    // a frame from a radio that is not our peer no longer moves the CRC or
     // decode-error counters, which describe our own link.
 #ifdef MAC_ADDR
     static constexpr uint8_t expected_peer[6] = {MAC_ADDR};
@@ -889,96 +970,55 @@ void ROBOT::handleReceiveStatic(const esp_now_recv_info_t *recv_info, const uint
     return;
 #endif
 
-    // Stage one: decode + reassemble. Returns Routed only for a COMPLETE
-    // logical message. CRC and decode failures stay counted separately (a
-    // frame rejected by CRC is never also counted as a decode error).
-    const RxRouter::Outcome outcome = instance_->rx_router_.submit(
+    // Stage one + two: decode, CRC, reassemble, then classify and open --
+    // all btp::Node's job now (library 2.16.0+). protocolOpen() (node_'s
+    // cfg.open) IS the old stage two, moved there because that is the one
+    // place Node hands the canonical header to a caller before deciding what
+    // to do with the message; classifyChannel() is the single copy of that
+    // logic both protocolOpen() and this function's `channel` below share.
+    btp::ReceivedMessage msg{};
+    const btp::NodeRx outcome = instance_->node_->receive(
         incomingData, static_cast<size_t>(len),
-        static_cast<uint64_t>(esp_timer_get_time() / 1000ULL),
-        &instance_->rx_routed_);
+        static_cast<uint64_t>(esp_timer_get_time() / 1000ULL), &msg);
     switch (outcome) {
-        case RxRouter::Outcome::Routed:
+        case btp::NodeRx::Complete:
             break;
-        case RxRouter::Outcome::FragmentAccepted:
-        case RxRouter::Outcome::DuplicateFragment:
-            // Not an error, and not a message yet. A byte-identical retry is
-            // absorbed by the reassembler without disturbing the slot.
+        case btp::NodeRx::Pending:
+            // A fragment was stored, or a byte-identical retry absorbed --
+            // not an error, and not a message yet.
             return;
-        case RxRouter::Outcome::DroppedCrc:
-            instance_->link_crc_errors_.fetch_add(1U, std::memory_order_relaxed);
-            return;
-        case RxRouter::Outcome::DroppedDecode:
-        case RxRouter::Outcome::DroppedInvalidArgument:
-            instance_->link_decode_errors_.fetch_add(1U, std::memory_order_relaxed);
-            return;
-        case RxRouter::Outcome::DroppedReassembly:
-            instance_->link_reassembly_rejected_.fetch_add(1U, std::memory_order_relaxed);
-            instance_->command_processor.note_drop();
+        default:
+            // DroppedFrame: btp::decode / CRC / reassembly rejected the
+            // datagram, or protocolOpen() returned false (already counted
+            // there, via note_unauthorized()). Detailed counts (crc_errors,
+            // decode_errors, reassembly_completed/timeouts/rejected) are read
+            // live from node_->receiver().stats() by publishStatus() /
+            // captureLinkBaseline() now, instead of kept here -- unlike
+            // RxRouter::Outcome, NodeRx does not say which of the three this
+            // was, so (unlike before) this path does NOT also call
+            // command_processor.note_drop(): that counter's only consumer is
+            // a bench shell diagnostic (link -stats), never the wire, and
+            // guessing would either double-count an already-unauthorized
+            // frame or under-count a genuine reassembly-capacity drop.
             return;
     }
 
-    if (instance_->rx_routed_.reassembled) {
-        instance_->link_reassembly_completed_.fetch_add(1U, std::memory_order_relaxed);
-    }
-
-    // Stage two: classify, then open. header.source_id sits in the clear at
-    // a fixed offset even inside a sealed frame (bally_channels.h), so which
-    // key opens this frame can be decided before opening it. COMMAND and
-    // CONTROL/SUBSCRIBE/UNSUBSCRIBE are classified by peer (topico 31.2
-    // widened these two alongside COMMAND, once SubscriptionResponder's own
-    // replies became channel-aware -- see its configure()); CONTROL/
-    // MANIFEST_REQUEST stays forced to channel C, because only the dongle's
-    // own aggregation cache legitimately sends one -- a TraceView hub-child
-    // asks the DONGLE for a robot's manifest, never the robot directly (see
-    // ManifestCache in bally_dongle), so there is nothing to widen there.
-    //
-    // This is the robot's REAL authorization now (see the long comment on
+    // This is the robot's REAL authorization (see the long comment on
     // btp_command::authorized_source): the MAC check above is a cheap radio
-    // prefilter a forged sender clears in one line, an AEAD tag is not.
-    // RadioSeal::open()/open_e() fail closed on every branch (no key loaded,
-    // ENCRYPTED not set, a cipher other than AES-128-GCM, or a tag that does
-    // not verify); there is no fallback to reading the still-sealed bytes as
-    // plaintext.
-    const btp::Header& header = instance_->rx_routed_.header;
-    const std::size_t ciphertext_size = instance_->rx_routed_.payload_size;
-    const bool classify_by_peer =
-        header.type == btp::MessageType::Command ||
-        // TERMINAL_IN comes from TraceView's terminal widget through the hub,
-        // sealed with key E (channel B) exactly like a COMMAND_REQUEST does.
-        header.type == btp::MessageType::Terminal ||
-        (header.type == btp::MessageType::Control &&
-         (header.object_id == SubscriptionResponder::kSubscribeObjectId ||
-          header.object_id == SubscriptionResponder::kUnsubscribeObjectId));
+    // prefilter a forged sender clears in one line, an AEAD tag is not --
+    // protocolOpen() already ran RadioSeal::open()/open_e(), fail-closed on
+    // every branch, before NodeRx::Complete could come back at all.
+    const btp::Header& header = msg.header;
     const bally::Channel channel =
-        classify_by_peer
-            ? bally::channel_of_peer(bally::Vantage::Robot, header.source_id,
-                                     instance_->dongle_source_id_)
-            : bally::Channel::C_Link;
-    const bool size_ok =
-        ciphertext_size >= RadioSeal::kTagSize &&
-        ciphertext_size - RadioSeal::kTagSize <= sizeof(instance_->rx_plaintext_);
-    const bool opened =
-        size_ok &&
-        (channel == bally::Channel::B_Endpoint
-             ? RadioSeal::open_e(header, static_cast<uint16_t>(ciphertext_size),
-                                 instance_->rx_routed_.payload,
-                                 instance_->rx_plaintext_)
-             : RadioSeal::open(header, static_cast<uint16_t>(ciphertext_size),
-                               instance_->rx_routed_.payload,
-                               instance_->rx_plaintext_));
-    if (!opened) {
-        instance_->command_processor.note_unauthorized();
-        return;
-    }
-    const std::size_t plaintext_size = ciphertext_size - RadioSeal::kTagSize;
+        classifyChannel(header, instance_->dongle_source_id_);
 
     // Stage three: route. Explicit MessageType filter -- no other channel can
     // fall through to the shell path, even if its payload happens to look
     // like text. A type the robot has no handler for (TELEMETRY and LOG
     // today) is dropped HERE rather than before reassembly, so a fragmented
     // one costs a slot until it completes or times out. That is the price of
-    // the ordering above, bounded by RxRouter::kSlotCount and its 4000 ms
-    // timeout; filtering earlier is what loses real messages.
+    // the ordering above, bounded by kNodeSlotCount and its 4000 ms timeout;
+    // filtering earlier is what loses real messages.
     switch (header.type) {
         case btp::MessageType::Command:
             if (header.object_id != btp_command::kCommandRequestObjectId) {
@@ -1010,9 +1050,7 @@ void ROBOT::handleReceiveStatic(const esp_now_recv_info_t *recv_info, const uint
             return;
     }
 
-    instance_->dispatchDecoded(
-        header, btp::ByteView{instance_->rx_plaintext_, plaintext_size},
-        channel);
+    instance_->dispatchDecoded(header, msg.payload, channel);
 }
 
 // Stage three of the pipeline above: hands one complete Command/Control
@@ -1281,15 +1319,16 @@ void ROBOT::runEKF(void *param) {
 // LinkStatsBaseline in BallyRobot.h for why the counters themselves must stay
 // monotonic since boot.
 void ROBOT::captureLinkBaseline() {
+    if (!node_) return;  // protocol not bound yet -- nothing to snapshot
     link_baseline_.set = true;
     link_baseline_.uptime_ms =
         static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
     link_baseline_.frames_rx = link_frames_rx_.load(std::memory_order_relaxed);
-    link_baseline_.crc_errors = link_crc_errors_.load(std::memory_order_relaxed);
-    link_baseline_.decode_errors =
-        link_decode_errors_.load(std::memory_order_relaxed);
+    const btp::Receiver::Stats rx = node_->receiver().stats();
+    link_baseline_.crc_errors = rx.dropped_crc;
+    link_baseline_.decode_errors = rx.dropped_decode;
     link_baseline_.tx = tx_scheduler.stats();
-    link_baseline_.rx = rx_router_.stats();
+    link_baseline_.rx = rx;
     link_baseline_.command = command_processor.stats();
 }
 
@@ -1862,14 +1901,13 @@ void ROBOT::publishStatus() {
     const uint64_t now_us = static_cast<uint64_t>(esp_timer_get_time());
     if (now_us < next_status_us_) return;
     next_status_us_ = now_us + kStatusPeriodUs;
+    if (!node_) return;  // protocol not bound yet -- nothing to report
 
-    // READ, never sweep. The sweep happens inside RxRouter::submit(), on the
+    // READ, never sweep. The sweep happens inside node_->receive(), on the
     // ESP-NOW receive callback -- doing it from here as well would mean two
     // tasks mutating the same slot table with nothing between them. See the
-    // concurrency note in RxRouter.h.
-    const uint32_t timeouts = rx_router_.stats().reassembly_timeouts;
-    link_reassembly_timeouts_.store(static_cast<uint64_t>(timeouts),
-                                    std::memory_order_relaxed);
+    // concurrency note on node_ in BallyRobot.h.
+    const btp::Receiver::Stats rx = node_->receiver().stats();
 
     const TxScheduler::Stats tx = tx_scheduler.stats();
     const TelemetryPublisher::Stats telemetry_stats = telemetry.stats();
@@ -1883,14 +1921,11 @@ void ROBOT::publishStatus() {
     counters.frames_tx = tx.accepted;
     counters.frames_dropped =
         static_cast<uint64_t>(tx.dropped) + telemetry_stats.dropped_full;
-    counters.crc_errors = link_crc_errors_.load(std::memory_order_relaxed);
-    counters.decode_errors = link_decode_errors_.load(std::memory_order_relaxed);
-    counters.reassembly_completed =
-        link_reassembly_completed_.load(std::memory_order_relaxed);
-    counters.reassembly_timeouts =
-        link_reassembly_timeouts_.load(std::memory_order_relaxed);
-    counters.reassembly_rejected =
-        link_reassembly_rejected_.load(std::memory_order_relaxed);
+    counters.crc_errors = rx.dropped_crc;
+    counters.decode_errors = rx.dropped_decode;
+    counters.reassembly_completed = rx.completed;
+    counters.reassembly_timeouts = rx.reassembly_timeouts;
+    counters.reassembly_rejected = rx.dropped_reassembly;
     counters.command_duplicates = command_stats.duplicates;
     // A sample dropped by the full telemetry queue contributes both here and
     // to that topic's samples_dropped_total (section 5.1 allows exactly
@@ -2373,14 +2408,10 @@ bool ROBOT::init() {
     // command arriving in that window would be refused with NotConfigured.
     jobs.configure(&ROBOT::submitLocalCommandStatic, this);
 
-    // rx_router_ wires its own slots and storage in its constructor, so the
-    // only thing that can be wrong here is that wiring, which is a
-    // programming error -- checked once at boot and never again.
-    if (!rx_router_.valid()) {
-        ROBOT::logger.insert_log(logType::ERRO,
-                                 "Failed to initialize BTP reassembly");
-        return false;
-    }
+    // node_ does not exist yet here -- bindProtocolTransport() (main.cpp,
+    // once TxScheduler is configured) constructs it and checks node_->begin()
+    // itself, the same "programming error, checked once at boot" role
+    // rx_router_.valid() used to have.
 
     // Must run before ota.begin(): it creates the default event loop and
     // the Wi-Fi STA netif (needed for the DHCP client — see the comment on

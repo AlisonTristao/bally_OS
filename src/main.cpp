@@ -103,6 +103,15 @@ static void setup_system_callbacks() {
     robot.protocol.set_send_callback(TxScheduler::enqueue_callback,
                                      &robot.tx_scheduler);
 
+    // Builds node_ (the receive pipeline) and points `protocol` at its
+    // btp::Endpoint -- needs tx_scheduler configured just above, which is why
+    // this cannot happen inside init() (see ROBOT::bindProtocolTransport()'s
+    // own comment). A false here is the same class of programming error
+    // rx_router_.valid() used to catch in init(); nothing receives without it.
+    if (!robot.bindProtocolTransport()) {
+        ESP_LOGE("ROBOT_MAIN", "Failed to bind the BTP protocol transport");
+    }
+
     // configure the state machine to log errors using the logger's insert_log method
     // if an error occurs in the state machine, it will call the error callback function, 
     // which will log the error message using the logger
