@@ -23,8 +23,13 @@
 # command-deduplication cache (2.6.0) + btp::endpoint, the identity /
 # sequencing / seal-fragment-encode transmit pipeline BtpEndpoint derives from
 # (2.7.0) + btp::receiver, the decode / CRC / reassembly receive pipeline
-# RxRouter derives from (2.8.0). Keep this in step with [env:native]'s symlink;
-# this can become a submodule pinned to the tag.
+# RxRouter derives from (2.8.0) + btp::catalog (2.12.0), which ManifestResponder
+# now uses to VALIDATE TelemetryPublisher::schemas() at boot (order/duplicate
+# checks) -- MANIFEST_DATA itself is still hand-built straight from
+# TelemetryPublisher::schemas() (btp::Catalog::add_topic() does not keep a
+# field's unit/description, only what btp::SampleReader/Writer need). Keep
+# this in step with [env:native]'s symlink; this can become a submodule
+# pinned to the tag.
 #
 # The btp lib_deps entry is removed from [env:esp32-s3] for the same reason a
 # component and a lib_deps library of the same name would fight over codec.o.
@@ -48,6 +53,7 @@ idf_component_register(
         "${btp_root}/src/session.cpp"
         "${btp_root}/src/endpoint.cpp"
         "${btp_root}/src/receiver.cpp"
+        "${btp_root}/src/catalog.cpp"
         "${btp_root}/src/aead.cpp"
     INCLUDE_DIRS "${btp_root}/include"
     REQUIRES mbedtls)

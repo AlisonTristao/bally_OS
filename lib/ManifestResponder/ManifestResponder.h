@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include <btp/catalog.hpp>
 #include <btp/codec.hpp>
 
 // Needed for BtpSealFn (a file-scope type alias, not a member of
@@ -98,6 +99,28 @@ public:
                    const SourceInfoEntry* source_info = nullptr,
                    std::size_t source_info_count = 0U) noexcept;
 
+    // True once configure() has loaded every one of TelemetryPublisher::
+    // schemas()'s field-bearing topics into catalog() without a
+    // btp::MessageError -- a duplicate topic_id, a field whose `order` skips
+    // a position, or more topics/fields than kMaxCatalogTopics/
+    // kMaxCatalogFields hold. A compile-time schema can only fail this from a
+    // programming error in TelemetryPublisher::kSchemas, so the caller's only
+    // job is to log it (see BallyRobot.cpp's configureProtocolIdentity()) --
+    // MANIFEST_DATA itself does not depend on this catalog (see catalog()
+    // below) and keeps answering correctly either way.
+    bool catalog_ok() const noexcept { return catalog_valid_; }
+
+    // The schema, also as a validated btp::Catalog -- built once by
+    // configure() from the exact same TelemetryPublisher::schemas() table
+    // handle_request() already reads from directly. NOT what MANIFEST_DATA is
+    // built from: btp::Catalog::add_topic() keeps a field's type/scale/
+    // offset/name for btp::SampleReader/Writer, but not its unit or
+    // description, both of which the wire manifest must still carry -- see
+    // BTP/src/catalog.cpp. This exists so a topic-bearing table validated at
+    // boot is ready for whatever next reaches for it (btp::SubscriptionTable
+    // validates a SUBSCRIBE against a served catalog the same way).
+    const btp::Catalog& catalog() const noexcept { return catalog_; }
+
     // Parses a CONTROL/MANIFEST_REQUEST payload (already validated as
     // unfragmented or reassembled by the caller) and sends the matching
     // MANIFEST_DATA response over `endpoint`. Returns false when the payload
@@ -110,12 +133,31 @@ public:
                         std::uint64_t timestamp_us) noexcept;
 
 private:
+    // Sized for this robot's own two field-bearing topics (protocol.test: 2
+    // fields, robot.state: 1 -- kSystemMonitorTopicId has none and is never
+    // added, see buildCatalog()), with headroom for a third small topic
+    // before either bound needs raising. btp::StaticCatalog bundles the
+    // topic/field/name pools this needs.
+    static constexpr std::size_t kMaxCatalogTopics = 4U;
+    static constexpr std::size_t kMaxCatalogFields = 8U;
+    static constexpr std::size_t kMaxCatalogStringBytes = 256U;
+
+    // Converts TelemetryPublisher::schemas() into catalog_ via
+    // btp::Catalog::add_topic(), one call per field-bearing topic. Called
+    // once by configure(); sets catalog_valid_ false (and stops) at the
+    // first btp::MessageError, so a boot log can say which topic broke
+    // instead of only "something did".
+    void buildCatalog() noexcept;
+
     BtpEndpoint* endpoint_ = nullptr;
     std::uint8_t uuid_[16] = {};
     BtpSealFn seal_ = nullptr;
     void* seal_context_ = nullptr;
     const SourceInfoEntry* source_info_ = nullptr;
     std::size_t source_info_count_ = 0U;
+    btp::StaticCatalog<kMaxCatalogTopics, kMaxCatalogFields,
+                       kMaxCatalogStringBytes> catalog_;
+    bool catalog_valid_ = false;
 };
 
 #endif  // MANIFEST_RESPONDER_H

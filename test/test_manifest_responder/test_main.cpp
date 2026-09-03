@@ -322,6 +322,56 @@ void test_full_manifest_response_matches_telemetry_schemas() {
 }
 
 // ---------------------------------------------------------------------------
+// configure() also loads TelemetryPublisher::schemas() into a btp::Catalog
+// (ManifestResponder::catalog()) for boot-time validation -- MANIFEST_DATA
+// itself does not read from it (see catalog()'s comment), but the catalog
+// must still agree with the schema table field for field, so a future
+// kSchemas edit that trips btp::Catalog::add_topic() (a bad `order`, a
+// duplicate topic_id, more fields than kMaxCatalogFields) is caught here
+// instead of silently at boot.
+// ---------------------------------------------------------------------------
+void test_catalog_matches_telemetry_schemas() {
+    BtpEndpoint endpoint;
+    ManifestResponder responder;
+    make_endpoint_and_responder(&endpoint, &responder);
+
+    TEST_ASSERT_TRUE(responder.catalog_ok());
+
+    std::size_t schema_count = 0U;
+    const TelemetryPublisher::TopicSchema* schemas =
+        TelemetryPublisher::schemas(&schema_count);
+
+    std::size_t expected_catalog_topics = 0U;
+    for (std::size_t t = 0U; t < schema_count; ++t) {
+        const TelemetryPublisher::TopicSchema& topic = schemas[t];
+        const btp::CatalogTopic* cat_topic = responder.catalog().topic(topic.topic_id);
+        if (topic.field_count == 0U) {
+            // kSystemMonitorTopicId: btp::Catalog::add_topic() rejects
+            // field_count == 0, so this topic is never added.
+            TEST_ASSERT_NULL(cat_topic);
+            continue;
+        }
+        ++expected_catalog_topics;
+        TEST_ASSERT_NOT_NULL(cat_topic);
+        TEST_ASSERT_EQUAL_UINT16(topic.schema_version, cat_topic->schema_version);
+        TEST_ASSERT_EQUAL_UINT32(topic.max_rate_millihz, cat_topic->max_rate_millihz);
+        TEST_ASSERT_EQUAL_UINT32(topic.field_count, cat_topic->field_count);
+        TEST_ASSERT_EQUAL_STRING(topic.name, cat_topic->name);
+
+        for (std::size_t f = 0U; f < topic.field_count; ++f) {
+            const TelemetryPublisher::FieldSchema& field = topic.fields[f];
+            const btp::FieldSpec& spec = cat_topic->fields[f];
+            TEST_ASSERT_EQUAL_UINT16(field.field_id, spec.field_id);
+            TEST_ASSERT_EQUAL_UINT16(f, spec.order);
+            TEST_ASSERT_EQUAL_UINT8(static_cast<std::uint8_t>(field.type), spec.type);
+            TEST_ASSERT_EQUAL_UINT16(field.element_count, spec.element_count);
+            TEST_ASSERT_EQUAL_STRING(field.name, responder.catalog().field_name(*cat_topic, f));
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT32(expected_catalog_topics, responder.catalog().topic_count());
+}
+
+// ---------------------------------------------------------------------------
 // A request explicitly targeted at this robot's own (source_id, boot_id)
 // takes the same success path as the wildcard -- targeting yourself by name
 // is not a different case from targeting nobody in particular.
@@ -692,6 +742,7 @@ void tearDown() {}
 int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_full_manifest_response_matches_telemetry_schemas);
+    RUN_TEST(test_catalog_matches_telemetry_schemas);
     RUN_TEST(test_targeted_request_matching_this_robot_succeeds);
     RUN_TEST(test_known_revision_returns_not_modified_with_no_topics);
     RUN_TEST(test_request_for_different_source_is_rejected_not_found);

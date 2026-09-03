@@ -146,6 +146,50 @@ void ManifestResponder::configure(BtpEndpoint& endpoint, const std::uint8_t uuid
     seal_context_ = seal_context;
     source_info_ = source_info;
     source_info_count_ = (source_info == nullptr) ? 0U : source_info_count;
+    buildCatalog();
+}
+
+void ManifestResponder::buildCatalog() noexcept {
+    std::size_t topicCount = 0U;
+    const TelemetryPublisher::TopicSchema* schemas = TelemetryPublisher::schemas(&topicCount);
+
+    catalog_valid_ = true;
+    for (std::size_t t = 0U; t < topicCount; ++t) {
+        const TelemetryPublisher::TopicSchema& topic = schemas[t];
+        // kSystemMonitorTopicId: fieldless (the UTF-8 sys-health document),
+        // and btp::Catalog::add_topic() rejects field_count == 0 outright --
+        // it exists to decode PACKED_LE/TLV_LE samples against a field list,
+        // which a body-only topic has none of. handle_request() still
+        // describes it correctly; it just never enters catalog_.
+        if (topic.field_count == 0U) continue;
+
+        btp::FieldRecord records[kMaxCatalogFields];
+        if (topic.field_count > kMaxCatalogFields) {
+            catalog_valid_ = false;
+            continue;
+        }
+        for (std::size_t f = 0U; f < topic.field_count; ++f) {
+            const TelemetryPublisher::FieldSchema& field = topic.fields[f];
+            btp::FieldRecord& fr = records[f];
+            fr = {};
+            fr.field_id = field.field_id;
+            fr.order = field.order;
+            fr.type = static_cast<std::uint8_t>(field.type);
+            fr.flags = field.nullable ? btp::kFieldNullable : static_cast<std::uint8_t>(0U);
+            fr.element_count = field.element_count;
+            fr.max_element_count = 0U;
+            fr.scale = static_cast<double>(field.scale);
+            fr.offset = static_cast<double>(field.offset);
+            fr.enum_count = 0U;
+            fr.name = view_of(field.name);
+        }
+        const btp::MessageError err = catalog_.add_topic(
+            topic.topic_id, topic.schema_version,
+            static_cast<btp::TelemetryEncoding>(topic.encoding),
+            /*subscribable=*/true, topic.max_rate_millihz, topic.name,
+            records, topic.field_count);
+        if (err != btp::MessageError::Ok) catalog_valid_ = false;
+    }
 }
 
 bool ManifestResponder::handle_request(const btp::Header& request_header, btp::ByteView payload,

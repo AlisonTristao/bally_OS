@@ -438,6 +438,17 @@ bool ROBOT::configureProtocolIdentity() {
     buildSourceInfo();
     manifest_responder.configure(protocol, protocol_uuid_, RadioSeal::seal, nullptr,
                                  source_info_entries_, source_info_count_);
+    if (!manifest_responder.catalog_ok()) {
+        // configure() derives a btp::Catalog from TelemetryPublisher::
+        // schemas() as a boot-time validity check (order/duplicate topic_id/
+        // pool size) -- MANIFEST_DATA itself is unaffected either way (see
+        // ManifestResponder::catalog_ok()'s comment), so this is diagnostic
+        // only, not a boot failure.
+        ROBOT::logger.insert_log(
+            logType::ERRO,
+            "BTP: TelemetryPublisher::schemas() failed btp::Catalog validation "
+            "(see ManifestResponder::buildCatalog)");
+    }
     // TELEMETRY is channel B (bally_channels.h): TraceView holds key E, the
     // dongle relays the samples and never reads them. Sealed with E so a
     // desktop that has the robot's password is the only thing that can plot
