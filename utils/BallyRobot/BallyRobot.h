@@ -27,7 +27,7 @@
 #include <Logger.h>
 #include <BtpTransport.h>
 #include <CommandProcessor.h>
-#include <ManifestResponder.h>
+#include <ManifestCatalog.h>
 #include <SubscriptionResponder.h>
 #include <TerminalResponder.h>
 #include <StatusReporter.h>
@@ -69,17 +69,28 @@ class ROBOT;
 // by node_, so it lives as a ROBOT member (protocol_link_), constructed once
 // and never moved.
 //
-// This robot's node_ is receive-only over ESP-NOW: send() returns false
-// (every real send still goes out through `protocol` / TxScheduler, wired in
-// main.cpp), and open() is the AEAD-open path that used to be
-// handleReceiveStatic's stage two (RadioSeal::open / open_e, fail-closed,
-// classified by channel). seal() / terminal() / has_command() land here as
-// the btp::Node adoption widens (serve_catalog, on_terminal, ...).
+// send() enqueues through the same TxScheduler every other producer already
+// uses (bindProtocolTransport() wires tx_scheduler.configure() before this
+// is ever called -- see main.cpp's setup_system_callbacks()); node_'s own
+// sends (today: MANIFEST_DATA replies, via serve_catalog() -- see
+// bindProtocolTransport()) go out through the exact same radio path as
+// `protocol`'s. seal() seals with RadioSeal::seal (key L, channel C):
+// MANIFEST_REQUEST/DATA is channel C always (only the dongle's own
+// aggregation cache legitimately asks a robot for its manifest -- bally_
+// channels.h), the same single key StatusReporter's STATUS already seals
+// with, so no reply_seal() override is needed. open() is the AEAD-open path
+// that used to be handleReceiveStatic's stage two (RadioSeal::open / open_e,
+// fail-closed, classified by channel). terminal() / has_command() land here
+// if the btp::Node adoption widens further (on_terminal, ...).
 class RobotLink : public btp::NodeConfig {
 public:
     explicit RobotLink(ROBOT& robot) noexcept : robot_(robot) {}
 
     bool send(const std::uint8_t* frame, std::size_t frame_size) override;
+
+    bool has_seal() const noexcept override { return true; }
+    bool seal(const btp::Header& header, std::uint16_t payload_size,
+              const std::uint8_t* plaintext, std::uint8_t* out) override;
 
     bool has_open() const noexcept override { return true; }
     bool open(const btp::Header& header, std::uint16_t sealed_size,
@@ -211,7 +222,6 @@ public:
     BtpEndpoint protocol;
     TxScheduler tx_scheduler;
     CommandProcessor command_processor;
-    ManifestResponder manifest_responder;
     TelemetryPublisher telemetry;
     SubscriptionResponder subscription_responder;
     TerminalResponder terminal_responder;
@@ -367,7 +377,7 @@ private:
     // esp_now_init(), esp_now_add_peer()... all error/warn on a second call).
     bool communication_configured_ = false;
 
-    // 16-byte opaque identity handed to ManifestResponder (topico 16),
+    // 16-byte opaque identity handed to node_->serve_catalog() (topico 16),
     // derived from base_mac in configureProtocolIdentity() -- this robot has
     // no HELLO/session concept over ESP-NOW, so there is no other source for
     // a stable "source_uuid" to put in MANIFEST_DATA.
@@ -378,10 +388,12 @@ private:
     // esp_chip_info(), the running OTA partition and RobotSettings. Entries
     // borrow their strings: app-descriptor fields (static), settings buffers
     // (re-read live, so "settings -set identity ..." needs no reboot), and
-    // slices of source_info_scratch_ for the formatted numbers. Manifest
-    // Responder drops an entry whose value is empty, so an unconfigured
-    // name/description simply does not appear.
-    SourceInfoEntry source_info_entries_[ManifestResponder::kMaxSourceInfoEntries]{};
+    // slices of source_info_scratch_ for the formatted numbers. Copied into
+    // node_'s catalog by populateProtocolCatalog() (ManifestCatalog::
+    // populate() drops an entry whose value is empty, so an unconfigured
+    // name/description simply does not appear).
+    ManifestCatalog::SourceInfoEntry
+        source_info_entries_[ManifestCatalog::kMaxSourceInfoEntries]{};
     std::size_t source_info_count_ = 0U;
     char source_info_scratch_[96]{};
     void buildSourceInfo();
@@ -490,8 +502,6 @@ private:
     bool configureProtocolIdentity();
     void processCommandRequest(const btp::Header& header,
                                btp::ByteView payload, bally::Channel channel);
-    void processManifestRequest(const btp::Header& header,
-                                btp::ByteView payload);
     // Topico 17: CONTROL/SUBSCRIBE and CONTROL/UNSUBSCRIBE, routed the same
     // way processManifestRequest already is (see handleReceiveStatic's
     // object_id switch). `channel` is threaded through the same way
@@ -687,35 +697,60 @@ private:
     // `protocol` via protocol.bind() -- see bindProtocolTransport() -- so
     // there is exactly one sequence counter for this robot's identity, shared
     // by every producer that sends through `protocol` and by whatever this
-    // Node itself would send (it never does: cfg.send is left null, see
-    // bindProtocolTransport()'s comment -- this Node exists to receive and to
-    // own that one Endpoint, nothing else. No session (this robot has no
-    // HELLO/session concept over ESP-NOW -- see SubscriptionResponder.h),
-    // no served/learned catalogue (ManifestResponder keeps answering
-    // MANIFEST_REQUEST by hand -- see its class comment: btp::Catalog cannot
-    // carry a field's unit/description, which the wire manifest still needs).
+    // Node itself sends on its own (today: MANIFEST_DATA replies, via
+    // serve_catalog() -- protocol_link_.send() forwards to the same
+    // TxScheduler `protocol` uses, see RobotLink's own comment). No session
+    // (this robot has no HELLO/session concept over ESP-NOW -- see
+    // SubscriptionResponder.h). Serves its own catalogue (populated once by
+    // populateProtocolCatalog(), fed by TelemetryPublisher::schemas() and
+    // buildSourceInfo()) -- BTP 2.35.0's Catalog::write_source_info() and
+    // 2.39.0's body-only topics (kSystemMonitorTopicId's UTF8 document) are
+    // what let node_->receive() answer CONTROL/MANIFEST_REQUEST entirely by
+    // itself now (NodeRx::RequestServed). ManifestResponder, which used to
+    // hand-encode MANIFEST_DATA because btp::Catalog could carry neither a
+    // field's unit nor a fieldless topic, is gone.
     //
     // Deferred (std::optional, like array_sensor/junkebox/motor_left/... just
     // below): the identity node_ is built on is only known after
     // configureProtocolIdentity(), and bindProtocolTransport() (main.cpp's
-    // setup_system_callbacks(), after init()) is what emplaces it. protocol_link_
-    // itself is a plain member, constructed with the ROBOT -- node_ holds it by
+    // setup_system_callbacks(), after init()) is what emplaces it, populates
+    // the catalogue and calls serve_catalog(). protocol_link_ itself is a
+    // plain member, constructed with the ROBOT -- node_ holds it by
     // reference, so it must outlive node_.
     //
-    // Sizes match RxRouter's own (4 slots, 600 octets, 4000 ms) -- the two
-    // ends of the radio link still need to tolerate the same loss and
-    // reordering. SealBytes/ScratchBytes/Catalog* are still minimal here; the
-    // btp::Node adoption (serve_catalog / publish) grows them.
+    // Slot sizing matches RxRouter's own (4 slots, 600 octets, 4000 ms) -- the
+    // two ends of the radio link still need to tolerate the same loss and
+    // reordering. SealBytes/ScratchBytes hold one built-and-sealed
+    // MANIFEST_DATA (kMaxManifestScratchBytes -- matches ManifestResponder's
+    // old kMaxManifestPayloadSize bound; SealBytes carries the same payload
+    // plus the AEAD tag, so it shares the bound with slack to spare).
+    // Catalog* match ManifestResponder::buildCatalog()'s old bounds (this
+    // robot's schemas today: protocol.test 4 fields, robot.state 1,
+    // system.monitor 0 -- headroom for a third small field-bearing topic).
     static constexpr std::size_t kNodeSlotCount = 4U;
     static constexpr std::size_t kNodeSlotBytes = 600U;
     static constexpr std::uint64_t kNodeReassemblyTimeoutMs = 4000U;
+    static constexpr std::size_t kMaxManifestScratchBytes = 640U;
     RobotLink protocol_link_{*this};
-    std::optional<btp::StaticNode<kNodeSlotCount, kNodeSlotBytes,
-                                  /*SealBytes=*/16U, /*ScratchBytes=*/16U,
-                                  /*CatalogTopics=*/1U, /*CatalogFields=*/1U,
-                                  /*CatalogStringBytes=*/16U,
-                                  /*MaxSubscriptions=*/1U, /*MaxCommands=*/1U,
-                                  /*CommandBytes=*/16U>> node_;
+    std::optional<btp::StaticNode<
+        kNodeSlotCount, kNodeSlotBytes,
+        /*SealBytes=*/kMaxManifestScratchBytes,
+        /*ScratchBytes=*/kMaxManifestScratchBytes,
+        /*CatalogTopics=*/4U,
+        /*CatalogFields=*/ManifestCatalog::kMaxCatalogFields,
+        /*CatalogStringBytes=*/256U,
+        /*MaxSubscriptions=*/1U, /*MaxCommands=*/1U, /*CommandBytes=*/16U,
+        /*CatalogSourceInfo=*/ManifestCatalog::kMaxSourceInfoEntries>>
+        node_;
+
+    // Populates node_->catalog() from TelemetryPublisher::schemas() and
+    // source_info_entries_/source_info_count_ (ManifestCatalog::populate()) --
+    // called once from bindProtocolTransport(), after node_ exists. Logs a
+    // diagnostic on a boot-time schema error (duplicate topic_id, a pool too
+    // small); MANIFEST_DATA itself still describes whatever fit, same
+    // "diagnostic only, not a boot failure" contract ManifestResponder::
+    // catalog_ok() used to have.
+    void populateProtocolCatalog();
 
     // Two tasks touch node_ once it exists, and it holds no lock: receive()
     // from the ESP-NOW receive callback, tick()'s reassembly sweep once a
@@ -726,9 +761,12 @@ private:
     // Classifies one decoded header the same way for both protocolOpen()
     // (which key opens it) and dispatchDecoded() (which key answers it) --
     // one source of truth instead of two copies of channel_of_peer's call.
-    // CONTROL/MANIFEST_REQUEST is deliberately NOT included: only the
-    // dongle's own aggregation cache ever asks a robot for its manifest (see
-    // ManifestResponder's class comment), so it always classifies C_Link.
+    // CONTROL/MANIFEST_REQUEST never reaches dispatchDecoded() at all any
+    // more (node_->receive() answers it internally, NodeRx::RequestServed --
+    // see node_'s own comment); protocolOpen() still classifies it C_Link,
+    // consistent with the same fact that made it channel C by hand before:
+    // only the dongle's own aggregation cache ever asks a robot for its
+    // manifest.
     static bally::Channel classifyChannel(const btp::Header& header,
                                           std::uint32_t dongle_source_id) noexcept;
 

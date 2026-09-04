@@ -335,8 +335,8 @@ void ROBOT::buildSourceInfo() {
 
     std::size_t i = 0U;
     const auto add = [&](const char* key, const char* label, const char* value) {
-        if (i < ManifestResponder::kMaxSourceInfoEntries && value != nullptr) {
-            source_info_entries_[i++] = SourceInfoEntry{key, label, value};
+        if (i < ManifestCatalog::kMaxSourceInfoEntries && value != nullptr) {
+            source_info_entries_[i++] = ManifestCatalog::SourceInfoEntry{key, label, value};
         }
     };
 
@@ -440,21 +440,12 @@ bool ROBOT::configureProtocolIdentity() {
     // without this, bally_dongle's own reply to its own priming request
     // never authenticates, so it can never be told apart from a forged one
     // and ManifestCache never learns this robot's schema while a desktop is
-    // attached (see bally_channels.h's dongle_consumes comment).
+    // attached (see bally_channels.h's dongle_consumes comment). Actually
+    // sealing/serving it is node_'s job now (RobotLink::seal(),
+    // populateProtocolCatalog() / serve_catalog() -- bindProtocolTransport(),
+    // called later, once node_ exists); this only builds the source_info
+    // values, which do not depend on node_.
     buildSourceInfo();
-    manifest_responder.configure(protocol, protocol_uuid_, RadioSeal::seal, nullptr,
-                                 source_info_entries_, source_info_count_);
-    if (!manifest_responder.catalog_ok()) {
-        // configure() derives a btp::Catalog from TelemetryPublisher::
-        // schemas() as a boot-time validity check (order/duplicate topic_id/
-        // pool size) -- MANIFEST_DATA itself is unaffected either way (see
-        // ManifestResponder::catalog_ok()'s comment), so this is diagnostic
-        // only, not a boot failure.
-        ROBOT::logger.insert_log(
-            logType::ERRO,
-            "BTP: TelemetryPublisher::schemas() failed btp::Catalog validation "
-            "(see ManifestResponder::buildCatalog)");
-    }
     // TELEMETRY is channel B (bally_channels.h): TraceView holds key E, the
     // dongle relays the samples and never reads them. Sealed with E so a
     // desktop that has the robot's password is the only thing that can plot
@@ -537,13 +528,26 @@ bool ROBOT::protocolOpen(void* ctx, const btp::Header& header,
     return opened;
 }
 
-// protocol_link_.send() -- this Node never originates a frame itself (no
-// session, no served catalogue, no publish() yet). Every actual send still
-// goes through `protocol` (BtpTransport.h) / TxScheduler, wired in main.cpp's
-// setup_system_callbacks(), exactly as before btp::Node existed.
-bool RobotLink::send(const std::uint8_t* /*frame*/,
-                     std::size_t /*frame_size*/) {
-    return false;
+// protocol_link_.send() -- node_'s own sends (today: MANIFEST_DATA replies,
+// via serve_catalog()) go out through the same TxScheduler `protocol`'s
+// sends do (main.cpp's setup_system_callbacks() configures tx_scheduler
+// before bindProtocolTransport() ever constructs node_/protocol_link_'s
+// live use of it). Sequence numbering does not go through this at all --
+// that is node_'s own btp::Endpoint, shared with `protocol` via
+// protocol.bind() (see node_'s own comment in BallyRobot.h).
+bool RobotLink::send(const std::uint8_t* frame, std::size_t frame_size) {
+    return robot_.tx_scheduler.enqueue(frame, frame_size);
+}
+
+// protocol_link_.seal() -- MANIFEST_DATA is channel C always (bally_channels.h:
+// only the dongle's own aggregation cache legitimately asks a robot for its
+// manifest), so this is the one, single key StatusReporter's STATUS already
+// seals with below in configureProtocolIdentity() -- no per-channel choice
+// to make here (unlike open(), which does classify -- see protocolOpen()
+// below), so no reply_seal() override is needed either.
+bool RobotLink::seal(const btp::Header& header, std::uint16_t payload_size,
+                     const std::uint8_t* plaintext, std::uint8_t* out) {
+    return RadioSeal::seal(nullptr, header, payload_size, plaintext, out);
 }
 
 // protocol_link_.open() -- the old handleReceiveStatic stage two: classify the
@@ -567,10 +571,33 @@ bool ROBOT::bindProtocolTransport() {
     protocol_link_.transport = btp::kEspNowTransport;
 
     node_.emplace(protocol_link_, kNodeReassemblyTimeoutMs);
+    populateProtocolCatalog();
     if (!node_->begin()) return false;
+
+    // arm_and_announce stays false (the default): this robot only ever
+    // ANSWERS a MANIFEST_REQUEST, it never announces unsolicited -- same
+    // reply-only behavior ManifestResponder always had.
+    node_->serve_catalog(ManifestCatalog::kSourceRoleRobot, protocol_uuid_,
+                         "bally_software");
 
     protocol.bind(node_->endpoint());
     return true;
+}
+
+void ROBOT::populateProtocolCatalog() {
+    std::size_t topicCount = 0U;
+    const TelemetryPublisher::TopicSchema* schemas =
+        TelemetryPublisher::schemas(&topicCount);
+    if (!ManifestCatalog::populate(node_->catalog(), schemas, topicCount,
+                                   source_info_entries_, source_info_count_)) {
+        // Diagnostic only, not a boot failure -- MANIFEST_DATA still
+        // describes whatever fit, same contract ManifestResponder::
+        // catalog_ok() used to have.
+        ROBOT::logger.insert_log(
+            logType::ERRO,
+            "BTP: ManifestCatalog::populate() failed to load every schema "
+            "(see TelemetryPublisher::kSchemas / source_info_entries_)");
+    }
 }
 
 bool ROBOT::configureCommunication() {
@@ -1032,8 +1059,12 @@ void ROBOT::handleReceiveStatic(const esp_now_recv_info_t *recv_info, const uint
             }
             break;
         case btp::MessageType::Control:
-            if (header.object_id != ManifestResponder::kManifestRequestObjectId &&
-                header.object_id != SubscriptionResponder::kSubscribeObjectId &&
+            // CONTROL/MANIFEST_REQUEST is deliberately NOT listed here any
+            // more: node_->receive() (above) already answers it by itself
+            // (NodeRx::RequestServed, from node_'s served catalogue -- see
+            // node_'s own comment), so one never reaches this switch as
+            // NodeRx::Complete in normal operation.
+            if (header.object_id != SubscriptionResponder::kSubscribeObjectId &&
                 header.object_id != SubscriptionResponder::kUnsubscribeObjectId) {
                 instance_->command_processor.note_drop();
                 return;
@@ -1071,9 +1102,7 @@ void ROBOT::dispatchDecoded(const btp::Header& header, btp::ByteView payload,
         return;
     }
     if (header.type == btp::MessageType::Control) {
-        if (header.object_id == ManifestResponder::kManifestRequestObjectId) {
-            processManifestRequest(header, payload);
-        } else if (header.object_id == SubscriptionResponder::kSubscribeObjectId) {
+        if (header.object_id == SubscriptionResponder::kSubscribeObjectId) {
             processSubscribeRequest(header, payload, channel);
         } else if (header.object_id == SubscriptionResponder::kUnsubscribeObjectId) {
             processUnsubscribeRequest(header, payload, channel);
@@ -1105,12 +1134,6 @@ void ROBOT::processCommandRequest(const btp::Header& header,
             command_processor.send_result(result);
         }
     }
-}
-
-void ROBOT::processManifestRequest(const btp::Header& header,
-                                   btp::ByteView payload) {
-    const uint64_t now_us = static_cast<uint64_t>(esp_timer_get_time());
-    manifest_responder.handle_request(header, payload, now_us);
 }
 
 void ROBOT::processSubscribeRequest(const btp::Header& header, btp::ByteView payload,

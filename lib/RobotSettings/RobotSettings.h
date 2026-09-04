@@ -186,7 +186,7 @@ public:
      * Exists so a remote client can tell "has this robot's configuration
      * changed since I last looked" without re-reading all ~55 keys of
      * "settings -list_all" to diff them itself. Deliberately NOT wired into
-     * ManifestResponder::kConfigRevision: that field's documented meaning is
+     * ManifestCatalog::kConfigRevision: that field's documented meaning is
      * "has the published topic/schema catalog changed" (BTP/docs/commands.md
      * section 3), which is genuinely fixed at compile time in this firmware
      * -- repurposing a wire field to mean something else would be a protocol
