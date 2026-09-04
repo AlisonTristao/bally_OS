@@ -96,6 +96,20 @@ public:
     bool open(const btp::Header& header, std::uint16_t sealed_size,
               const std::uint8_t* sealed, std::uint8_t* out_plaintext) override;
 
+    // TERMINAL_IN ingestion moves here (library 2.16+'s Node::terminal_thunk,
+    // wired automatically by the Node constructor once has_terminal() is
+    // true) -- this is the SAME cheap, RX-task-only buffering
+    // TerminalResponder::on_terminal_in() already documents itself as
+    // ("only buffers bytes, never runs the editor"), just reached through
+    // node_->receive() (NodeRx::TerminalDelivered) instead of the object_id
+    // switch in handleReceiveStatic()/dispatchDecoded(). TERMINAL_OUT is
+    // never received here (this robot only ever SENDS it), but a check on
+    // header.object_id guards it anyway, same as NodeTerminalFn's own
+    // "check header.object_id if this node only expects one" comment.
+    bool has_terminal() const noexcept override { return true; }
+    void terminal(btp::Node& node, const btp::Header& header, btp::ByteView payload,
+                  std::uint64_t now_ms) override;
+
 private:
     ROBOT& robot_;
 };

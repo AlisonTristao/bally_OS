@@ -560,6 +560,18 @@ bool RobotLink::open(const btp::Header& header, std::uint16_t sealed_size,
                                out_plaintext);
 }
 
+// protocol_link_.terminal() -- node_->receive() calls this for TERMINAL_IN
+// (and would for TERMINAL_OUT, which this robot only ever sends, never
+// receives; the object_id check is the same defensive habit
+// classifyChannel()'s own object_id switches already follow). Forwards
+// straight to TerminalResponder::on_terminal_in(), unchanged: still just
+// buffering bytes on the Wi-Fi RX task, never running the editor.
+void RobotLink::terminal(btp::Node& /*node*/, const btp::Header& header,
+                         btp::ByteView payload, std::uint64_t /*now_ms*/) {
+    if (header.object_id != TerminalResponder::kTerminalInObjectId) return;
+    robot_.terminal_responder.on_terminal_in(header, payload);
+}
+
 bool ROBOT::bindProtocolTransport() {
     // protocol_link_ is a plain member (node_ holds it by reference): identity
     // is the only thing not known until configureProtocolIdentity() ran, so it
@@ -1071,14 +1083,13 @@ void ROBOT::handleReceiveStatic(const esp_now_recv_info_t *recv_info, const uint
             }
             break;
         case btp::MessageType::Terminal:
-            // TERMINAL_IN is the interactive shell channel (topico 19bis):
-            // TraceView -> hub -> here, server-side line editing in
-            // TerminalResponder, output mirrored back as TERMINAL_OUT.
-            if (header.object_id != TerminalResponder::kTerminalInObjectId) {
-                instance_->command_processor.note_drop();
-                return;
-            }
-            break;
+            // TERMINAL_IN never reaches here as NodeRx::Complete any more:
+            // node_->receive() answers it directly (NodeRx::TerminalDelivered
+            // -> RobotLink::terminal() -> TerminalResponder::on_terminal_in(),
+            // still the same RX-task-only buffering, just reached through
+            // Node instead of this switch). This case exists only so the
+            // switch stays exhaustive; landing here at all means has_terminal()
+            // somehow answered false, a programming error, not a normal drop.
         case btp::MessageType::Telemetry:
         case btp::MessageType::Log:
         case btp::MessageType::Invalid:
@@ -1095,12 +1106,8 @@ void ROBOT::handleReceiveStatic(const esp_now_recv_info_t *recv_info, const uint
 // unreachable in practice but kept as a safe no-op rather than an assert.
 void ROBOT::dispatchDecoded(const btp::Header& header, btp::ByteView payload,
                            bally::Channel channel) {
-    if (header.type == btp::MessageType::Terminal) {
-        // Runs on the Wi-Fi RX task: TerminalResponder only buffers the bytes
-        // here; runComms() drives the editor and runShell() the command.
-        terminal_responder.on_terminal_in(header, payload);
-        return;
-    }
+    // MessageType::Terminal is handled before this is ever called now --
+    // see handleReceiveStatic()'s own comment on that case.
     if (header.type == btp::MessageType::Control) {
         if (header.object_id == SubscriptionResponder::kSubscribeObjectId) {
             processSubscribeRequest(header, payload, channel);
