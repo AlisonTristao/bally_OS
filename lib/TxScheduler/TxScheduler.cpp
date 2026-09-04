@@ -49,7 +49,7 @@ bool TxScheduler::enqueue(const std::uint8_t* data, std::size_t size) noexcept {
     }
 
     btp::DecodedFrame decoded{};
-    if (btp::decode(data, size, btp::TransportProfile::EspNow, &decoded) !=
+    if (btp::decode(data, size, btp::kEspNowTransport, &decoded) !=
         btp::Error::Ok) {
         dropped_.fetch_add(1U, std::memory_order_relaxed);
         return false;

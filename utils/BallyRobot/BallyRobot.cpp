@@ -537,31 +537,36 @@ bool ROBOT::protocolOpen(void* ctx, const btp::Header& header,
     return opened;
 }
 
-bool ROBOT::bindProtocolTransport() {
-    btp::NodeConfig cfg{};
-    cfg.source_id = protocol_source_id_;
-    cfg.boot_id = protocol_boot_id_;
-    cfg.transport = btp::TransportProfile::EspNow;
-    // Left null on purpose: this Node never sends anything itself (no
-    // session, no served catalogue, no publish() -- see node_'s own
-    // comment). Every actual send still goes through `protocol`
-    // (BtpTransport.h), which TxScheduler is wired to separately in
-    // main.cpp's setup_system_callbacks(), same as before this existed.
-    cfg.send = nullptr;
-    cfg.send_ctx = nullptr;
-    // nullptr -> receive() / tick() take an explicit now_ms, same as every
-    // call site below already passes esp_timer_get_time()-derived values.
-    cfg.clock = nullptr;
-    cfg.clock_ctx = nullptr;
-    // Unused: this Node never sends (see cfg.send above).
-    cfg.seal = nullptr;
-    cfg.seal_ctx = nullptr;
-    cfg.open = &protocolOpen;
-    cfg.open_ctx = this;
-    cfg.reply_seal = nullptr;
-    cfg.reply_seal_ctx = nullptr;
+// protocol_link_.send() -- this Node never originates a frame itself (no
+// session, no served catalogue, no publish() yet). Every actual send still
+// goes through `protocol` (BtpTransport.h) / TxScheduler, wired in main.cpp's
+// setup_system_callbacks(), exactly as before btp::Node existed.
+bool RobotLink::send(const std::uint8_t* /*frame*/,
+                     std::size_t /*frame_size*/) {
+    return false;
+}
 
-    node_.emplace(cfg, kNodeReassemblyTimeoutMs);
+// protocol_link_.open() -- the old handleReceiveStatic stage two: classify the
+// reassembled frame to a channel by its cleartext source_id, then open under
+// RadioSeal::open (key L, channel C) or open_e (key E, channel B), both
+// fail-closed. ROBOT::protocolOpen holds that single copy of the logic.
+bool RobotLink::open(const btp::Header& header, std::uint16_t sealed_size,
+                     const std::uint8_t* sealed, std::uint8_t* out_plaintext) {
+    return ROBOT::protocolOpen(&robot_, header, sealed_size, sealed,
+                               out_plaintext);
+}
+
+bool ROBOT::bindProtocolTransport() {
+    // protocol_link_ is a plain member (node_ holds it by reference): identity
+    // is the only thing not known until configureProtocolIdentity() ran, so it
+    // is filled in here, right before node_ is emplaced. clock() is left
+    // unimplemented -- receive() / tick() take an explicit esp_timer-derived
+    // now_ms at every call site.
+    protocol_link_.source_id = protocol_source_id_;
+    protocol_link_.boot_id = protocol_boot_id_;
+    protocol_link_.transport = btp::kEspNowTransport;
+
+    node_.emplace(protocol_link_, kNodeReassemblyTimeoutMs);
     if (!node_->begin()) return false;
 
     protocol.bind(node_->endpoint());

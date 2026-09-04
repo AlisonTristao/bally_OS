@@ -25,7 +25,7 @@ std::vector<std::string> g_sent;  // decoded TERMINAL_OUT payloads, in order
 
 bool capture_send(const std::uint8_t* data, std::size_t size) {
     btp::DecodedFrame frame{};
-    if (btp::decode(data, size, btp::TransportProfile::EspNow, &frame) != btp::Error::Ok) {
+    if (btp::decode(data, size, btp::kEspNowTransport, &frame) != btp::Error::Ok) {
         return false;
     }
     if (frame.header.type != btp::MessageType::Terminal ||

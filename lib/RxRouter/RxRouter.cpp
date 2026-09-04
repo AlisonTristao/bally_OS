@@ -35,7 +35,7 @@ Router::Router() noexcept
       storage_(),
       storage_views_(make_storage_views(storage_)),
       receiver_(slots_, storage_views_.data(), kSlotCount, kReassemblyTimeoutMs,
-                btp::TransportProfile::EspNow) {}
+                btp::kEspNowTransport) {}
 
 bool Router::valid() const noexcept { return receiver_.valid(); }
 

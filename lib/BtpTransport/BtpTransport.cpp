@@ -58,11 +58,11 @@ bool BtpEndpoint::send_logical(btp::MessageType type, std::uint16_t object_id,
     void* const send_context = send_context_.load(std::memory_order_acquire);
 
     if (seal == nullptr) {
-        return active_->send_logical(message, btp::TransportProfile::EspNow,
+        return active_->send_logical(message, btp::kEspNowTransport,
                                      send, send_context, nullptr, 0U);
     }
     std::uint8_t scratch[kMaxLogicalPayloadSize + kAeadTagSize];
-    return active_->send_logical(message, btp::TransportProfile::EspNow,
+    return active_->send_logical(message, btp::kEspNowTransport,
                                  send, send_context, scratch,
                                  sizeof(scratch), seal, seal_context);
 }
@@ -82,12 +82,12 @@ bool BtpEndpoint::send_logical_reserved(btp::MessageType type,
 
     if (seal == nullptr) {
         return active_->send_logical_reserved(
-            sequence, message, btp::TransportProfile::EspNow, send, send_context,
+            sequence, message, btp::kEspNowTransport, send, send_context,
             nullptr, 0U);
     }
     std::uint8_t scratch[kMaxLogicalPayloadSize + kAeadTagSize];
     return active_->send_logical_reserved(
-        sequence, message, btp::TransportProfile::EspNow, send, send_context,
+        sequence, message, btp::kEspNowTransport, send, send_context,
         scratch, sizeof(scratch), seal, seal_context);
 }
 
@@ -104,7 +104,7 @@ bool BtpEndpoint::encode_fragment(btp::MessageType type, std::uint16_t object_id
                                   void* seal_context) const noexcept {
     return active_->encode_fragment(
         make_logical(type, object_id, payload, payload_size, timestamp_us),
-        btp::TransportProfile::EspNow, sequence, fragment_index, fragment_count,
+        btp::kEspNowTransport, sequence, fragment_index, fragment_count,
         output, output_capacity, bytes_written, seal, seal_context);
 }
 
@@ -118,7 +118,7 @@ bool BtpEndpoint::send_fragment(btp::MessageType type, std::uint16_t object_id,
                                 void* seal_context) const noexcept {
     return active_->send_fragment(
         make_logical(type, object_id, payload, payload_size, timestamp_us),
-        btp::TransportProfile::EspNow, sequence, fragment_index, fragment_count,
+        btp::kEspNowTransport, sequence, fragment_index, fragment_count,
         send_callback_.load(std::memory_order_acquire),
         send_context_.load(std::memory_order_acquire), seal, seal_context);
 }
@@ -126,7 +126,7 @@ bool BtpEndpoint::send_fragment(btp::MessageType type, std::uint16_t object_id,
 bool BtpEndpoint::send_encoded(const std::uint8_t* frame,
                                std::size_t frame_size) const noexcept {
     return active_->send_encoded(
-        frame, frame_size, btp::TransportProfile::EspNow,
+        frame, frame_size, btp::kEspNowTransport,
         send_callback_.load(std::memory_order_acquire),
         send_context_.load(std::memory_order_acquire));
 }

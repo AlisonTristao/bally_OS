@@ -61,6 +61,34 @@
 
 #include <SystemMonitor.h>
 
+class ROBOT;
+
+// The btp::NodeConfig this robot's node_ is built on. btp::NodeConfig became
+// an abstract class (BTP library 2.34.0): the identity is plain data, every
+// external dependency a virtual method Node calls through. Held BY REFERENCE
+// by node_, so it lives as a ROBOT member (protocol_link_), constructed once
+// and never moved.
+//
+// This robot's node_ is receive-only over ESP-NOW: send() returns false
+// (every real send still goes out through `protocol` / TxScheduler, wired in
+// main.cpp), and open() is the AEAD-open path that used to be
+// handleReceiveStatic's stage two (RadioSeal::open / open_e, fail-closed,
+// classified by channel). seal() / terminal() / has_command() land here as
+// the btp::Node adoption widens (serve_catalog, on_terminal, ...).
+class RobotLink : public btp::NodeConfig {
+public:
+    explicit RobotLink(ROBOT& robot) noexcept : robot_(robot) {}
+
+    bool send(const std::uint8_t* frame, std::size_t frame_size) override;
+
+    bool has_open() const noexcept override { return true; }
+    bool open(const btp::Header& header, std::uint16_t sealed_size,
+              const std::uint8_t* sealed, std::uint8_t* out_plaintext) override;
+
+private:
+    ROBOT& robot_;
+};
+
 /**
  * @brief Non-blocking, periodic sample scheduler. Originally built for the
  * "debug" shell module's per-sensor tests (test_arr_sensor, test_encoder,
@@ -119,6 +147,10 @@ private:
 };
 
 class ROBOT {
+    // protocol_link_ (node_'s btp::NodeConfig) forwards open() into
+    // ROBOT::protocolOpen -- the one copy of the classify-then-RadioSeal logic.
+    friend class RobotLink;
+
 public:
     // singleton pattern
     // getInstance returns a reference to the single instance of the ROBOT class
@@ -664,23 +696,26 @@ private:
     // carry a field's unit/description, which the wire manifest still needs).
     //
     // Deferred (std::optional, like array_sensor/junkebox/motor_left/... just
-    // below): btp::NodeConfig bakes send/seal/identity in at construction, and
-    // send needs TxScheduler configured first, which only happens in
-    // main.cpp's setup_system_callbacks() -- after init() returns. Same
-    // reason `protocol` cannot own its send callback until then either
-    // (unchanged: still a late-bound atomic there).
+    // below): the identity node_ is built on is only known after
+    // configureProtocolIdentity(), and bindProtocolTransport() (main.cpp's
+    // setup_system_callbacks(), after init()) is what emplaces it. protocol_link_
+    // itself is a plain member, constructed with the ROBOT -- node_ holds it by
+    // reference, so it must outlive node_.
     //
     // Sizes match RxRouter's own (4 slots, 600 octets, 4000 ms) -- the two
     // ends of the radio link still need to tolerate the same loss and
-    // reordering. SealBytes/ScratchBytes/Catalog* are unused (this Node never
-    // calls send()/send_with()/publish()/serve_catalog()) and kept minimal.
+    // reordering. SealBytes/ScratchBytes/Catalog* are still minimal here; the
+    // btp::Node adoption (serve_catalog / publish) grows them.
     static constexpr std::size_t kNodeSlotCount = 4U;
     static constexpr std::size_t kNodeSlotBytes = 600U;
     static constexpr std::uint64_t kNodeReassemblyTimeoutMs = 4000U;
+    RobotLink protocol_link_{*this};
     std::optional<btp::StaticNode<kNodeSlotCount, kNodeSlotBytes,
                                   /*SealBytes=*/16U, /*ScratchBytes=*/16U,
                                   /*CatalogTopics=*/1U, /*CatalogFields=*/1U,
-                                  /*CatalogStringBytes=*/16U>> node_;
+                                  /*CatalogStringBytes=*/16U,
+                                  /*MaxSubscriptions=*/1U, /*MaxCommands=*/1U,
+                                  /*CommandBytes=*/16U>> node_;
 
     // Two tasks touch node_ once it exists, and it holds no lock: receive()
     // from the ESP-NOW receive callback, tick()'s reassembly sweep once a

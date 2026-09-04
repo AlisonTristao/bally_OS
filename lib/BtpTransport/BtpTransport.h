@@ -57,7 +57,7 @@ constexpr std::size_t kBtpAeadTagSize = btp::kEndpointAeadTagSize;
 //     because the native tests install a bare `bool(*)(bytes, size)` capture.
 //   * the ESP-NOW-only shape. Every frame this robot originates is a channel-C
 //     or channel-B ESP-NOW datagram, so the wrappers below pin
-//     btp::TransportProfile::EspNow and keep the old positional
+//     btp::kEspNowTransport and keep the old positional
 //     (type, object_id, ...) signatures, so CommandProcessor / TelemetryPublisher
 //     / StatusReporter / ManifestResponder / SubscriptionResponder / Logger /
 //     TerminalResponder are untouched.

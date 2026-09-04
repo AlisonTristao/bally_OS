@@ -132,7 +132,7 @@ std::vector<std::uint8_t> send_and_reassemble(BtpEndpoint& endpoint,
         TEST_ASSERT_EQUAL_UINT8(
             static_cast<std::uint8_t>(btp::Error::Ok),
             static_cast<std::uint8_t>(btp::decode(
-                sent_frames[i], sent_sizes[i], btp::TransportProfile::EspNow,
+                sent_frames[i], sent_sizes[i], btp::kEspNowTransport,
                 &decoded)));
         TEST_ASSERT_EQUAL(static_cast<int>(btp::MessageType::Control),
                           static_cast<int>(decoded.header.type));
@@ -569,7 +569,7 @@ void test_reply_is_sealed_when_configured_with_a_seal_function() {
     TEST_ASSERT_EQUAL_UINT8(
         static_cast<std::uint8_t>(btp::Error::Ok),
         static_cast<std::uint8_t>(btp::decode(
-            sent_frames[0], sent_sizes[0], btp::TransportProfile::EspNow, &decoded)));
+            sent_frames[0], sent_sizes[0], btp::kEspNowTransport, &decoded)));
     TEST_ASSERT_TRUE((decoded.header.flags & btp::kFlagEncrypted) != 0U);
     // 0x11 is fake_seal's tag marker -- proves handle_request actually routed
     // the payload through the configured seal function instead of sending it

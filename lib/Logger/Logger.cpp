@@ -783,7 +783,7 @@ void Logger::register_shell_commands(TinyShell& shell, SDCard& sd_card, RobotSet
 
             btp::DecodedFrame decoded{};
             if (btp::decode(frame, frame_size,
-                            btp::TransportProfile::EspNow,
+                            btp::kEspNowTransport,
                             &decoded) != btp::Error::Ok ||
                 decoded.header.type != btp::MessageType::Log) {
                 success = false;

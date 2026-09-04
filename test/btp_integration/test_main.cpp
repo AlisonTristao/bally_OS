@@ -143,7 +143,7 @@ void test_canonical_command_request_is_fully_parsed() {
     TEST_ASSERT_EQUAL_UINT8(
         static_cast<std::uint8_t>(btp::Error::Ok),
         static_cast<std::uint8_t>(btp::decode(
-            bytes.data(), bytes.size(), btp::TransportProfile::Serial,
+            bytes.data(), bytes.size(), btp::kSerialTransport,
             &decoded)));
 
     btp_command::RequestView request{};
@@ -165,7 +165,7 @@ void test_canonical_crc_failure_is_rejected() {
     TEST_ASSERT_EQUAL_UINT8(
         static_cast<std::uint8_t>(btp::Error::CrcMismatch),
         static_cast<std::uint8_t>(btp::decode(
-            bytes.data(), bytes.size(), btp::TransportProfile::EspNow,
+            bytes.data(), bytes.size(), btp::kEspNowTransport,
             &decoded)));
 }
 
@@ -177,7 +177,7 @@ void test_telemetry_can_never_become_a_command() {
     TEST_ASSERT_EQUAL_UINT8(
         static_cast<std::uint8_t>(btp::Error::Ok),
         static_cast<std::uint8_t>(btp::decode(
-            bytes.data(), bytes.size(), btp::TransportProfile::EspNow,
+            bytes.data(), bytes.size(), btp::kEspNowTransport,
             &decoded)));
 
     btp_command::RequestView request{};
@@ -234,12 +234,12 @@ void test_endpoint_fragments_with_one_shared_sequence_and_exact_sizes() {
     TEST_ASSERT_EQUAL_UINT8(
         static_cast<std::uint8_t>(btp::Error::Ok),
         static_cast<std::uint8_t>(btp::decode(
-            sent_frames[0], sent_sizes[0], btp::TransportProfile::EspNow,
+            sent_frames[0], sent_sizes[0], btp::kEspNowTransport,
             &first)));
     TEST_ASSERT_EQUAL_UINT8(
         static_cast<std::uint8_t>(btp::Error::Ok),
         static_cast<std::uint8_t>(btp::decode(
-            sent_frames[1], sent_sizes[1], btp::TransportProfile::EspNow,
+            sent_frames[1], sent_sizes[1], btp::kEspNowTransport,
             &second)));
     TEST_ASSERT_EQUAL_UINT32(first.header.sequence, second.header.sequence);
     TEST_ASSERT_EQUAL_UINT8(0U, first.header.fragment_index);
@@ -291,7 +291,7 @@ void test_protocol_test_matches_canonical_vector_and_origin_timestamp() {
     TEST_ASSERT_EQUAL_UINT8(
         static_cast<std::uint8_t>(btp::Error::Ok),
         static_cast<std::uint8_t>(btp::decode(
-            sent_frames[0], sent_sizes[0], btp::TransportProfile::EspNow,
+            sent_frames[0], sent_sizes[0], btp::kEspNowTransport,
             &decoded)));
     TEST_ASSERT_EQUAL_UINT64(1000000U, decoded.header.timestamp_us);
     TEST_ASSERT_EQUAL_HEX8(0x00U, decoded.payload.data[6]);
@@ -416,7 +416,7 @@ void test_large_sealed_monitor_fragments_and_reassembles() {
         static_cast<std::uint8_t>(btp::fragment_count(
             TelemetryPublisher::kMaxSystemMonitorPayloadSize +
                 BtpEndpoint::kAeadTagSize,
-            btp::TransportProfile::EspNow, &expected_fragments)));
+            btp::kEspNowTransport, &expected_fragments)));
     TEST_ASSERT_TRUE(expected_fragments > 1U);
     TEST_ASSERT_TRUE(expected_fragments <= kMaxCapturedFrames);
 
@@ -430,7 +430,7 @@ void test_large_sealed_monitor_fragments_and_reassembles() {
         TEST_ASSERT_EQUAL_UINT8(
             static_cast<std::uint8_t>(btp::Error::Ok),
             static_cast<std::uint8_t>(btp::decode(
-                sent_frames[i], sent_sizes[i], btp::TransportProfile::EspNow,
+                sent_frames[i], sent_sizes[i], btp::kEspNowTransport,
                 &decoded[i])));
         TEST_ASSERT_EQUAL_HEX16(TelemetryPublisher::kSystemMonitorTopicId,
                                 decoded[i].header.object_id);
@@ -487,7 +487,7 @@ void test_monitor_and_numeric_samples_both_flush() {
         TEST_ASSERT_EQUAL_UINT8(
             static_cast<std::uint8_t>(btp::Error::Ok),
             static_cast<std::uint8_t>(btp::decode(
-                sent_frames[i], sent_sizes[i], btp::TransportProfile::EspNow,
+                sent_frames[i], sent_sizes[i], btp::kEspNowTransport,
                 &frame)));
         if (frame.header.object_id == TelemetryPublisher::kSystemMonitorTopicId) {
             saw_monitor = true;
@@ -545,7 +545,7 @@ void test_duplicate_command_executes_once_and_replays_exact_result() {
     TEST_ASSERT_EQUAL_UINT8(
         static_cast<std::uint8_t>(btp::Error::Ok),
         static_cast<std::uint8_t>(btp::decode(
-            sent_frames[0], sent_sizes[0], btp::TransportProfile::EspNow,
+            sent_frames[0], sent_sizes[0], btp::kEspNowTransport,
             &decoded)));
     TEST_ASSERT_EQUAL_HEX16(CommandProcessor::kCommandResultObjectId,
                             decoded.header.object_id);
@@ -591,7 +591,7 @@ void test_channel_b_reply_is_sealed_with_endpoint_key_not_link_key() {
     TEST_ASSERT_EQUAL_UINT8(
         static_cast<std::uint8_t>(btp::Error::Ok),
         static_cast<std::uint8_t>(btp::decode(
-            sent_frames[0], sent_sizes[0], btp::TransportProfile::EspNow,
+            sent_frames[0], sent_sizes[0], btp::kEspNowTransport,
             &decoded)));
     TEST_ASSERT_TRUE((decoded.header.flags & btp::kFlagEncrypted) != 0U);
     // The whole tag is 0x22 (fake_seal_endpoint's marker); 0x11 here would
@@ -784,7 +784,7 @@ void test_full_telemetry_queue_cannot_block_command_result() {
     TEST_ASSERT_EQUAL_UINT8(
         static_cast<std::uint8_t>(btp::Error::Ok),
         static_cast<std::uint8_t>(btp::decode(
-            sent_frames[0], sent_sizes[0], btp::TransportProfile::EspNow,
+            sent_frames[0], sent_sizes[0], btp::kEspNowTransport,
             &sent)));
     TEST_ASSERT_EQUAL_UINT8(
         static_cast<std::uint8_t>(btp::MessageType::Command),
@@ -882,7 +882,7 @@ btp::DecodedFrame decode_only_frame() {
     TEST_ASSERT_EQUAL_UINT8(
         static_cast<std::uint8_t>(btp::Error::Ok),
         static_cast<std::uint8_t>(btp::decode(sent_frames[0], sent_sizes[0],
-                                              btp::TransportProfile::EspNow,
+                                              btp::kEspNowTransport,
                                               &decoded)));
     return decoded;
 }
