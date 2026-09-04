@@ -108,8 +108,9 @@ public:
     // system.monitor telemetry document
     // (TelemetryPublisher::kMaxSystemMonitorPayloadSize) -- a fragmented
     // COMMAND_RESULT / STATUS / MANIFEST_DATA never gets close.
-    // RxRouter::kMaxPayloadSize and btp_command::kMaxLogicalRequestSize are
-    // independent receive / command bounds and are NOT tied to this one.
+    // node_'s own receive-slot capacity (kNodeSlotBytes, BallyRobot.h) and
+    // btp_command::kMaxLogicalRequestSize are independent receive / command
+    // bounds and are NOT tied to this one.
     static constexpr std::size_t kMaxLogicalPayloadSize = 1920U;
 
     void set_send_callback(SendCallback callback) noexcept;

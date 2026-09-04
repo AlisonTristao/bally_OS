@@ -550,9 +550,9 @@ private:
 
     // "link"/"telemetry"/"sec": the radio, the protocol and the keys, read
     // from the shell. All three stay here for one reason: every library they
-    // touch (TxScheduler, RxRouter, CommandProcessor, TelemetryPublisher,
-    // KeyStore) is compiled by env:native for its unit suite, where TinyShell
-    // does not exist -- see BallyRobotShell.cpp's header comment.
+    // touch (TxScheduler, CommandProcessor, TelemetryPublisher, KeyStore) is
+    // compiled by env:native for its unit suite, where TinyShell does not
+    // exist -- see BallyRobotShell.cpp's header comment.
     void registerLinkCommands();
     void registerTelemetryCommands();
     void registerSecurityCommands();
@@ -705,9 +705,10 @@ private:
         kCommandQueueLength * sizeof(QueuedCommand)]{};
 
     // Receive pipeline: decode + CRC + reassembly + AEAD open, all now
-    // btp::Node's job (library 2.16.0+; RxRouter's decode/reassemble half and
-    // handleReceiveStatic's manual RadioSeal::open/open_e half both moved in
-    // here). Node also lends its btp::Endpoint (node_->endpoint()) to
+    // btp::Node's job (library 2.16.0+; RxRouter -- the thin wrapper this
+    // used to be, now deleted -- and handleReceiveStatic's manual
+    // RadioSeal::open/open_e half both moved in here). Node also lends its
+    // btp::Endpoint (node_->endpoint()) to
     // `protocol` via protocol.bind() -- see bindProtocolTransport() -- so
     // there is exactly one sequence counter for this robot's identity, shared
     // by every producer that sends through `protocol` and by whatever this
@@ -732,10 +733,10 @@ private:
     // plain member, constructed with the ROBOT -- node_ holds it by
     // reference, so it must outlive node_.
     //
-    // Slot sizing matches RxRouter's own (4 slots, 600 octets, 4000 ms) -- the
-    // two ends of the radio link still need to tolerate the same loss and
-    // reordering. SealBytes/ScratchBytes hold one built-and-sealed
-    // MANIFEST_DATA (kMaxManifestScratchBytes -- matches ManifestResponder's
+    // Slot sizing (4 slots, 600 octets, 4000 ms) is unchanged from before
+    // RxRouter existed -- the two ends of the radio link still need to
+    // tolerate the same loss and reordering. SealBytes/ScratchBytes hold one
+    // built-and-sealed MANIFEST_DATA (kMaxManifestScratchBytes -- matches ManifestResponder's
     // old kMaxManifestPayloadSize bound; SealBytes carries the same payload
     // plus the AEAD tag, so it shares the bound with slack to spare).
     // Catalog* match ManifestResponder::buildCatalog()'s old bounds (this
@@ -768,9 +769,9 @@ private:
 
     // Two tasks touch node_ once it exists, and it holds no lock: receive()
     // from the ESP-NOW receive callback, tick()'s reassembly sweep once a
-    // second from routine() via publishStatus(). Same tolerated single-
-    // writer-ish pattern RxRouter::Router documented; the worst case is
-    // unchanged too.
+    // second from routine() via publishStatus(). Tolerated single-writer-ish
+    // race, unchanged from before RxRouter existed and this was already the
+    // shape.
 
     // Classifies one decoded header the same way for both protocolOpen()
     // (which key opens it) and dispatchDecoded() (which key answers it) --

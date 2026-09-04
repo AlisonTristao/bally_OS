@@ -26,9 +26,8 @@ Este projeto implementa o controle de um robô baseado em ESP32-S3, utilizando a
 - **Format**: Header-only, sem dependências — formatação de tamanhos em bytes (`"12.34 MB"`) reaproveitada por SDCard, USBMassStorage e Logger.
 - **HBridge**: Controle dos motores via ponte H, incluindo direção e PWM.
 - **BtpTransport**: Endpoint BTP v1 com identidade de boot e sequência atômica. O pipeline seal → fragment → encode é o `btp::Endpoint` da lib BTP (2.7.0); o que fica aqui é o callback de envio (o `TxScheduler`) e o perfil ESP-NOW.
-- **RxRouter**: O caminho de recepção — `btp::decode` + CRC + reassembly — é o `btp::Receiver` da lib BTP (2.8.0); o que fica aqui é o buffer de saída de tamanho fixo e o `switch` de roteamento no `ROBOT`.
 - **CommandProcessor**: Valida `COMMAND_REQUEST`, executa cada intenção uma vez e reproduz o mesmo `COMMAND_RESULT` correlacionado nos retries. A deduplicação por boot (cache em anel, high-water mark por requester) é o `btp::DedupCache` da lib BTP (2.6.0); o que fica aqui é executar a ação, selar/enviar a resposta e escolher as capacidades.
-- **ManifestResponder**: Responde `CONTROL/MANIFEST_REQUEST` descrevendo os schemas estáticos de `TelemetryPublisher` (`protocol.test`, `robot.state`, `system.monitor`) como `MANIFEST_DATA`; `config_revision` é uma constante por build e é incrementada quando o catálogo muda.
+- **ManifestCatalog**: Carrega os schemas estáticos de `TelemetryPublisher` (`protocol.test`, `robot.state`, `system.monitor`) e o `source_info` no `btp::Catalog` que `node_` serve — quem responde `CONTROL/MANIFEST_REQUEST` de verdade é o próprio `node_->receive()` (`btp::Node::serve_catalog`, BTP 2.35.0+2.39.0); `config_revision` é uma constante por build e é incrementada quando o catálogo muda.
 - **TxScheduler**: Filas estáticas separadas e FIFO por classe; transmite `COMMAND_RESULT > STATUS > LOG` crítico `> TELEMETRY > DEBUG`, com um único envio ESP-NOW pendente e contadores de aceite, entrega, timeout e drop.
 - **Logger**: Ring de eventos em PSRAM; emite exclusivamente frames `LOG` BTP de tamanho real via ESP-NOW.
 - **TelemetryPublisher**: Fila SPSC estática e não bloqueante para as amostras numéricas (`protocol.test` em `PACKED_LE` a até 50 Hz, `robot.state` nas transições); o documento `system.monitor` em `UTF8` (padrão de 0,33 Hz, configurável por assinatura até 1 Hz) é grande e de baixa taxa, então usa um slot de staging próprio, fora da fila. Todos preservam o timestamp da coleta.
@@ -135,7 +134,7 @@ Alguns módulos de shell moram no próprio `ROBOT` (`registerSystemCommands`/`re
 - **`debug`** (`test_arr_sensor`/`test_encoder`): o agendamento e o *gate* (estado DEBUG + USB ocioso) são aplicados uniformemente sobre vários sensores a partir de estado privado do `ROBOT`, não pertencem a nenhum sensor individual.
 - **`sys`** (identidade, saúde e ciclo de vida): cruza `esp_system`, `esp_ota_ops`, `BtpEndpoint`, `SystemMonitor` e `StateMachine` de uma vez; nenhuma lib isolada responde "quem sou eu e como estou".
 - **`job`** (comandos agendados + script do SD): o `JobScheduler` é propositalmente livre de TinyShell para ser testável no host, e o executor de script precisa do cartão SD e da fila de comandos, que são do `ROBOT`.
-- **`link`/`telemetry`/`sec`** (rádio, protocolo e chaves): todas as libs que eles leem — `TxScheduler`, `RxRouter`, `CommandProcessor`, `TelemetryPublisher`, `KeyStore` — são compiladas pelo `env:native`, onde o TinyShell não existe. Registrar do lado do `ROBOT` é o que mantém `pio test -e native` de pé.
+- **`link`/`telemetry`/`sec`** (rádio, protocolo e chaves): todas as libs que eles leem — `TxScheduler`, `CommandProcessor`, `TelemetryPublisher`, `KeyStore` — são compiladas pelo `env:native`, onde o TinyShell não existe. Registrar do lado do `ROBOT` é o que mantém `pio test -e native` de pé.
 
 Sobre `motion`: o `drive` recebe **comando normalizado (-100..100), não m/s**. Este firmware não tem modelo de motor calibrado — `EKF_K_R`/`EKF_K_L` são 1.0 de placeholder e `control_input[]` é PWM cru (ver `sampleEKF`), então converter metro por segundo em duty seria unidade inventada. A mistura diferencial é real; só a escala não é calibrada, e `motion -limits` diz isso no output.
 
@@ -145,7 +144,7 @@ Sobre `motion`: o `drive` recebe **comando normalizado (-100..100), não m/s**. 
 
 Sobre `link -reset_stats`: ele **não zera contador nenhum**. Os contadores do `CONTROL/STATUS` são normativamente monotônicos desde o boot (commands.md seção 5), e zerá-los faria qualquer consumidor que calcula delta ver um valor negativo. O comando marca um ponto zero e o `link -delta` mostra a diferença desde ele.
 
-Além disso, `BallyRobotShell.cpp` é **o único lugar** onde podem ser registrados comandos que operam sobre as bibliotecas compiladas pelo `env:native` (`BtpTransport`, `CommandProcessor`, `Format`, `KeyStore`, `ManifestResponder`, `RxRouter`, `StatusReporter`, `SubscriptionResponder`, `TelemetryPublisher`, `TxScheduler`): nenhuma delas pode incluir `TinyShell.h`, que não existe no build de host. Ver `CONTRIBUTING.md` e o comentário de cabeçalho do próprio arquivo.
+Além disso, `BallyRobotShell.cpp` é **o único lugar** onde podem ser registrados comandos que operam sobre as bibliotecas compiladas pelo `env:native` (`BtpTransport`, `CommandProcessor`, `Format`, `KeyStore`, `ManifestCatalog`, `StatusReporter`, `SubscriptionResponder`, `TelemetryPublisher`, `TxScheduler`): nenhuma delas pode incluir `TinyShell.h`, que não existe no build de host. Ver `CONTRIBUTING.md` e o comentário de cabeçalho do próprio arquivo.
 
 `ROBOT`/`BallyRobot` é o *composition root*: o único lugar que conhece e instancia todos os subsistemas. Ele não contém a lógica de negócio de nenhum deles.
 

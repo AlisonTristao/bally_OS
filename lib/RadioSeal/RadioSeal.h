@@ -80,13 +80,13 @@ bool seal(void* context, const btp::Header& header, std::uint16_t payload_size,
 /**
  * @brief Opens one already-reassembled channel C message.
  *
- * `header` MUST be the canonical logical header RxRouter hands back on
- * Outcome::Routed (FRAGMENTED cleared, fragment_index 0, fragment_count 1 --
- * RxRouter.cpp/fragmentation.cpp restore exactly that shape on completion,
- * and decode()'s own validation already guarantees it for an unfragmented
- * frame). `ciphertext_size` is the routed payload size unchanged (it already
- * includes the trailing tag); `out_plaintext` needs room for
- * `ciphertext_size - kTagSize` octets.
+ * `header` MUST be the canonical logical header node_->receive() hands back
+ * on a completed reassembly (FRAGMENTED cleared, fragment_index 0,
+ * fragment_count 1 -- btp::Receiver/fragmentation.cpp restore exactly that
+ * shape on completion, and decode()'s own validation already guarantees it
+ * for an unfragmented frame). `ciphertext_size` is the routed payload size
+ * unchanged (it already includes the trailing tag); `out_plaintext` needs
+ * room for `ciphertext_size - kTagSize` octets.
  *
  * Refuses (false) on any of: no key configured, the ENCRYPTED flag not set,
  * a cipher other than AES-128-GCM, or a tag that does not verify. The

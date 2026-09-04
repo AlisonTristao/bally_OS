@@ -6,8 +6,8 @@
 // abstraction, it is the same functions moved verbatim.
 //
 // THIS FILE IS THE ESP-IDF-ONLY SIDE OF THE SHELL. That matters beyond
-// tidiness: ten libraries (BtpTransport, CommandProcessor, Format, KeyStore,
-// ManifestResponder, RxRouter, StatusReporter, SubscriptionResponder,
+// tidiness: nine libraries (BtpTransport, CommandProcessor, Format, KeyStore,
+// ManifestCatalog, StatusReporter, SubscriptionResponder,
 // TelemetryPublisher, TxScheduler) are compiled by env:native for their unit
 // tests, where TinyShell does not exist. A register_shell_commands() inside
 // any of them would break `pio test -e native` for every suite at once, as a
@@ -579,9 +579,9 @@ void ROBOT::registerLinkCommands() {
     // here is a read of a counter that already exists and, until now, only
     // left the robot inside the binary CONTROL/STATUS message once a second.
     //
-    // Registered here and not in TxScheduler/RxRouter/CommandProcessor because
-    // all three are compiled by env:native for their unit suites, where
-    // TinyShell does not exist -- see this file's header comment.
+    // Registered here and not in TxScheduler/CommandProcessor because both
+    // are compiled by env:native for their unit suites, where TinyShell does
+    // not exist -- see this file's header comment.
     shell.create_module("link", "Radio and protocol counters");
 
     shell.add([]() -> uint8_t {

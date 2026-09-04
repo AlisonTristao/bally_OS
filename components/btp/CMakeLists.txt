@@ -17,25 +17,26 @@
 # Sources come from the sibling checkout c:/git/BTP -- the SAME tree
 # [env:native] builds through `symlink://../BTP` -- so the firmware and the
 # host test suite can never diverge on the protocol. Expected revision:
-# v2.8.0 -- v2.0.0 + the PSA backend + btp::messages (2.2.0) + the manifest
+# v2.40.0 -- v2.0.0 + the PSA backend + btp::messages (2.2.0) + the manifest
 # verbatim relay (2.3.0) + btp::telemetry, the PACKED_LE / TLV_LE sample codec
 # (2.4.0) + its body-only mode (2.5.0) + btp::session, the btp::DedupCache
 # command-deduplication cache (2.6.0) + btp::endpoint, the identity /
 # sequencing / seal-fragment-encode transmit pipeline BtpEndpoint derives from
 # (2.7.0) + btp::receiver, the decode / CRC / reassembly receive pipeline
-# RxRouter derives from (2.8.0) + btp::catalog (2.12.0), which ManifestResponder
-# now uses to VALIDATE TelemetryPublisher::schemas() at boot (order/duplicate
-# checks) -- MANIFEST_DATA itself is still hand-built straight from
-# TelemetryPublisher::schemas() (btp::Catalog::add_topic() does not keep a
-# field's unit/description, only what btp::SampleReader/Writer need) -- through
-# btp::node (2.16.0+), which BallyRobot's node_ now uses ONLY for its receive
-# pipeline (decode/CRC/reassembly/open) and to lend `protocol` a shared
-# btp::Endpoint -- see node_'s class comment in BallyRobot.h for why not more
-# (no session on this leg, MANIFEST_DATA staying hand-built as above,
-# CommandProcessor's async task model not fitting Node's synchronous
-# NodeActionFn). subscription.cpp is a link-time dependency of node.cpp even
-# though this firmware never calls Node's subscription API. Keep this in step
-# with [env:native]'s symlink; this can become a submodule pinned to the tag.
+# node_ now owns directly (2.8.0; RxRouter, the old thin wrapper over it, is
+# gone) + btp::catalog (2.12.0+source_info 2.35.0+body-only topics 2.39.0),
+# which node_->serve_catalog() now answers CONTROL/MANIFEST_REQUEST from
+# directly (ManifestCatalog::populate() is the one-time load, see
+# BallyRobot.h's node_ comment -- ManifestResponder, which used to hand-encode
+# MANIFEST_DATA itself, is gone) + btp::subscription's rate-policy/reboot-
+# eviction/introspection additions (2.40.0, not adopted here yet -- see
+# SubscriptionResponder's own class comment for why: TelemetryPublisher is
+# still the one table for the wire AND the publish queue/stats). node_ also
+# answers TERMINAL_IN directly now (RobotLink::terminal()) but still leaves
+# CommandProcessor's async task model alone -- Node's NodeActionFn is
+# synchronous only (see its own "first cut" comment in btp/node.hpp).
+# Keep this in step with [env:native]'s symlink; this can become a submodule
+# pinned to the tag.
 #
 # The btp lib_deps entry is removed from [env:esp32-s3] for the same reason a
 # component and a lib_deps library of the same name would fight over codec.o.

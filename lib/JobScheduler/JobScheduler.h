@@ -22,10 +22,10 @@
  * utils/BallyRobot/BallyRobotShell.cpp.
  *
  * Ownership: schedule/cancel/list are called from the shell task, poll() once
- * per pass from the routine task. There is no lock. That is the same tolerance
- * RxRouter documents: a torn read shows a job as it was a moment earlier, the
- * job table is fixed-size and never reallocates, and every field is written as
- * a single word. Do not copy this pattern for anything larger.
+ * per pass from the routine task. There is no lock: a torn read shows a job
+ * as it was a moment earlier, an accepted race since the job table is
+ * fixed-size and never reallocates, and every field is written as a single
+ * word. Do not copy this pattern for anything larger.
  */
 class JobScheduler {
 public:
