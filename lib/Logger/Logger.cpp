@@ -544,33 +544,38 @@ bool Logger::set_datetime(uint16_t year, uint8_t month, uint8_t day,
 
     if (settimeofday(&system_time, nullptr) != 0) return false;
 
-    clock_synchronized_ = true;
     return true;
 }
 
-bool Logger::make_log_filename(SDCard& card, char* filename, size_t capacity) const {
-    if (!clock_synchronized_ || filename == nullptr || capacity == 0) return false;
+bool Logger::make_log_filename(SDCard& card, char* filename, size_t capacity) {
+    if (filename == nullptr || capacity == 0) return false;
 
     const time_t timestamp = time(nullptr);
     struct tm local_time{};
     if (localtime_r(&timestamp, &local_time) == nullptr) return false;
 
+    // The clock may still be at its boot/default value. The counter is part
+    // of every new filename so repeated flushes remain distinguishable even
+    // when the date never changes.
+    uint32_t candidate = ++log_counter_;
     int written = snprintf(
-        filename, capacity, "log_%04d-%02d-%02d_%02d-%02d-%02d.blog",
+        filename, capacity, "log_%04d-%02d-%02d_%02d-%02d-%02d_%06lu.blog",
         local_time.tm_year + 1900, local_time.tm_mon + 1, local_time.tm_mday,
-        local_time.tm_hour, local_time.tm_min, local_time.tm_sec);
+        local_time.tm_hour, local_time.tm_min, local_time.tm_sec,
+        static_cast<unsigned long>(candidate));
 
     if (written <= 0 || static_cast<size_t>(written) >= capacity) return false;
     if (!card.file_exists(filename)) return true;
 
-    // Do not overwrite a log when two new flushes happen in the same second.
-    for (uint8_t suffix = 1; suffix < 100; ++suffix) {
+    // The counter resets after reboot, so skip names already present on the SD.
+    for (;;) {
+        candidate = ++log_counter_;
         written = snprintf(
             filename, capacity,
-            "log_%04d-%02d-%02d_%02d-%02d-%02d_%02u.blog",
+            "log_%04d-%02d-%02d_%02d-%02d-%02d_%06lu.blog",
             local_time.tm_year + 1900, local_time.tm_mon + 1,
             local_time.tm_mday, local_time.tm_hour, local_time.tm_min,
-            local_time.tm_sec, suffix);
+            local_time.tm_sec, static_cast<unsigned long>(candidate));
 
         if (written > 0 && static_cast<size_t>(written) < capacity &&
             !card.file_exists(filename)) {
@@ -716,9 +721,7 @@ void Logger::register_shell_commands(TinyShell& shell, SDCard& sd_card, RobotSet
     shell.add([this, &sd_card, mark_direct_output]() -> uint8_t {
         char filename[SDFileInfo::MAX_NAME_LENGTH] = {};
         if (!flush_to_sd(sd_card, false, filename, sizeof(filename))) {
-            insert_log(
-                logType::ERRO,
-                "Failed to create a new SD log; synchronize date/time first");
+            insert_log(logType::ERRO, "Failed to create a new SD log");
             return RESULT_ERROR;
         }
 
@@ -727,7 +730,7 @@ void Logger::register_shell_commands(TinyShell& shell, SDCard& sd_card, RobotSet
         send_log_direct(logType::INFO, response);
         mark_direct_output();
         return RESULT_OK;
-    }, "flush_new", "Save retained PSRAM logs into a new dated file", "logger");
+    }, "flush_new", "Save retained PSRAM logs into a new dated file with counter", "logger");
 
     shell.add([this, &sd_card, mark_direct_output]() -> uint8_t {
         char filename[SDFileInfo::MAX_NAME_LENGTH] = {};

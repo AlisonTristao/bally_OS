@@ -131,8 +131,9 @@ public:
 
     /**
      * @brief Save every retained PSRAM log to the SD card: either start a
-     * new, uniquely-named dated file or append to the most recently written
-     * one (falling back to the newest matching file already on the card).
+    * new, uniquely-named file containing the current date and a counter, or
+    * append to the most recently written one (falling back to the newest
+    * matching file already on the card).
      *
      * @param out_filename Optional; receives the file name written to.
      * @return true when every retained message was written and the file
@@ -227,10 +228,10 @@ private:
     // Mirrors SDFileInfo::MAX_NAME_LENGTH (lib/SDCard/SDCard.h) without
     // requiring Logger.h to include the full SDCard header.
     static constexpr size_t kLogFilenameCapacity = 128;
-    bool clock_synchronized_ = false;
+    uint32_t log_counter_ = 0;
     char last_log_file_[kLogFilenameCapacity] = {};
 
-    bool make_log_filename(SDCard& card, char* filename, size_t capacity) const;
+    bool make_log_filename(SDCard& card, char* filename, size_t capacity);
     bool find_latest_log_file(SDCard& card, char* filename, size_t capacity) const;
 
     // private methods for the logger
