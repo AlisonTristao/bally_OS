@@ -6,9 +6,9 @@
 // abstraction, it is the same functions moved verbatim.
 //
 // THIS FILE IS THE ESP-IDF-ONLY SIDE OF THE SHELL. That matters beyond
-// tidiness: nine libraries (BtpTransport, CommandProcessor, Format, KeyStore,
-// ManifestCatalog, StatusReporter, SubscriptionResponder,
-// TelemetryPublisher, TxScheduler) are compiled by env:native for their unit
+// tidiness: eight libraries (BtpTransport, CommandProcessor, Format,
+// KeyStore, ManifestCatalog, StatusReporter, TelemetryPublisher,
+// TxScheduler) are compiled by env:native for their unit
 // tests, where TinyShell does not exist. A register_shell_commands() inside
 // any of them would break `pio test -e native` for every suite at once, as a
 // link error that does not name the cause. Commands that operate on those
@@ -809,62 +809,84 @@ void ROBOT::registerTelemetryCommands() {
                  uint32_t lease_ms) -> uint8_t {
         // Subscriptions are keyed by (session, topic), and the session comes
         // from the BTP envelope. A shell subscription has no envelope, so it
-        // uses the reserved local identity -- otherwise the dongle's own
-        // drop_session() would take this one down with its own.
-        const TelemetryPublisher::SubscribeOutcome outcome =
-            instance_->telemetry.subscribe(
-                topic_id,
-                TelemetryPublisher::kLocalSubscriberSourceId,
-                TelemetryPublisher::kLocalSubscriberBootId,
-                rate_millihz, lease_ms,
-                static_cast<uint64_t>(esp_timer_get_time()));
+        // uses the reserved local identity -- node_'s own btp::
+        // SubscriptionTable (the SAME one every real SUBSCRIBE now goes
+        // through, BallyRobot.h's node_ comment) does not care where a
+        // request came from, only that source_id 0 never collides with a
+        // real peer's factory-MAC-derived one.
+        if (!instance_->node_) {
+            ROBOT::logger.insert_log(logType::ERRO, "protocol not bound yet");
+            return RESULT_ERROR;
+        }
+        btp::Header header{};
+        header.source_id = TelemetryPublisher::kLocalSubscriberSourceId;
+        header.boot_id = TelemetryPublisher::kLocalSubscriberBootId;
 
-        if (!outcome.topic_known) {
-            ROBOT::logger.insert_logf(logType::ERRO, "unknown topic_id=0x%04X",
-                                      static_cast<unsigned>(topic_id));
-            return RESULT_ERROR;
-        }
-        if (outcome.rate_below_minimum) {
-            ROBOT::logger.insert_log(
-                logType::ERRO,
-                "rate below the schema minimum; the robot may not publish slower than asked");
-            return RESULT_ERROR;
-        }
-        if (outcome.capacity_exhausted) {
-            ROBOT::logger.insert_log(logType::ERRO, "subscription table full");
+        btp::Subscribe request{};
+        request.target_source_id = instance_->node_->source_id();
+        request.target_boot_id = instance_->node_->boot_id();
+        request.topic_id = topic_id;
+        request.requested_rate_millihz = rate_millihz;
+        request.requested_lease_ms = lease_ms;
+
+        btp::SubscribeResult result{};
+        instance_->node_->subscriptions()->handle_subscribe(
+            instance_->node_->catalog(), header, request,
+            static_cast<uint64_t>(esp_timer_get_time() / 1000ULL), &result);
+
+        if (result.status != static_cast<uint8_t>(btp::ResultStatus::Success)) {
+            ROBOT::logger.insert_logf(
+                logType::ERRO, "rejected: topic_id=0x%04X error_code=0x%04X",
+                static_cast<unsigned>(topic_id),
+                static_cast<unsigned>(result.error_code));
             return RESULT_ERROR;
         }
 
-        // The lease is clamped by the publisher, so report what was granted
-        // rather than what was asked: this subscription DOES expire, and a
-        // shell caller has no renewal loop behind it.
+        // The lease is uncapped by btp::SubscriptionTable (unlike the old
+        // TelemetryPublisher::subscribe(), which clamped it locally), so
+        // this reports exactly what was granted -- the same as what was
+        // asked, here.
         ROBOT::logger.insert_logf(
             logType::INFO,
             "subscription_id=%lu topic_id=0x%04X rate_millihz=%lu lease_ms=%lu",
-            static_cast<unsigned long>(outcome.subscription_id),
+            static_cast<unsigned long>(result.subscription_id),
             static_cast<unsigned>(topic_id),
-            static_cast<unsigned long>(outcome.effective_rate_millihz),
-            static_cast<unsigned long>(outcome.granted_lease_ms));
+            static_cast<unsigned long>(result.effective_rate_millihz),
+            static_cast<unsigned long>(result.granted_lease_ms));
         return RESULT_OK;
     }, "sub", "Subscribe locally: topic_id,rate_millihz,lease_ms", "telemetry");
 
     shell.add([](uint32_t subscription_id) -> uint8_t {
-        const TelemetryPublisher::UnsubscribeOutcome outcome =
-            instance_->telemetry.unsubscribe(subscription_id);
-        if (outcome != TelemetryPublisher::UnsubscribeOutcome::Removed) {
-            ROBOT::logger.insert_logf(
-                logType::ERRO, "no live subscription with id=%lu",
-                static_cast<unsigned long>(subscription_id));
+        if (!instance_->node_) {
+            ROBOT::logger.insert_log(logType::ERRO, "protocol not bound yet");
             return RESULT_ERROR;
         }
-        ROBOT::logger.insert_logf(logType::INFO, "unsubscribed id=%lu",
+        // btp::SubscriptionTable::handle_unsubscribe() always reports success
+        // (commands.md section 4: removing an already-absent subscription is
+        // idempotent) -- unlike the old TelemetryPublisher::unsubscribe(),
+        // there is no "no live subscription with that id" distinction left
+        // to report here.
+        btp::Header header{};
+        header.source_id = TelemetryPublisher::kLocalSubscriberSourceId;
+        header.boot_id = TelemetryPublisher::kLocalSubscriberBootId;
+
+        btp::Unsubscribe request{};
+        request.target_source_id = instance_->node_->source_id();
+        request.target_boot_id = instance_->node_->boot_id();
+        request.subscription_id = subscription_id;
+
+        btp::ControlResult result{};
+        instance_->node_->subscriptions()->handle_unsubscribe(header, request, &result);
+
+        ROBOT::logger.insert_logf(logType::INFO, "unsubscribe requested id=%lu",
                                   static_cast<unsigned long>(subscription_id));
         return RESULT_OK;
     }, "unsub", "Cancel a subscription by id (see topics/sub)", "telemetry");
 
     shell.add([]() -> uint8_t {
-        // Reads the same table ManifestResponder serializes into
-        // MANIFEST_DATA, so the text here can never disagree with the wire.
+        // Reads the same table node_->catalog() is built from
+        // (ManifestCatalog::populate()), so the text here can never disagree
+        // with the wire.
         size_t schema_count = 0;
         const TelemetryPublisher::TopicSchema* schemas =
             TelemetryPublisher::schemas(&schema_count);

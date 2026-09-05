@@ -28,7 +28,6 @@
 #include <BtpTransport.h>
 #include <CommandProcessor.h>
 #include <ManifestCatalog.h>
-#include <SubscriptionResponder.h>
 #include <TerminalResponder.h>
 #include <StatusReporter.h>
 #include <TelemetryPublisher.h>
@@ -109,6 +108,20 @@ public:
     bool has_terminal() const noexcept override { return true; }
     void terminal(btp::Node& node, const btp::Header& header, btp::ByteView payload,
                   std::uint64_t now_ms) override;
+
+    // Picks the key for node_'s own automatic replies (MANIFEST_DATA,
+    // SUBSCRIBE_RESULT, UNSUBSCRIBE_RESULT -- has_command() stays false, so
+    // COMMAND_RESULT never reaches this). MANIFEST_REQUEST always classifies
+    // C_Link (ROBOT::classifyChannel()'s own rule -- only the dongle's
+    // aggregation cache asks for a manifest), so leaving *out_seal null there
+    // falls through to has_seal()/seal() above, the channel-C key, unchanged.
+    // SUBSCRIBE/UNSUBSCRIBE (topico 31.2) are classified BY PEER like COMMAND
+    // and TERMINAL_IN: a TraceView-originated request (channel B) needs its
+    // *_RESULT sealed with key E, not the channel-C key seal() always uses --
+    // this is the one automatic reply that needs the hub-shaped per-reply key
+    // reply_seal() exists for.
+    void reply_seal(const btp::Header& request_header, btp::EndpointSealFn* out_seal,
+                    void** out_seal_ctx) override;
 
 private:
     ROBOT& robot_;
@@ -237,7 +250,6 @@ public:
     TxScheduler tx_scheduler;
     CommandProcessor command_processor;
     TelemetryPublisher telemetry;
-    SubscriptionResponder subscription_responder;
     TerminalResponder terminal_responder;
     StatusReporter status_reporter;
     StateMachine machine;
@@ -516,15 +528,6 @@ private:
     bool configureProtocolIdentity();
     void processCommandRequest(const btp::Header& header,
                                btp::ByteView payload, bally::Channel channel);
-    // Topico 17: CONTROL/SUBSCRIBE and CONTROL/UNSUBSCRIBE, routed the same
-    // way processManifestRequest already is (see handleReceiveStatic's
-    // object_id switch). `channel` is threaded through the same way
-    // processCommandRequest's already is, since topico 31.2 widened these
-    // two object_ids to channel B alongside COMMAND.
-    void processSubscribeRequest(const btp::Header& header, btp::ByteView payload,
-                                 bally::Channel channel);
-    void processUnsubscribeRequest(const btp::Header& header, btp::ByteView payload,
-                                   bally::Channel channel);
     void dispatchDecoded(const btp::Header& header, btp::ByteView payload,
                         bally::Channel channel);
     void sampleTelemetry();
@@ -715,15 +718,32 @@ private:
     // Node itself sends on its own (today: MANIFEST_DATA replies, via
     // serve_catalog() -- protocol_link_.send() forwards to the same
     // TxScheduler `protocol` uses, see RobotLink's own comment). No session
-    // (this robot has no HELLO/session concept over ESP-NOW -- see
-    // SubscriptionResponder.h). Serves its own catalogue (populated once by
-    // populateProtocolCatalog(), fed by TelemetryPublisher::schemas() and
-    // buildSourceInfo()) -- BTP 2.35.0's Catalog::write_source_info() and
-    // 2.39.0's body-only topics (kSystemMonitorTopicId's UTF8 document) are
-    // what let node_->receive() answer CONTROL/MANIFEST_REQUEST entirely by
-    // itself now (NodeRx::RequestServed). ManifestResponder, which used to
-    // hand-encode MANIFEST_DATA because btp::Catalog could carry neither a
-    // field's unit nor a fieldless topic, is gone.
+    // (this robot has no HELLO/session concept over ESP-NOW). Serves its own
+    // catalogue (populated once by populateProtocolCatalog(), fed by
+    // TelemetryPublisher::schemas() and buildSourceInfo()) -- BTP 2.35.0's
+    // Catalog::write_source_info() and 2.39.0's body-only topics
+    // (kSystemMonitorTopicId's UTF8 document) are what let node_->receive()
+    // answer CONTROL/MANIFEST_REQUEST entirely by itself now
+    // (NodeRx::RequestServed). ManifestResponder, which used to hand-encode
+    // MANIFEST_DATA because btp::Catalog could carry neither a field's unit
+    // nor a fieldless topic, is gone.
+    //
+    // node_->receive() ALSO answers CONTROL/SUBSCRIBE and CONTROL/UNSUBSCRIBE
+    // by itself now (NodeRx::SubscriptionServed, btp::SubscriptionTable) --
+    // this was true by accident from the moment serve_catalog() above started
+    // running (btp::StaticNode<> wires enable_subscriptions() unconditionally
+    // in its own constructor, whether or not the caller wants it) and only
+    // became CORRECT once MaxSubscriptions actually matched
+    // TelemetryPublisher::kMaxSubscriptions and the catalogue carried real
+    // min_rate_millihz/default_rate_millihz (BTP 2.40.0, ManifestCatalog::
+    // populate()): before that fix, node_'s own 1-slot table silently
+    // answered every SUBSCRIBE (granted or not) without SubscriptionResponder
+    // -- deleted now -- or TelemetryPublisher ever finding out, so a
+    // subscription looked accepted on the wire while sampleTelemetry() kept
+    // seeing topic_active() == false forever. TelemetryPublisher now reads
+    // subscriber_count()/aggregate_rate_millihz() straight off node_->
+    // subscriptions() instead of keeping its own table -- see its own class
+    // comment.
     //
     // Deferred (std::optional, like array_sensor/junkebox/motor_left/... just
     // below): the identity node_ is built on is only known after
@@ -754,7 +774,8 @@ private:
         /*CatalogTopics=*/4U,
         /*CatalogFields=*/ManifestCatalog::kMaxCatalogFields,
         /*CatalogStringBytes=*/256U,
-        /*MaxSubscriptions=*/1U, /*MaxCommands=*/1U, /*CommandBytes=*/16U,
+        /*MaxSubscriptions=*/TelemetryPublisher::kMaxSubscriptions,
+        /*MaxCommands=*/1U, /*CommandBytes=*/16U,
         /*CatalogSourceInfo=*/ManifestCatalog::kMaxSourceInfoEntries>>
         node_;
 

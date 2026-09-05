@@ -16,12 +16,12 @@ class TelemetryPublisher;
 // (BTP/docs/commands.md sections 5 and 5.1).
 //
 // Deliberately pure C++ (no Arduino/FreeRTOS/esp_timer), same shape as
-// ManifestResponder and SubscriptionResponder, so the serializer links into
-// env:native and is checked byte by byte by the unit tests. The caller owns
-// the clock and the link counters; this class only lays them out on the wire
-// and pulls the per-topic block straight out of TelemetryPublisher, which is
-// the single source of truth for subscriptions, granted rates, bytes and
-// drops (topico 17 PASSOS 8/9).
+// ManifestCatalog, so the serializer links into env:native and is checked
+// byte by byte by the unit tests. The caller owns the clock and the link
+// counters; this class only lays them out on the wire and pulls the
+// per-topic block straight out of TelemetryPublisher, which reads
+// subscriber counts and granted rates from node_'s own btp::SubscriptionTable
+// and keeps bytes/drops itself (topico 17 PASSOS 8/9).
 class StatusReporter {
 public:
     static constexpr std::uint16_t kStatusObjectId = 0x0009U;

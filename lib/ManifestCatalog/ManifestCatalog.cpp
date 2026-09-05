@@ -34,7 +34,7 @@ bool populate(btp::Catalog& catalog,
                 topic.topic_id, topic.schema_version,
                 static_cast<btp::TelemetryEncoding>(topic.encoding),
                 /*subscribable=*/true, topic.max_rate_millihz, topic.name,
-                nullptr, 0U);
+                nullptr, 0U, topic.min_rate_millihz, topic.default_rate_millihz);
             if (err != btp::MessageError::Ok) ok = false;
             continue;
         }
@@ -65,7 +65,8 @@ bool populate(btp::Catalog& catalog,
             topic.topic_id, topic.schema_version,
             static_cast<btp::TelemetryEncoding>(topic.encoding),
             /*subscribable=*/true, topic.max_rate_millihz, topic.name,
-            records, topic.field_count);
+            records, topic.field_count, topic.min_rate_millihz,
+            topic.default_rate_millihz);
         if (err != btp::MessageError::Ok) ok = false;
     }
 

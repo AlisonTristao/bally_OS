@@ -2,13 +2,14 @@
 
 #include <BtpTransport.h>
 #include <CommandProcessor.h>
+#include <ManifestCatalog.h>
 #include <StatusReporter.h>
-#include <SubscriptionResponder.h>
 #include <TelemetryPublisher.h>
 #include <TxScheduler.h>
 #include <bally_channels.h>
 #include <btp/codec.hpp>
 #include <btp/fragmentation.hpp>
+#include <btp/subscription.hpp>
 
 #include <cstdint>
 #include <cstring>
@@ -846,32 +847,52 @@ std::uint64_t read_u64(const std::uint8_t* data) {
 constexpr std::uint32_t kLocalSource = 0x11223344U;
 constexpr std::uint32_t kLocalBoot = 0xA1B2C3D4U;
 
-btp::Header control_header(std::uint16_t object_id, std::uint32_t source_id,
-                           std::uint32_t boot_id, std::uint32_t sequence) {
-    return {
-        .type = btp::MessageType::Control,
-        .flags = 0U,
-        .source_id = source_id,
-        .boot_id = boot_id,
-        .sequence = sequence,
-        .timestamp_us = 1000U,
-        .object_id = object_id,
-        .fragment_index = 0U,
-        .fragment_count = 1U,
-    };
+// A served catalogue built the exact same way node_'s own is
+// (populateProtocolCatalog() / ManifestCatalog::populate()), so these tests
+// exercise the real min/max/default rate policy this robot ships, not a
+// hand-picked one -- the wire-level SUBSCRIBE/UNSUBSCRIBE decode/encode and
+// the grant/renew/reboot-eviction logic itself are BTP's own responsibility
+// now (btp::Node::serve_subscribe(), btp::SubscriptionTable), already
+// covered by BTP's own test suite; what is left to check here is that this
+// robot's catalogue (schemas() -> ManifestCatalog::populate()) carries the
+// right policy and that TelemetryPublisher reads the granted state back
+// correctly.
+btp::StaticCatalog<> make_telemetry_catalog() {
+    btp::StaticCatalog<> cat;
+    std::size_t count = 0U;
+    const TelemetryPublisher::TopicSchema* schema_list =
+        TelemetryPublisher::schemas(&count);
+    TEST_ASSERT_TRUE(ManifestCatalog::populate(cat, schema_list, count, nullptr, 0U));
+    return cat;
 }
 
-std::vector<std::uint8_t> subscribe_payload(std::uint16_t topic_id,
-                                            std::uint32_t rate_millihz,
-                                            std::uint32_t lease_ms) {
-    std::vector<std::uint8_t> payload(20U, 0U);
-    write_u32(payload.data(), kLocalSource);
-    write_u32(payload.data() + 4U, kLocalBoot);
-    write_u16(payload.data() + 8U, topic_id);
-    write_u16(payload.data() + 10U, 0U);  // flags: zero in v1
-    write_u32(payload.data() + 12U, rate_millihz);
-    write_u32(payload.data() + 16U, lease_ms);
-    return payload;
+// A self-owned table: `N` slots -- mirrors BTP's own test_subscription.cpp
+// TableFixture.
+template <std::size_t N>
+struct SubscriptionFixture {
+    btp::SubscriptionRecord slots[N];
+    btp::SubscriptionTable table;
+    SubscriptionFixture() : slots(), table(slots, N) {}
+};
+
+btp::Header subscribe_header(std::uint32_t source_id, std::uint32_t boot_id,
+                             std::uint32_t sequence) {
+    btp::Header h{};
+    h.source_id = source_id;
+    h.boot_id = boot_id;
+    h.sequence = sequence;
+    return h;
+}
+
+btp::Subscribe make_subscribe(std::uint16_t topic_id, std::uint32_t rate_millihz,
+                              std::uint32_t lease_ms) {
+    btp::Subscribe req{};
+    req.target_source_id = kLocalSource;
+    req.target_boot_id = kLocalBoot;
+    req.topic_id = topic_id;
+    req.requested_rate_millihz = rate_millihz;
+    req.requested_lease_ms = lease_ms;
+    return req;
 }
 
 // Decodes the single frame captured by capture_send and returns its logical
@@ -939,38 +960,27 @@ void test_telemetry_sample_with_no_key_configured_is_dropped_not_sent_clear() {
 // Acceptance criterion: "pedido acima do maximo e limitado e informado ao
 // cliente" -- clamped, answered SUCCESS, never rejected. The mirror case
 // (below the schema's floor) is rejected, because section 4 forbids granting
-// a rate above the requested one.
+// a rate above the requested one. The wire encode/decode this used to check
+// byte-for-byte is btp::Node's job now (Node::serve_subscribe(), already
+// covered by BTP's own test suite) -- what is checked here is that this
+// robot's OWN catalogue carries the right policy.
 void test_subscribe_above_max_is_clamped_and_below_min_is_rejected() {
-    BtpEndpoint endpoint;
-    TEST_ASSERT_TRUE(endpoint.configure(kLocalSource, kLocalBoot));
-    endpoint.set_send_callback(capture_send);
+    SubscriptionFixture<4> f;
+    const auto catalog = make_telemetry_catalog();
     TelemetryPublisher publisher;
-    publisher.configure(endpoint);
-    SubscriptionResponder responder;
-    responder.configure(endpoint, publisher);
+    publisher.bind_subscriptions(f.table);
 
-    const auto request = subscribe_payload(
-        TelemetryPublisher::kProtocolTestTopicId, 200000U, 5000U);
-    const btp::Header header = control_header(
-        SubscriptionResponder::kSubscribeObjectId, 0x0C30AA5CU, 0x10203040U, 7U);
-
-    sent_count = 0U;
-    TEST_ASSERT_TRUE(responder.handle_subscribe(
-        header, {request.data(), request.size()}, 1000U));
-    btp::DecodedFrame decoded = decode_only_frame();
-    TEST_ASSERT_EQUAL_HEX16(SubscriptionResponder::kSubscribeResultObjectId,
-                            decoded.header.object_id);
-    TEST_ASSERT_EQUAL_UINT32(28U, decoded.payload.size);
-    // Reference to the request: (source, boot, reply_to_sequence).
-    TEST_ASSERT_EQUAL_HEX32(0x0C30AA5CU, read_u32(decoded.payload.data));
-    TEST_ASSERT_EQUAL_HEX32(0x10203040U, read_u32(decoded.payload.data + 4U));
-    TEST_ASSERT_EQUAL_UINT32(7U, read_u32(decoded.payload.data + 8U));
-    TEST_ASSERT_EQUAL_UINT8(0x00U, decoded.payload.data[12]);   // SUCCESS
-    TEST_ASSERT_EQUAL_HEX16(0x0000U, read_u16(decoded.payload.data + 14U));
-    TEST_ASSERT_NOT_EQUAL(0U, read_u32(decoded.payload.data + 16U));
+    btp::SubscribeResult result{};
+    f.table.handle_subscribe(
+        catalog, subscribe_header(0x0C30AA5CU, 0x10203040U, 7U),
+        make_subscribe(TelemetryPublisher::kProtocolTestTopicId, 200000U, 5000U),
+        1000U, &result);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<std::uint8_t>(btp::ResultStatus::Success),
+                            result.status);
+    TEST_ASSERT_NOT_EQUAL(0U, result.subscription_id);
     // 200 Hz requested, schema max is 50 Hz: clamped, and the client is told.
-    TEST_ASSERT_EQUAL_UINT32(50000U, read_u32(decoded.payload.data + 20U));
-    TEST_ASSERT_EQUAL_UINT32(5000U, read_u32(decoded.payload.data + 24U));
+    TEST_ASSERT_EQUAL_UINT32(50000U, result.effective_rate_millihz);
+    TEST_ASSERT_EQUAL_UINT32(5000U, result.granted_lease_ms);
     // The topic now publishes at the granted rate, not the requested one.
     TEST_ASSERT_EQUAL_UINT64(
         20000U,
@@ -978,101 +988,56 @@ void test_subscribe_above_max_is_clamped_and_below_min_is_rejected() {
 
     // Below the schema floor (0.1 Hz for protocol.test): rejected with
     // INVALID_ARGUMENT instead of being silently raised.
-    const auto slow = subscribe_payload(
-        TelemetryPublisher::kProtocolTestTopicId, 50U, 5000U);
-    sent_count = 0U;
-    TEST_ASSERT_TRUE(responder.handle_subscribe(
-        control_header(SubscriptionResponder::kSubscribeObjectId, 0x0C30AA5CU,
-                       0x10203040U, 8U),
-        {slow.data(), slow.size()}, 2000U));
-    decoded = decode_only_frame();
-    TEST_ASSERT_EQUAL_UINT8(0x01U, decoded.payload.data[12]);  // REJECTED
-    TEST_ASSERT_EQUAL_HEX16(0x0003U, read_u16(decoded.payload.data + 14U));
-    TEST_ASSERT_EQUAL_UINT32(0U, read_u32(decoded.payload.data + 16U));
-    TEST_ASSERT_EQUAL_UINT32(0U, read_u32(decoded.payload.data + 20U));
-    TEST_ASSERT_EQUAL_UINT32(0U, read_u32(decoded.payload.data + 24U));
+    btp::SubscribeResult slow{};
+    f.table.handle_subscribe(
+        catalog, subscribe_header(0x0C30AA5CU, 0x10203040U, 8U),
+        make_subscribe(TelemetryPublisher::kProtocolTestTopicId, 50U, 5000U),
+        2000U, &slow);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<std::uint8_t>(btp::ResultStatus::Rejected),
+                            slow.status);
+    TEST_ASSERT_EQUAL_HEX16(
+        static_cast<std::uint16_t>(btp::ResultError::InvalidArgument), slow.error_code);
+    TEST_ASSERT_EQUAL_UINT32(0U, slow.subscription_id);
 
     // A non-periodic topic (max_rate_millihz == 0) is capped by the schema's
     // nominal default instead, so the answer is never an arbitrary echo.
-    const auto state = subscribe_payload(
-        TelemetryPublisher::kRobotStateTopicId, 999000U, 5000U);
-    sent_count = 0U;
-    TEST_ASSERT_TRUE(responder.handle_subscribe(
-        control_header(SubscriptionResponder::kSubscribeObjectId, 0x0C30AA5CU,
-                       0x10203040U, 9U),
-        {state.data(), state.size()}, 3000U));
-    decoded = decode_only_frame();
-    TEST_ASSERT_EQUAL_UINT8(0x00U, decoded.payload.data[12]);
-    TEST_ASSERT_EQUAL_UINT32(10000U, read_u32(decoded.payload.data + 20U));
-}
-
-// Mirrors test_channel_b_reply_is_sealed_with_endpoint_key_not_link_key
-// (CommandProcessor) for SUBSCRIBE_RESULT: topico 31.2 widened
-// SubscriptionResponder to the same seal_link/seal_endpoint-by-channel rule.
-void test_subscribe_channel_b_reply_is_sealed_with_endpoint_key_not_link_key() {
-    BtpEndpoint endpoint;
-    TEST_ASSERT_TRUE(endpoint.configure(kLocalSource, kLocalBoot));
-    endpoint.set_send_callback(capture_send);
-    TelemetryPublisher publisher;
-    publisher.configure(endpoint);
-    SubscriptionResponder responder;
-    responder.configure(endpoint, publisher, fake_seal_link, nullptr,
-                        fake_seal_endpoint, nullptr);
-
-    const auto request = subscribe_payload(
-        TelemetryPublisher::kProtocolTestTopicId, 10000U, 5000U);
-    const btp::Header header = control_header(
-        SubscriptionResponder::kSubscribeObjectId, 0x0C30AA5CU, 0x10203040U, 40U);
-
-    sent_count = 0U;
-    TEST_ASSERT_TRUE(responder.handle_subscribe(
-        header, {request.data(), request.size()}, 1000U, bally::Channel::B_Endpoint));
-
-    btp::DecodedFrame decoded = decode_only_frame();
-    TEST_ASSERT_TRUE((decoded.header.flags & btp::kFlagEncrypted) != 0U);
-    // 0x22 is fake_seal_endpoint's marker; 0x11 would mean this went out
-    // sealed with the CHANNEL-C key instead, which a TraceView hub-channel
-    // requester does not hold.
-    TEST_ASSERT_EQUAL_HEX8(0x22U,
-                          decoded.payload.data[decoded.payload.size - 1U]);
-}
-
-void test_subscribe_channel_b_reply_without_endpoint_key_configured_is_dropped() {
-    BtpEndpoint endpoint;
-    TEST_ASSERT_TRUE(endpoint.configure(kLocalSource, kLocalBoot));
-    endpoint.set_send_callback(capture_send);
-    TelemetryPublisher publisher;
-    publisher.configure(endpoint);
-    SubscriptionResponder responder;
-    // Channel C is keyed, channel B is not: the reply must be dropped, never
-    // fall back to the link key or to cleartext just because SOME key exists.
-    responder.configure(endpoint, publisher, fake_seal_link, nullptr);
-
-    const auto request = subscribe_payload(
-        TelemetryPublisher::kProtocolTestTopicId, 10000U, 5000U);
-    const btp::Header header = control_header(
-        SubscriptionResponder::kSubscribeObjectId, 0x0C30AA5CU, 0x10203040U, 41U);
-
-    sent_count = 0U;
-    TEST_ASSERT_FALSE(responder.handle_subscribe(
-        header, {request.data(), request.size()}, 1000U, bally::Channel::B_Endpoint));
-    TEST_ASSERT_EQUAL_UINT32(0U, sent_count);
+    btp::SubscribeResult state{};
+    f.table.handle_subscribe(
+        catalog, subscribe_header(0x0C30AA5CU, 0x10203040U, 9U),
+        make_subscribe(TelemetryPublisher::kRobotStateTopicId, 999000U, 5000U),
+        3000U, &state);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<std::uint8_t>(btp::ResultStatus::Success),
+                            state.status);
+    TEST_ASSERT_EQUAL_UINT32(10000U, state.effective_rate_millihz);
 }
 
 // PASSO 5: several sessions on one topic aggregate; the slow one never
-// throttles the fast one and each is told its own granted rate.
+// throttles the fast one and each is told its own granted rate. Channel-B-
+// vs-channel-C reply sealing for SUBSCRIBE_RESULT (what the two deleted
+// tests that used to sit here checked) is RobotLink::reply_seal()'s job now,
+// firmware-level wiring that cannot be reached from this env:native suite --
+// see BallyRobot.cpp's own reply_seal() for that logic; it mirrors
+// protocolOpen()'s already-tested classifyChannel() call exactly.
 void test_multiple_subscribers_aggregate_on_one_topic() {
-    BtpEndpoint endpoint;
-    TEST_ASSERT_TRUE(endpoint.configure(kLocalSource, kLocalBoot));
+    SubscriptionFixture<4> f;
+    const auto catalog = make_telemetry_catalog();
     TelemetryPublisher publisher;
-    publisher.configure(endpoint);
+    publisher.bind_subscriptions(f.table);
 
-    const auto slow = publisher.subscribe(
-        TelemetryPublisher::kProtocolTestTopicId, 0xAAAAU, 1U, 1000U, 5000U, 0U);
-    const auto fast = publisher.subscribe(
-        TelemetryPublisher::kProtocolTestTopicId, 0xBBBBU, 1U, 25000U, 5000U, 0U);
-    TEST_ASSERT_TRUE(slow.topic_known);
-    TEST_ASSERT_TRUE(fast.topic_known);
+    btp::SubscribeResult slow{};
+    f.table.handle_subscribe(
+        catalog, subscribe_header(0xAAAAU, 1U, 1U),
+        make_subscribe(TelemetryPublisher::kProtocolTestTopicId, 1000U, 5000U), 0U,
+        &slow);
+    btp::SubscribeResult fast{};
+    f.table.handle_subscribe(
+        catalog, subscribe_header(0xBBBBU, 1U, 1U),
+        make_subscribe(TelemetryPublisher::kProtocolTestTopicId, 25000U, 5000U), 0U,
+        &fast);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<std::uint8_t>(btp::ResultStatus::Success),
+                            slow.status);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<std::uint8_t>(btp::ResultStatus::Success),
+                            fast.status);
     TEST_ASSERT_NOT_EQUAL(slow.subscription_id, fast.subscription_id);
     TEST_ASSERT_EQUAL_UINT32(1000U, slow.effective_rate_millihz);
     TEST_ASSERT_EQUAL_UINT32(25000U, fast.effective_rate_millihz);
@@ -1087,36 +1052,57 @@ void test_multiple_subscribers_aggregate_on_one_topic() {
         40000U,
         publisher.topic_period_us(TelemetryPublisher::kProtocolTestTopicId));
 
-    // An exact repeat of the same request from the same session renews the
-    // lease and returns the same subscription instead of creating another.
-    const auto repeat = publisher.subscribe(
-        TelemetryPublisher::kProtocolTestTopicId, 0xAAAAU, 1U, 1000U, 5000U, 500U);
+    // BEHAVIOR CHANGE from the old hand-rolled TelemetryPublisher::subscribe():
+    // btp::SubscriptionTable::handle_subscribe() keys a slot by (source_id,
+    // boot_id, topic_id) alone -- ANY later SUBSCRIBE from that same triple
+    // renews it in place (same subscription_id), whether the request bytes
+    // are identical or not; there is no separate "different bytes replace
+    // with a new id" path.
+    btp::SubscribeResult repeat{};
+    f.table.handle_subscribe(
+        catalog, subscribe_header(0xAAAAU, 1U, 2U),
+        make_subscribe(TelemetryPublisher::kProtocolTestTopicId, 1000U, 5000U), 500U,
+        &repeat);
     TEST_ASSERT_EQUAL_UINT32(slow.subscription_id, repeat.subscription_id);
     TEST_ASSERT_EQUAL_UINT32(2U, publisher.active_subscription_count());
 
-    // Different bytes from the same session atomically replace it.
-    const auto changed = publisher.subscribe(
-        TelemetryPublisher::kProtocolTestTopicId, 0xAAAAU, 1U, 2000U, 5000U, 600U);
-    TEST_ASSERT_NOT_EQUAL(slow.subscription_id, changed.subscription_id);
+    btp::SubscribeResult changed{};
+    f.table.handle_subscribe(
+        catalog, subscribe_header(0xAAAAU, 1U, 3U),
+        make_subscribe(TelemetryPublisher::kProtocolTestTopicId, 2000U, 5000U), 600U,
+        &changed);
+    TEST_ASSERT_EQUAL_UINT32(slow.subscription_id, changed.subscription_id);
+    TEST_ASSERT_EQUAL_UINT32(2000U, changed.effective_rate_millihz);
     TEST_ASSERT_EQUAL_UINT32(2U, publisher.active_subscription_count());
 }
 
 // Acceptance criterion: "fechar um grafico reduz trafego quando nenhum outro
 // consumidor usa o topico" -- and only then.
 void test_topic_keeps_publishing_until_the_last_consumer_leaves() {
-    BtpEndpoint endpoint;
-    TEST_ASSERT_TRUE(endpoint.configure(kLocalSource, kLocalBoot));
+    SubscriptionFixture<4> f;
+    const auto catalog = make_telemetry_catalog();
     TelemetryPublisher publisher;
-    publisher.configure(endpoint);
+    publisher.bind_subscriptions(f.table);
 
-    const auto first = publisher.subscribe(
-        TelemetryPublisher::kProtocolTestTopicId, 0xAAAAU, 1U, 50000U, 5000U, 0U);
-    const auto second = publisher.subscribe(
-        TelemetryPublisher::kProtocolTestTopicId, 0xBBBBU, 1U, 10000U, 5000U, 0U);
+    btp::SubscribeResult first{};
+    f.table.handle_subscribe(
+        catalog, subscribe_header(0xAAAAU, 1U, 1U),
+        make_subscribe(TelemetryPublisher::kProtocolTestTopicId, 50000U, 5000U), 0U,
+        &first);
+    btp::SubscribeResult second{};
+    f.table.handle_subscribe(
+        catalog, subscribe_header(0xBBBBU, 1U, 1U),
+        make_subscribe(TelemetryPublisher::kProtocolTestTopicId, 10000U, 5000U), 0U,
+        &second);
 
-    TEST_ASSERT_EQUAL_UINT8(
-        static_cast<std::uint8_t>(TelemetryPublisher::UnsubscribeOutcome::Removed),
-        static_cast<std::uint8_t>(publisher.unsubscribe(first.subscription_id)));
+    btp::Unsubscribe unsub{};
+    unsub.target_source_id = kLocalSource;
+    unsub.target_boot_id = kLocalBoot;
+    unsub.subscription_id = first.subscription_id;
+    btp::ControlResult unsub_result{};
+    f.table.handle_unsubscribe(subscribe_header(0xAAAAU, 1U, 2U), unsub, &unsub_result);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<std::uint8_t>(btp::ResultStatus::Success),
+                            unsub_result.status);
     // The fast consumer left; the topic keeps going for the slow one, now at
     // the slow one's rate.
     TEST_ASSERT_TRUE(
@@ -1125,63 +1111,75 @@ void test_topic_keeps_publishing_until_the_last_consumer_leaves() {
         10000U, publisher.topic_effective_rate_millihz(
                     TelemetryPublisher::kProtocolTestTopicId));
 
-    TEST_ASSERT_EQUAL_UINT8(
-        static_cast<std::uint8_t>(TelemetryPublisher::UnsubscribeOutcome::Removed),
-        static_cast<std::uint8_t>(publisher.unsubscribe(second.subscription_id)));
+    unsub.subscription_id = second.subscription_id;
+    f.table.handle_unsubscribe(subscribe_header(0xBBBBU, 1U, 2U), unsub, &unsub_result);
     TEST_ASSERT_FALSE(
         publisher.topic_active(TelemetryPublisher::kProtocolTestTopicId));
     TEST_ASSERT_EQUAL_UINT64(
         0U, publisher.topic_period_us(TelemetryPublisher::kProtocolTestTopicId));
 
-    // Removing an already-absent subscription stays idempotent.
-    TEST_ASSERT_EQUAL_UINT8(
-        static_cast<std::uint8_t>(TelemetryPublisher::UnsubscribeOutcome::NotFound),
-        static_cast<std::uint8_t>(publisher.unsubscribe(second.subscription_id)));
+    // Removing an already-absent subscription stays idempotent (commands.md
+    // section 4) -- btp::SubscriptionTable::handle_unsubscribe() always
+    // reports Success, unlike the old TelemetryPublisher::unsubscribe()'s
+    // Removed/NotFound distinction.
+    f.table.handle_unsubscribe(subscribe_header(0xBBBBU, 1U, 3U), unsub, &unsub_result);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<std::uint8_t>(btp::ResultStatus::Success),
+                            unsub_result.status);
 }
 
 // PASSO 6: lease expiry and peer reboot both end a session's subscriptions.
 void test_lease_expiry_and_new_boot_id_end_a_session() {
-    BtpEndpoint endpoint;
-    TEST_ASSERT_TRUE(endpoint.configure(kLocalSource, kLocalBoot));
+    SubscriptionFixture<4> f;
+    const auto catalog = make_telemetry_catalog();
     TelemetryPublisher publisher;
-    publisher.configure(endpoint);
+    publisher.bind_subscriptions(f.table);
 
     // 2000 ms lease granted at t=1 s.
-    const auto held = publisher.subscribe(
-        TelemetryPublisher::kProtocolTestTopicId, 0xAAAAU, 1U, 50000U, 2000U,
-        1000000U);
+    btp::SubscribeResult held{};
+    f.table.handle_subscribe(
+        catalog, subscribe_header(0xAAAAU, 1U, 1U),
+        make_subscribe(TelemetryPublisher::kProtocolTestTopicId, 50000U, 2000U),
+        1000U, &held);
     TEST_ASSERT_EQUAL_UINT32(2000U, held.granted_lease_ms);
 
-    publisher.expire_subscriptions(2999999U);
+    f.table.expire(2999U);
     TEST_ASSERT_TRUE(
         publisher.topic_active(TelemetryPublisher::kProtocolTestTopicId));
-    publisher.expire_subscriptions(3000000U);
+    f.table.expire(3000U);
     TEST_ASSERT_FALSE(
         publisher.topic_active(TelemetryPublisher::kProtocolTestTopicId));
     TEST_ASSERT_EQUAL_UINT64(
         0U, publisher.topic_period_us(TelemetryPublisher::kProtocolTestTopicId));
 
-    // A lease shorter than the local floor is raised, so an abandoned client
-    // is never swept faster than the minimum.
-    const auto short_lease = publisher.subscribe(
-        TelemetryPublisher::kProtocolTestTopicId, 0xAAAAU, 2U, 50000U, 1U, 0U);
-    TEST_ASSERT_EQUAL_UINT32(1000U, short_lease.granted_lease_ms);
+    // BEHAVIOR CHANGE from the old hand-rolled TelemetryPublisher::subscribe():
+    // btp::SubscriptionTable does not clamp requested_lease_ms at all (no
+    // local floor/ceiling) -- granted_lease_ms is always exactly what was
+    // asked.
+    btp::SubscribeResult short_lease{};
+    f.table.handle_subscribe(
+        catalog, subscribe_header(0xAAAAU, 2U, 1U),
+        make_subscribe(TelemetryPublisher::kProtocolTestTopicId, 50000U, 1U), 0U,
+        &short_lease);
+    TEST_ASSERT_EQUAL_UINT32(1U, short_lease.granted_lease_ms);
 
     // Same peer, new boot_id: the old session's subscriptions are released
-    // before the new one is granted.
-    publisher.subscribe(TelemetryPublisher::kRobotStateTopicId, 0xAAAAU, 2U,
-                        5000U, 5000U, 0U);
+    // before the new one is granted (btp::SubscriptionTable::handle_subscribe(),
+    // library 2.40.0 -- see its own comment).
+    btp::SubscribeResult state{};
+    f.table.handle_subscribe(
+        catalog, subscribe_header(0xAAAAU, 2U, 2U),
+        make_subscribe(TelemetryPublisher::kRobotStateTopicId, 5000U, 5000U), 0U,
+        &state);
     TEST_ASSERT_EQUAL_UINT32(2U, publisher.active_subscription_count());
-    publisher.subscribe(TelemetryPublisher::kProtocolTestTopicId, 0xAAAAU, 3U,
-                        50000U, 5000U, 0U);
+    btp::SubscribeResult reboot{};
+    f.table.handle_subscribe(
+        catalog, subscribe_header(0xAAAAU, 3U, 1U),
+        make_subscribe(TelemetryPublisher::kProtocolTestTopicId, 50000U, 5000U), 0U,
+        &reboot);
     TEST_ASSERT_EQUAL_UINT32(1U, publisher.active_subscription_count());
     TEST_ASSERT_EQUAL_UINT16(
         0U, publisher.topic_subscriber_count(
                 TelemetryPublisher::kRobotStateTopicId));
-
-    // Explicit teardown of the surviving session.
-    TEST_ASSERT_EQUAL_UINT32(1U, publisher.drop_session(0xAAAAU, 3U));
-    TEST_ASSERT_EQUAL_UINT32(0U, publisher.active_subscription_count());
 }
 
 // PASSO 8/9: bytes and drops are measured per topic and reach the wire as the
@@ -1193,8 +1191,14 @@ void test_topic_status_is_measured_and_serialized() {
     endpoint.set_send_callback(capture_send);
     TelemetryPublisher publisher;
     publisher.configure(endpoint);
-    publisher.subscribe(TelemetryPublisher::kProtocolTestTopicId, 0xAAAAU, 1U,
-                        50000U, 5000U, 0U);
+    SubscriptionFixture<4> f;
+    const auto catalog = make_telemetry_catalog();
+    publisher.bind_subscriptions(f.table);
+    btp::SubscribeResult subscribe_result{};
+    f.table.handle_subscribe(
+        catalog, subscribe_header(0xAAAAU, 1U, 1U),
+        make_subscribe(TelemetryPublisher::kProtocolTestTopicId, 50000U, 5000U), 0U,
+        &subscribe_result);
 
     // One published sample: 10 octets of logical TELEMETRY payload, no
     // envelope, no CRC.
@@ -1284,8 +1288,14 @@ void test_status_is_published_as_a_control_message() {
     endpoint.set_send_callback(capture_send);
     TelemetryPublisher publisher;
     publisher.configure(endpoint);
-    publisher.subscribe(TelemetryPublisher::kProtocolTestTopicId, 0xAAAAU, 1U,
-                        50000U, 5000U, 0U);
+    SubscriptionFixture<4> f;
+    const auto catalog = make_telemetry_catalog();
+    publisher.bind_subscriptions(f.table);
+    btp::SubscribeResult subscribe_result{};
+    f.table.handle_subscribe(
+        catalog, subscribe_header(0xAAAAU, 1U, 1U),
+        make_subscribe(TelemetryPublisher::kProtocolTestTopicId, 50000U, 5000U), 0U,
+        &subscribe_result);
 
     StatusReporter reporter;
     reporter.configure(endpoint, publisher);
@@ -1314,8 +1324,14 @@ void test_rate_control_changes_neither_timestamp_nor_schema() {
     endpoint.set_send_callback(capture_send);
     TelemetryPublisher publisher;
     publisher.configure(endpoint);
-    publisher.subscribe(TelemetryPublisher::kProtocolTestTopicId, 0xAAAAU, 1U,
-                        1000U, 5000U, 0U);
+    SubscriptionFixture<4> f;
+    const auto catalog = make_telemetry_catalog();
+    publisher.bind_subscriptions(f.table);
+    btp::SubscribeResult subscribe_result{};
+    f.table.handle_subscribe(
+        catalog, subscribe_header(0xAAAAU, 1U, 1U),
+        make_subscribe(TelemetryPublisher::kProtocolTestTopicId, 1000U, 5000U), 0U,
+        &subscribe_result);
 
     publisher.publish_protocol_test(0x01020304U, float_from_bits(0x3F0D0A00U),
                                     987654321U);
@@ -1359,8 +1375,6 @@ int main(int, char**) {
     RUN_TEST(test_full_telemetry_queue_cannot_block_command_result);
     RUN_TEST(test_scheduler_counts_delivery_timeout_and_link_delivery);
     RUN_TEST(test_subscribe_above_max_is_clamped_and_below_min_is_rejected);
-    RUN_TEST(test_subscribe_channel_b_reply_is_sealed_with_endpoint_key_not_link_key);
-    RUN_TEST(test_subscribe_channel_b_reply_without_endpoint_key_configured_is_dropped);
     RUN_TEST(test_multiple_subscribers_aggregate_on_one_topic);
     RUN_TEST(test_topic_keeps_publishing_until_the_last_consumer_leaves);
     RUN_TEST(test_lease_expiry_and_new_boot_id_end_a_session);

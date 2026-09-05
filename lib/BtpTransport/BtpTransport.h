@@ -59,8 +59,8 @@ constexpr std::size_t kBtpAeadTagSize = btp::kEndpointAeadTagSize;
 //     or channel-B ESP-NOW datagram, so the wrappers below pin
 //     btp::kEspNowTransport and keep the old positional
 //     (type, object_id, ...) signatures, so CommandProcessor / TelemetryPublisher
-//     / StatusReporter / ManifestResponder / SubscriptionResponder / Logger /
-//     TerminalResponder are untouched.
+//     / StatusReporter / ManifestCatalog / Logger / TerminalResponder are
+//     untouched.
 // btp::Endpoint owns the identity and the outgoing sequence counter, and
 // there must be exactly ONE of them live for this robot's source_id, or two
 // producers could hand out the same sequence number -- the dongle's dedup

@@ -451,12 +451,11 @@ bool ROBOT::configureProtocolIdentity() {
     // desktop that has the robot's password is the only thing that can plot
     // them -- fail-closed, no cleartext fallback if key E is missing.
     telemetry.configure(protocol, RadioSeal::seal_e, nullptr);
-    // SUBSCRIBE_RESULT/UNSUBSCRIBE_RESULT are sealed the same way
-    // COMMAND_RESULT is (topico 31.2): seal_link for channel C, seal_endpoint
-    // for channel B -- see handleReceiveStatic's widened classification
-    // above.
-    subscription_responder.configure(protocol, telemetry, RadioSeal::seal, nullptr,
-                                      RadioSeal::seal_e, nullptr);
+    // SUBSCRIBE/UNSUBSCRIBE are answered by node_ itself now (topico 31.2's
+    // seal_link-for-C/seal_endpoint-for-B rule lives in RobotLink::
+    // reply_seal() instead) -- telemetry.bind_subscriptions()
+    // (bindProtocolTransport(), once node_ exists) is the only wiring left
+    // here.
     // STATUS (heartbeat) is channel C by definition (bally_channels.h), so
     // it seals for real too.
     status_reporter.configure(protocol, telemetry, RadioSeal::seal, nullptr);
@@ -490,16 +489,17 @@ bally::Channel ROBOT::classifyChannel(const btp::Header& header,
                                       std::uint32_t dongle_source_id) noexcept {
     // Mirrors handleReceiveStatic's old stage-two comment verbatim: COMMAND
     // and CONTROL/SUBSCRIBE/UNSUBSCRIBE are classified by peer (topico 31.2
-    // widened these two alongside COMMAND, once SubscriptionResponder's own
-    // replies became channel-aware), TERMINAL_IN the same way (topico 19bis).
-    // CONTROL/MANIFEST_REQUEST stays forced to channel C: only the dongle's
-    // own aggregation cache legitimately sends one.
+    // widened these two alongside COMMAND, once their replies became
+    // channel-aware -- now node_->reply_seal(), see RobotLink's own comment),
+    // TERMINAL_IN the same way (topico 19bis). CONTROL/MANIFEST_REQUEST stays
+    // forced to channel C: only the dongle's own aggregation cache
+    // legitimately sends one.
     const bool classify_by_peer =
         header.type == btp::MessageType::Command ||
         header.type == btp::MessageType::Terminal ||
         (header.type == btp::MessageType::Control &&
-         (header.object_id == SubscriptionResponder::kSubscribeObjectId ||
-          header.object_id == SubscriptionResponder::kUnsubscribeObjectId));
+         (header.object_id == btp::object_id::kSubscribe ||
+          header.object_id == btp::object_id::kUnsubscribe));
     return classify_by_peer
                ? bally::channel_of_peer(bally::Vantage::Robot, header.source_id,
                                         dongle_source_id)
@@ -572,6 +572,26 @@ void RobotLink::terminal(btp::Node& /*node*/, const btp::Header& header,
     robot_.terminal_responder.on_terminal_in(header, payload);
 }
 
+// protocol_link_.reply_seal() -- picks the key for node_'s own automatic
+// MANIFEST_DATA/SUBSCRIBE_RESULT/UNSUBSCRIBE_RESULT replies. Reuses
+// ROBOT::classifyChannel() (RobotLink is already a friend, for open()) so
+// this is the SAME classification protocolOpen() applied to the request:
+// MANIFEST_REQUEST always classifies C_Link, SUBSCRIBE/UNSUBSCRIBE by peer.
+void RobotLink::reply_seal(const btp::Header& request_header,
+                           btp::EndpointSealFn* out_seal, void** out_seal_ctx) {
+    const bally::Channel channel =
+        ROBOT::classifyChannel(request_header, robot_.dongle_source_id_);
+    if (channel == bally::Channel::B_Endpoint) {
+        *out_seal = &RadioSeal::seal_e;
+        *out_seal_ctx = nullptr;
+        return;
+    }
+    // C_Link: leave both null so Node falls through to has_seal()/seal()
+    // above, the same channel-C key MANIFEST_DATA always used.
+    *out_seal = nullptr;
+    *out_seal_ctx = nullptr;
+}
+
 bool ROBOT::bindProtocolTransport() {
     // protocol_link_ is a plain member (node_ holds it by reference): identity
     // is the only thing not known until configureProtocolIdentity() ran, so it
@@ -591,6 +611,12 @@ bool ROBOT::bindProtocolTransport() {
     // reply-only behavior ManifestResponder always had.
     node_->serve_catalog(ManifestCatalog::kSourceRoleRobot, protocol_uuid_,
                          "bally_software");
+
+    // node_'s own SubscriptionTable (StaticNode<> wires enable_subscriptions()
+    // unconditionally, see node_'s own comment) grants SUBSCRIBE/UNSUBSCRIBE
+    // against the same catalogue serve_catalog() just attached -- telemetry
+    // only needs to read the result back to know who to publish to.
+    telemetry.bind_subscriptions(*node_->subscriptions());
 
     protocol.bind(node_->endpoint());
     return true;
@@ -1071,17 +1097,15 @@ void ROBOT::handleReceiveStatic(const esp_now_recv_info_t *recv_info, const uint
             }
             break;
         case btp::MessageType::Control:
-            // CONTROL/MANIFEST_REQUEST is deliberately NOT listed here any
-            // more: node_->receive() (above) already answers it by itself
-            // (NodeRx::RequestServed, from node_'s served catalogue -- see
-            // node_'s own comment), so one never reaches this switch as
-            // NodeRx::Complete in normal operation.
-            if (header.object_id != SubscriptionResponder::kSubscribeObjectId &&
-                header.object_id != SubscriptionResponder::kUnsubscribeObjectId) {
-                instance_->command_processor.note_drop();
-                return;
-            }
-            break;
+            // Every CONTROL object_id this robot ever answered by hand is
+            // gone from here now: MANIFEST_REQUEST (NodeRx::RequestServed,
+            // node_'s served catalogue) and, as of this same migration,
+            // SUBSCRIBE/UNSUBSCRIBE too (NodeRx::SubscriptionServed,
+            // node_->subscriptions() -- see node_'s own comment for the bug
+            // this fixed). A CONTROL frame reaching here as NodeRx::Complete
+            // is therefore always a drop now, same as Telemetry/Log/Invalid
+            // below -- kept as its own case only so the switch stays
+            // exhaustive and self-documenting.
         case btp::MessageType::Terminal:
             // TERMINAL_IN never reaches here as NodeRx::Complete any more:
             // node_->receive() answers it directly (NodeRx::TerminalDelivered
@@ -1100,23 +1124,17 @@ void ROBOT::handleReceiveStatic(const esp_now_recv_info_t *recv_info, const uint
     instance_->dispatchDecoded(header, msg.payload, channel);
 }
 
-// Stage three of the pipeline above: hands one complete Command/Control
-// message to the matching handler by object_id. handleReceiveStatic's switch
-// already rejected any object_id not listed here, so the final else is
-// unreachable in practice but kept as a safe no-op rather than an assert.
+// Stage three of the pipeline above: hands one complete message to its
+// handler. handleReceiveStatic's switch now answers every Terminal and
+// Control object_id this robot ever hand-rolled a reply for (TERMINAL_IN,
+// MANIFEST_REQUEST, SUBSCRIBE, UNSUBSCRIBE) before NodeRx::Complete could
+// ever come back for one -- see that switch's own comments -- so
+// header.type is always Command by the time this runs. Kept as its own
+// function (rather than inlined at the one call site) as the seam a future
+// object_id would land in, the same role it always had.
 void ROBOT::dispatchDecoded(const btp::Header& header, btp::ByteView payload,
                            bally::Channel channel) {
-    // MessageType::Terminal is handled before this is ever called now --
-    // see handleReceiveStatic()'s own comment on that case.
-    if (header.type == btp::MessageType::Control) {
-        if (header.object_id == SubscriptionResponder::kSubscribeObjectId) {
-            processSubscribeRequest(header, payload, channel);
-        } else if (header.object_id == SubscriptionResponder::kUnsubscribeObjectId) {
-            processUnsubscribeRequest(header, payload, channel);
-        }
-    } else {
-        processCommandRequest(header, payload, channel);
-    }
+    processCommandRequest(header, payload, channel);
 }
 
 void ROBOT::processCommandRequest(const btp::Header& header,
@@ -1141,18 +1159,6 @@ void ROBOT::processCommandRequest(const btp::Header& header,
             command_processor.send_result(result);
         }
     }
-}
-
-void ROBOT::processSubscribeRequest(const btp::Header& header, btp::ByteView payload,
-                                    bally::Channel channel) {
-    const uint64_t now_us = static_cast<uint64_t>(esp_timer_get_time());
-    subscription_responder.handle_subscribe(header, payload, now_us, channel);
-}
-
-void ROBOT::processUnsubscribeRequest(const btp::Header& header, btp::ByteView payload,
-                                      bally::Channel channel) {
-    const uint64_t now_us = static_cast<uint64_t>(esp_timer_get_time());
-    subscription_responder.handle_unsubscribe(header, payload, now_us, channel);
 }
 
 void ROBOT::handleSendStatic(const wifi_tx_info_t *tx_info, esp_now_send_status_t status) {
@@ -1978,8 +1984,9 @@ void ROBOT::sampleTelemetry() {
     // even checked -- this is the robot-side half of PASSO 6's disconnect
     // behavior (the dongle-side half clears its own aggregate and stops
     // sending SUBSCRIBE upstream; either one alone is enough to eventually
-    // stop this topic).
-    telemetry.expire_subscriptions(now_us);
+    // stop this topic). node_->subscriptions() (btp::SubscriptionTable) owns
+    // this table now; expire() takes now_ms, not now_us.
+    node_->subscriptions()->expire(now_us / 1000ULL);
 
     // protocol.test is periodic and now gated by an active subscription
     // (topic_period_us() returns 0 -- "don't publish" -- until the dongle

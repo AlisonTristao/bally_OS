@@ -6,11 +6,12 @@
 #include <cstdint>
 
 #include <btp/codec.hpp>
+#include <btp/subscription.hpp>  // btp::SubscriptionTable
 #include <btp/telemetry.hpp>  // btp::WireType, btp::FieldSpec, btp::SampleWriter
 
 // Needed for BtpSealFn (a file-scope type alias, not a member of BtpEndpoint),
-// which configure() below names -- same reason StatusReporter.h and
-// SubscriptionResponder.h already include this.
+// which configure() below names -- same reason StatusReporter.h already
+// includes this.
 #include <BtpTransport.h>
 
 class BtpEndpoint;
@@ -129,12 +130,12 @@ public:
     };
 
     // Topico 17 (assinaturas e controle de taxa): one entry per row of
-    // kSchemas, indexed the same way schemas() enumerates them. This is the
-    // single place that tracks "does anyone currently want this topic and at
-    // what rate" -- SubscriptionResponder only encodes/decodes the wire
-    // payloads and calls into subscribe()/unsubscribe() here, so publish
-    // behavior can never drift from what was actually granted (same pattern
-    // ManifestResponder already uses against schemas()).
+    // kSchemas, indexed the same way schemas() enumerates them. "Does anyone
+    // currently want this topic and at what rate" now lives in node_'s own
+    // btp::SubscriptionTable (bind_subscriptions()); this struct only adds
+    // the two counters that table cannot know -- bytes actually sent and
+    // samples dropped -- so publish behavior can never drift from what was
+    // actually granted.
     struct TopicStats {
         std::uint16_t topic_id;
         // Number of live (unexpired) subscriptions for this topic. The robot
@@ -151,26 +152,6 @@ public:
         std::uint64_t samples_dropped_total;
     };
 
-    struct SubscribeOutcome {
-        bool topic_known = false;
-        // Requested rate resolved below the schema's min_rate_millihz; the
-        // caller turns this into REJECTED/INVALID_ARGUMENT.
-        bool rate_below_minimum = false;
-        // Subscription table full; the caller turns this into
-        // REJECTED/CAPACITY_EXHAUSTED.
-        bool capacity_exhausted = false;
-        std::uint32_t subscription_id = 0U;
-        std::uint32_t effective_rate_millihz = 0U;
-        std::uint32_t granted_lease_ms = 0U;
-    };
-
-    struct RateResolution {
-        bool below_minimum = false;
-        std::uint32_t effective_rate_millihz = 0U;
-    };
-
-    enum class UnsubscribeOutcome : std::uint8_t { Removed, NotFound, UnknownTopic };
-
     // `seal`/`seal_context` (default nullptr) are forwarded verbatim to
     // BtpEndpoint::send_fragment in flush() -- see BtpSealFn. TELEMETRY is
     // channel B (TraceView<->robot, key E -- bally_channels.h): the dongle
@@ -183,59 +164,25 @@ public:
     void configure(BtpEndpoint& endpoint, BtpSealFn seal = nullptr,
                    void* seal_context = nullptr) noexcept;
 
-    // Pure rate policy, exposed for testing: applies min/default/max of the
-    // schema to a requested rate (see TopicSchema above). Never returns a
-    // rate above `requested_rate_millihz`.
-    static RateResolution resolve_effective_rate(
-        const TopicSchema& schema, std::uint32_t requested_rate_millihz) noexcept;
+    // Binds the btp::SubscriptionTable that now grants/renews/expires every
+    // subscription (btp::Node::enable_subscriptions(), wired automatically by
+    // node_'s own StaticNode<> constructor -- see BallyRobot.h's node_
+    // comment) -- called once, separately from configure(), because node_
+    // does not exist yet at configure()'s own call site
+    // (configureProtocolIdentity(), before bindProtocolTransport() emplaces
+    // it). Every method below reads this table instead of keeping its own;
+    // topic_active()/topic_subscriber_count()/topic_effective_rate_millihz()/
+    // topic_period_us() all return their old "nothing bound yet" answers
+    // (false / 0) until this runs.
+    void bind_subscriptions(const btp::SubscriptionTable& subscriptions) noexcept;
 
     static const TopicSchema* find_schema(std::uint16_t topic_id) noexcept;
 
-    // Creates, renews or replaces the subscription of one subscriber session
-    // for one topic. A subscription is keyed by
-    // (request_source_id, request_boot_id, topic_id) -- the session identity
-    // of commands.md section 4 -- so several sessions can hold
-    // independent subscriptions to the same topic and the topic only stops
-    // being published when the *last* one goes away (PASSO 5).
-    //
-    // Repeating the same request bytes from the same identity returns the
-    // same subscription_id and only pushes the lease deadline forward
-    // ("repeating the identical request returns the same subscription rather
-    // than creating another"); different bytes atomically replace that
-    // session's subscription for that topic with a new subscription_id ("a
-    // new sequence atomically creates or replaces").
-    //
-    // PASSO 6 (session disconnect): a SUBSCRIBE from a source_id whose
-    // boot_id changed means the previous session of that peer is gone, so
-    // every subscription still held by the old boot_id is dropped here
-    // before the new one is granted -- a rebooted client never leaves the
-    // robot publishing for a session that no longer exists.
-    SubscribeOutcome subscribe(std::uint16_t topic_id,
-                               std::uint32_t request_source_id,
-                               std::uint32_t request_boot_id,
-                               std::uint32_t requested_rate_millihz,
-                               std::uint32_t requested_lease_ms,
-                               std::uint64_t now_us) noexcept;
-
-    UnsubscribeOutcome unsubscribe(std::uint32_t subscription_id) noexcept;
-
-    // Drops every subscription held by one subscriber session. PASSO 6's
-    // explicit disconnect path: the ESP-NOW leg has no SESSION_CLOSE (that
-    // exchange belongs to the dongle's serial transport,
-    // session-and-terminal.md section 4), so on this side a session ends
-    // either by lease expiry, by the peer coming back with a new boot_id, or
-    // by this call. Returns how many subscriptions were removed.
-    std::size_t drop_session(std::uint32_t subscriber_source_id,
-                             std::uint32_t subscriber_boot_id) noexcept;
-
-    // Clears any subscription whose lease has elapsed. PASSO 6: a robot that
-    // stops hearing from the dongle (no renewed SUBSCRIBE) falls back to "not
-    // publishing" for that topic instead of leaking a stale high rate
-    // forever.
-    void expire_subscriptions(std::uint64_t now_us) noexcept;
-
     // True when topic_id currently has at least one live, unexpired
-    // subscription. Non-periodic topics (robot.state) are published on
+    // subscription (btp::SubscriptionTable::subscriber_count() -- expire()
+    // reflects whatever it was last called with, see bind_subscriptions()'s
+    // comment and BallyRobot.cpp's sampleTelemetry(), which calls it every
+    // pass before this). Non-periodic topics (robot.state) are published on
     // events regardless of this, so callers only gate periodic topics on it.
     bool topic_active(std::uint16_t topic_id) const noexcept;
 
@@ -247,6 +194,9 @@ public:
     // one and no subscriber ever receives less than it asked for.
     std::uint32_t topic_effective_rate_millihz(std::uint16_t topic_id) const noexcept;
 
+    // Total live subscriptions across every known topic (schemas()'s own
+    // table) -- a sum of topic_subscriber_count(), not a count this class
+    // keeps itself any more.
     std::size_t active_subscription_count() const noexcept;
 
     // Publish period derived from the topic's aggregate effective rate, in
@@ -301,18 +251,15 @@ private:
     static constexpr std::size_t kMaxPayloadSize = kProtocolTestPayloadSize;
     static constexpr std::size_t kMaxTopics = 3U;  // matches kSchemas today
 public:
-    // Bounded subscription table: kMaxTopics topics times a handful of
-    // concurrent desktop sessions behind the single ESP-NOW peer. A request
-    // that would exceed it is answered CAPACITY_EXHAUSTED instead of
-    // evicting somebody else's subscription.
+    // kMaxTopics topics times a handful of concurrent desktop sessions behind
+    // the single ESP-NOW peer -- node_'s own btp::SubscriptionTable is what
+    // actually enforces this now (BallyRobot.h's node_ MaxSubscriptions
+    // template argument), sized from this same constant so the two can never
+    // drift apart. A request past capacity is answered CAPACITY_EXHAUSTED
+    // instead of evicting somebody else's subscription.
     static constexpr std::size_t kMaxSubscriptions = 8U;
 
 private:
-    // Leases are requester-supplied but bounded locally so an abandoned
-    // client (dongle rebooted without UNSUBSCRIBE) cannot pin a rate forever.
-    static constexpr std::uint32_t kMinLeaseMs = 1000U;
-    static constexpr std::uint32_t kMaxLeaseMs = 300000U;  // 5 minutes
-
     struct Sample {
         std::uint64_t timestamp_us;
         std::uint32_t sequence;
@@ -337,25 +284,12 @@ private:
 
     // Per-topic byte/drop counters for STATUS section 5.1. Index-aligned with
     // schemas(), not a separate map. Subscriptions themselves live in
-    // subscriptions_ below, because a topic can now have several.
+    // btp::SubscriptionTable now (subscriptions_ below), because a topic can
+    // have several.
     struct TopicRuntime {
         std::uint16_t topic_id = 0U;
         std::uint64_t bytes_sent_total = 0U;
         std::uint64_t samples_dropped_total = 0U;
-    };
-
-    // One row per (subscriber session, topic_id). Statically sized: no
-    // allocation anywhere on the control or radio path.
-    struct Subscription {
-        bool active = false;
-        std::uint16_t topic_id = 0U;
-        std::uint32_t subscription_id = 0U;
-        std::uint32_t subscriber_source_id = 0U;
-        std::uint32_t subscriber_boot_id = 0U;
-        std::uint32_t requested_rate_millihz = 0U;  // raw request bytes, kept
-        std::uint32_t requested_lease_ms = 0U;      // to detect an exact retry
-        std::uint32_t effective_rate_millihz = 0U;
-        std::uint64_t lease_deadline_us = 0U;
     };
 
     PublishResult enqueue(std::uint16_t topic_id,
@@ -365,9 +299,6 @@ private:
     void count_invalid() noexcept;
     int find_topic_index(std::uint16_t topic_id) const noexcept;
     void init_runtime_if_needed() noexcept;
-    // Callers must already hold runtime_lock_.
-    std::uint16_t locked_subscriber_count(std::uint16_t topic_id) const noexcept;
-    std::uint32_t locked_topic_rate(std::uint16_t topic_id) const noexcept;
 
     BtpEndpoint* endpoint_ = nullptr;
     BtpSealFn seal_ = nullptr;
@@ -375,17 +306,26 @@ private:
     Sample queue_[kQueueCapacity]{};
     MonitorStage monitor_stage_{};
     TopicRuntime runtime_[kMaxTopics]{};
-    Subscription subscriptions_[kMaxSubscriptions]{};
+    // nullptr until bind_subscriptions() runs (see its own comment) --
+    // topic_active()/topic_subscriber_count()/topic_effective_rate_millihz()/
+    // topic_period_us() all answer their "nothing bound" default (false / 0)
+    // until then, the same posture an empty subscriptions_[] used to have.
+    // Read from the state-machine task (sampleTelemetry()) and, through
+    // node_->receive()/expire(), written from the Wi-Fi RX task -- the same
+    // tolerated cross-task race node_ itself already has (see BallyRobot.h's
+    // node_ comment): a torn read sees a grant/expiry as of a moment earlier,
+    // never a corrupt one (SubscriptionRecord is plain fixed-size fields, no
+    // pointers), and self-heals on the next tick. No lock, on purpose --
+    // deliberately not reintroducing runtime_lock_'s old role here, since
+    // that would mean stalling the Wi-Fi RX task's SUBSCRIBE handling behind
+    // whatever the state-machine task is doing at the same moment.
+    const btp::SubscriptionTable* subscriptions_ = nullptr;
     bool runtime_initialized_ = false;
-    std::uint32_t next_subscription_id_ = 1U;
-    // Guards runtime_[] and next_subscription_id_ only. Independent of, and
-    // never held across, anything touching BtpEndpoint/TxScheduler -- so it
-    // cannot introduce a wait on the radio/priority path (PASSO 7). Writers
-    // (subscribe/unsubscribe/expire_subscriptions, rare: ESP-NOW control rx
-    // and a periodic sweep) and readers (topic_active/topic_period_us, one
-    // check per sampleTelemetry() tick) use a short bounded spin rather than
-    // blocking forever; a reader that loses the race treats the topic as
-    // inactive for that one tick rather than stalling.
+    // Guards runtime_[] only. Independent of, and never held across, anything
+    // touching BtpEndpoint/TxScheduler -- so it cannot introduce a wait on
+    // the radio/priority path (PASSO 7). A short bounded spin rather than
+    // blocking forever; a reader that loses the race treats a topic's stats
+    // as unavailable for that one tick rather than stalling.
     mutable std::atomic_flag runtime_lock_ = ATOMIC_FLAG_INIT;
     std::atomic<std::uint32_t> write_index_{0U};
     std::atomic<std::uint32_t> read_index_{0U};

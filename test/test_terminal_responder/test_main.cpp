@@ -9,7 +9,7 @@
 #include <string>
 #include <vector>
 
-// TerminalResponder is pure C++ (same shape as SubscriptionResponder), so it
+// TerminalResponder is pure C++ (same shape as ManifestCatalog), so it
 // links into env:native. This suite drives it the way the robot does --
 // on_terminal_in() (RX task) buffers bytes, pump() (comms task) runs the
 // editor and emits TERMINAL_OUT, deliver_command_output() (shell task) hands

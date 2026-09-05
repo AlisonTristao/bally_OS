@@ -62,7 +62,12 @@ constexpr std::size_t kMaxCatalogFields = 8U;
 // carries no fields, which BTP 2.39.0's add_topic() now accepts directly, so
 // unlike the old buildCatalog() nothing is skipped here: every schema this
 // robot publishes ends up in the served catalogue, and therefore on the
-// wire. Then loads `source_info`[0..source_info_count) via
+// wire. Each topic's min_rate_millihz/default_rate_millihz (TopicSchema's
+// own local rate policy, never on the wire) come along too (BTP 2.40.0) --
+// node_->receive() reads them straight from this catalogue when it answers
+// SUBSCRIBE (btp::SubscriptionTable::handle_subscribe()), so this is the
+// only place that policy needs to be threaded through any more; nothing
+// else revalidates it. Then loads `source_info`[0..source_info_count) via
 // add_source_info() and sets catalog.config_revision() to kConfigRevision.
 //
 // `schemas` and `source_info` are only read for the duration of this call;

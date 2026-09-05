@@ -18,9 +18,8 @@
 // server-side here, in a ShellLineEditor per remote origin, and the command's
 // output is mirrored back inline as TERMINAL_OUT.
 //
-// Same shape as SubscriptionResponder/ManifestResponder: pure C++ (no
-// Arduino/FreeRTOS), the caller owns the clock and the FreeRTOS glue. It is
-// driven from three contexts:
+// Same shape as ManifestCatalog: pure C++ (no Arduino/FreeRTOS), the caller
+// owns the clock and the FreeRTOS glue. It is driven from three contexts:
 //
 //   on_terminal_in()          Wi-Fi RX task  -- only buffers bytes, never
 //                                               runs the editor
