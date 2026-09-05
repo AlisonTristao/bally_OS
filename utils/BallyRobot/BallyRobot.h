@@ -425,7 +425,7 @@ private:
     void buildSourceInfo();
 
     // This boot's identity, computed once by configureProtocolIdentity() (MAC
-    // + a fresh random boot_id from NVS) and consumed later by
+    // + the next persistent boot_id from NVS, incremented with wrap to 1) and consumed later by
     // bindProtocolTransport(), which is what actually builds node_ -- see
     // node_'s own comment for why the two cannot happen at the same time.
     std::uint32_t protocol_source_id_ = 0U;

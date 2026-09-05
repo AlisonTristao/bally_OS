@@ -10,7 +10,6 @@
 #include "freertos/task.h"
 #include "freertos/queue.h"
 #include "esp_log.h"
-#include "esp_random.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_app_desc.h"
@@ -379,10 +378,8 @@ bool ROBOT::configureProtocolIdentity() {
         return false;
     }
 
-    uint32_t boot_id = 0U;
-    do {
-        boot_id = esp_random();
-    } while (boot_id == 0U || boot_id == previous_boot_id);
+    const uint32_t boot_id =
+        previous_boot_id == UINT32_MAX ? 1U : previous_boot_id + 1U;
 
     ret = nvs_set_u32(handle, "last_boot", boot_id);
     if (ret == ESP_OK) ret = nvs_commit(handle);

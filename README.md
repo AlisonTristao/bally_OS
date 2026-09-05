@@ -169,7 +169,7 @@ No segundo núcleo, é executada a rotina paralela do robô, responsável por:
 
 ### Comunicação
 - **ESP-NOW/BTP v1:** Utilizado para comunicação sem fio. `BTP` (`v1.0.1-beta`) é integrado via `lib_deps` do PlatformIO, fixado numa tag; nenhum `struct` C/C++ é transmitido.
-- **Identidade:** `source_id` deriva do MAC de fábrica; `boot_id` é aleatório, não nulo e persistido em NVS para impedir repetição imediata. A sequência é única por mensagem lógica e compartilhada com segurança entre tasks.
+- **Identidade:** `source_id` deriva do MAC de fábrica; `boot_id` é um contador incremental não nulo persistido em NVS, com retorno a 1 após `UINT32_MAX`. A sequência é única por mensagem lógica e compartilhada com segurança entre tasks.
 - **Comandos:** o peer autorizado é o `MAC_ADDR` do build e seu `source_id` precisa corresponder ao MAC recebido. O payload da ação de shell é uma única linha de até 512 bytes, sem NUL, CR ou LF. O resultado BTP repete a tripla da requisição, `action_id/version`, status e erro; o cache estático de 16 entradas permanece durante todo o boot, portanto retry nunca repete o efeito.
 - **Scheduler TX:** cada produtor entrega frames completos a uma fila bounded da sua classe. Há capacidade exclusiva para resultados de comando mesmo com 16 telemetrias pendentes. Telemetria e logs espontâneos não são retransmitidos; perda de resultado é recuperada pelo retry da requisição e replay do cache.
 
