@@ -150,6 +150,154 @@ Além disso, `BallyRobotShell.cpp` é **o único lugar** onde podem ser registra
 
 ## Fluxo Detalhado do Sistema
 
+### Tasks da aplicação
+
+O BallyOS cria oito tasks próprias. Todas usam `xTaskCreateStaticPinnedToCore()`,
+com stack e `StaticTask_t` reservados estaticamente em `src/main.cpp`. O tick do
+FreeRTOS está configurado em 1 kHz; portanto, nos loops que usam
+`WDOG_TIMEOUT_TK = 1`, o intervalo nominal entre passagens é de 1 ms.
+
+| Task | Core | Prioridade | Stack | Responsabilidade e forma de espera |
+|---|---:|---:|---:|---|
+| `state_machine` | 1 (`APP_CPU_NUM`) | 10 | 8 KB | Executa `StateMachine::run()`, roda a ação do estado atual e produz telemetria. Faz `vTaskDelay(1)` ao final de cada passagem. |
+| `comms` | 0 (`PRO_CPU_NUM`) | 4 | 8 KB | Processa os terminais remotos, drena o `TxScheduler` e publica `STATUS`. Faz `vTaskDelay(1)`. |
+| `EKF_task` | 0 (`PRO_CPU_NUM`) | 4 | 2 KB | Aguarda indefinidamente em `ulTaskNotifyTake()` e, quando notificada pelo timer, executa `predict()` e `update()`. |
+| `routine` | 0 (`PRO_CPU_NUM`) | 3 | 8 KB | Drena telemetria e Logger, atualiza flags/saídas, verifica transições, aciona sons e processa jobs e scripts. Faz `vTaskDelay(1)`. |
+| `shell_task` | 0 (`PRO_CPU_NUM`) | 2 | 8 KB | Retira e executa, de forma serial, um comando por vez da fila central. |
+| `junkebox_task` | 0 (`PRO_CPU_NUM`) | 1 | 4 KB | Fica bloqueada na mailbox de reprodução e usa task notifications para interromper uma nota em andamento. |
+| `system_monitor` | 0 (`PRO_CPU_NUM`) | 1 | 4 KB | Atualiza e publica o relatório periódico de saúde; o período padrão é 10 s e `0` desabilita a publicação periódica. |
+| `interrupts` | 0 (`PRO_CPU_NUM`) | 0 | 2 KB | Task de inicialização: registra as GPIO ISRs e cria o timer periódico do EKF; depois executa `vTaskDelete(NULL)`. |
+
+`app_main` é a task de bootstrap criada pelo ESP-IDF. Ela inicializa o `ROBOT`,
+liga os callbacks, cria as tasks acima e então também se apaga. Existem ainda
+contextos pertencentes ao ESP-IDF: os callbacks de recepção/entrega ESP-NOW
+executam na task do Wi-Fi, as GPIO ISRs executam em contexto de interrupção e
+`sampleEKF()` executa na `ESP_TIMER_TASK` porque o timer usa
+`ESP_TIMER_TASK` como método de despacho.
+
+### Fluxo entre tasks, filas e callbacks
+
+```text
+GPIO ISR ───────────────> Flags ───────────────> routine ──> StateMachine::next()
+                                                    │
+ESP-NOW RX ──> BTP ──> fila de comandos ──> shell_task ──> COMMAND_RESULT
+     │                                                   │
+     └──> TerminalResponder ──> comms ───────────────────┘
+
+state_machine ──> fila de telemetria ──> routine ──┐
+todas as tasks ──> Logger/PSRAM ───────> routine ──┼──> TxScheduler
+comms ────────────────────────────────> STATUS ─────┘       │
+                                                            └──> ESP-NOW
+
+ESP_TIMER_TASK ──> amostra + task notification ──> EKF_task
+play()/stop() ───> mailbox + task notification ──> junkebox_task
+```
+
+O caminho de transmissão tem duas etapas. Os produtores primeiro codificam e
+entregam frames ao `TxScheduler`; somente `comms` chama `esp_now_send()`. O
+callback de entrega não envia o próximo frame: ele apenas publica o resultado
+em um campo atômico, consumido por `comms` na passagem seguinte. Assim, uma
+operação lenta de SD, Logger ou máquina de estados não executa diretamente no
+caminho que mantém o rádio vivo.
+
+### Filas, mailboxes e buffers de passagem
+
+#### Fila central de comandos
+
+`ROBOT::receivedDataQueue` é uma fila FreeRTOS estática com 10 posições. Cada
+item contém uma linha de shell de até 512 bytes, o slot do cache de deduplicação
+e, para comandos de terminal, a identidade da origem.
+
+- **Produtores:** callback ESP-NOW (`COMMAND_REQUEST`), `comms` (linhas do
+  terminal), e `routine` (jobs e scripts do SD).
+- **Consumidor:** `shell_task`, sempre com execução serial.
+- **Backpressure:** todos os produtores usam timeout zero e nunca bloqueiam. Um
+  comando BTP recusado recebe `BUSY/CAPACITY_EXHAUSTED`; o terminal imprime
+  `busy, command dropped`; uma ocorrência de job é contabilizada e descartada;
+  uma linha de script permanece no cursor e é tentada novamente.
+
+#### Mailbox da Junkebox
+
+`Junkebox::request_queue_` é uma fila FreeRTOS de profundidade 1. `play()` e
+`play_tone()` usam `xQueueOverwrite()`: uma solicitação ainda não consumida é
+substituída pela mais recente, em vez de as músicas formarem backlog. A task
+notification acorda a task ou interrompe a nota atual; a própria mailbox
+carrega os parâmetros completos da próxima reprodução.
+
+#### Filas de prioridade do TxScheduler
+
+O `TxScheduler` mantém seis filas circulares independentes e pré-alocadas. Cada
+fila possui seu próprio `std::atomic_flag`; enqueue/pop nunca aguardam a
+liberação do lock. A seleção de saída é por prioridade estrita:
+
+| Ordem | Classe | Capacidade | Conteúdo típico |
+|---:|---|---:|---|
+| 1 | `CommandResult` | 8 | Resultado correlacionado de comando |
+| 2 | `Status` | 4 | Heartbeat e estado do link |
+| 3 | `Terminal` | 16 | Echo, prompt e saída interativa |
+| 4 | `CriticalLog` | 8 | Logs críticos |
+| 5 | `Telemetry` | 16 | Amostras e documentos de telemetria |
+| 6 | `Debug` | 8 | Logs informativos/debug e tráfego restante |
+
+A capacidade lógica total é de 60 frames. Fila cheia ou contenção instantânea
+do `atomic_flag` aplica `drop-newest`. Somente um frame pode aguardar callback
+ESP-NOW de cada vez; o firmware usa timeout de entrega de 60 ms antes de seguir
+para o próximo. Resultados de comando não são retransmitidos pelo scheduler: um
+retry da requisição recupera o resultado guardado no `CommandProcessor`.
+
+#### TelemetryPublisher
+
+As amostras numéricas usam uma fila SPSC estática de 16 posições. A
+`state_machine` é a única produtora e `routine` é a única consumidora, drenando
+no máximo quatro amostras por passagem. Os índices de leitura/escrita são
+atômicos; fila cheia descarta a amostra nova sem bloquear.
+
+O documento UTF-8 `system.monitor`, de até 1802 bytes, não ocupa esses 16
+slots. Ele possui uma mailbox própria de uma posição, publicada pelo campo
+atômico `pending`. Se o relatório anterior ainda não foi consumido, o relatório
+novo é contado e descartado.
+
+#### Logger e TerminalResponder
+
+O Logger funciona como uma fila variável em um ring buffer de 7.440.000 bytes
+na PSRAM. Várias tasks produzem registros; `routine` os percorre para gerar
+frames de rádio. O envio por rádio não libera PSRAM: somente um flush para SD
+remove registros retidos. Quando não há espaço para o registro completo, o
+registro novo é descartado e o antigo é preservado.
+
+O `TerminalResponder` usa três slots de origem em vez de uma `QueueHandle_t`.
+Cada origem possui até 1024 bytes de entrada, 2048 bytes para a saída do comando
+e 1024 bytes de saída assíncrona, além de uma linha completa aguardando o
+comando anterior terminar. O callback Wi-Fi apenas deposita bytes; a edição de
+linha, echo e submissão acontecem em `comms`.
+
+Outras estruturas de capacidade fixa não são filas FIFO: o cache de
+deduplicação do `CommandProcessor` tem 16 slots, o `JobScheduler` tem 8 jobs, o
+Receiver BTP tem 4 slots de remontagem de 600 bytes e a tabela BTP comporta 8
+assinaturas.
+
+### Mutexes, spinlocks e notificações
+
+O código próprio possui três mutexes FreeRTOS:
+
+| Mutex | Tipo/alocação | Estado protegido | Política de espera |
+|---|---|---|---|
+| `Logger::mutex_` | Mutex normal, dinâmico | Ring da PSRAM, cursores, consumidor ativo, endpoint e captura de saída do terminal | A maioria das operações tenta por 2 ms; etapas internas de flush usam `portMAX_DELAY`. |
+| `StateMachine::transitionMutex_` | Mutex recursivo, dinâmico | Execução de `run()`/`next()`, callbacks e ring de histórico das últimas 8 transições | `portMAX_DELAY`; o lock permanece tomado durante o callback do estado/transição. |
+| `SystemMonitor::state_mutex` | Mutex normal, estático | Vetor de tasks, deltas de CPU e geração consistente do relatório | `portMAX_DELAY`. |
+
+Além deles, existem nove spinlocks baseados em `std::atomic_flag`: seis no
+`TxScheduler`, um no cache do `CommandProcessor`, um no `TerminalResponder` e
+um nas estatísticas por tópico do `TelemetryPublisher`. Esses locks protegem
+seções curtas e usam políticas de falha rápida ou número limitado de tentativas
+nos caminhos em que bloquear uma task de maior prioridade seria perigoso.
+
+As task notifications não carregam os dados completos e não substituem as
+filas: no EKF elas apenas informam que existe uma amostra nova nos vetores
+compartilhados; na Junkebox elas apenas acordam/interrompem a reprodução, cuja
+próxima solicitação permanece na mailbox. Não há event groups, stream buffers,
+message buffers nem semáforos binários/counting no código próprio.
+
 O funcionamento do robô é dividido em duas partes principais, aproveitando os dois núcleos do ESP32-S3:
 
 ### Núcleo 1 (Core APP) — Execução Prioritária

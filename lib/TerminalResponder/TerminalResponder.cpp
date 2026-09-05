@@ -378,5 +378,6 @@ TerminalResponder::Stats TerminalResponder::stats() const noexcept {
         lines_dropped_busy_.load(std::memory_order_relaxed),
         frames_out_.load(std::memory_order_relaxed),
         in_bytes_dropped_.load(std::memory_order_relaxed),
+        async_lines_dropped_.load(std::memory_order_relaxed),
     };
 }

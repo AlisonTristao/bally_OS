@@ -118,6 +118,11 @@ public:
     bool complete(std::uint8_t cache_slot, std::uint8_t shell_status,
                   std::uint64_t now_us, ResultView* result_out) noexcept;
 
+    // Completes a command and includes the shell output in COMMAND_RESULT.
+    bool complete(std::uint8_t cache_slot, std::uint8_t shell_status,
+                  std::uint64_t now_us, const char* message,
+                  ResultView* result_out) noexcept;
+
     // Used when the FreeRTOS execution queue is full after the dedup slot was
     // reserved. The request stays cached and a retry replays this BUSY result.
     bool reject_busy(std::uint8_t cache_slot, std::uint64_t now_us,

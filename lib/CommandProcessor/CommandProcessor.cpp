@@ -323,13 +323,23 @@ bool CommandProcessor::complete(std::uint8_t cache_slot,
                                 std::uint8_t shell_status,
                                 std::uint64_t now_us,
                                 ResultView* result_out) noexcept {
+    return complete(cache_slot, shell_status, now_us, "", result_out);
+}
+
+bool CommandProcessor::complete(std::uint8_t cache_slot,
+                                std::uint8_t shell_status,
+                                std::uint64_t now_us,
+                                const char* message,
+                                ResultView* result_out) noexcept {
     while (cache_lock_.test_and_set(std::memory_order_acquire)) {}
     Unlock unlock{cache_lock_};
     if (cache_slot >= kCacheCapacity) return false;
     const bool success = shell_status == 0U;
     if (!finish(cache_slot, success ? Status::Success : Status::Failed,
                 success ? ErrorCode::None : ErrorCode::InternalError,
-                success ? "" : "shell command failed", now_us, shell_view_,
+                success ? (message != nullptr ? message : "")
+                        : "shell command failed",
+                now_us, shell_view_,
                 result_out)) {
         return false;
     }

@@ -1792,12 +1792,14 @@ void ROBOT::runShell(void *param) {
 
         const bool from_terminal =
             received_command.cache_slot == kTerminalCommandSlot;
+        const bool from_remote =
+            received_command.cache_slot != kLocalCommandSlot && !from_terminal;
 
         // A terminal command's output is mirrored back to its origin as
         // TERMINAL_OUT (topico 19bis), so capture every log line it emits --
         // both the shell's own output_callback text and the insert_log()
         // calls inside the command bodies.
-        if (from_terminal) {
+        if (from_terminal || from_remote) {
             logger.begin_capture(instance_->shell_task_handle_);
         }
 
@@ -1807,12 +1809,23 @@ void ROBOT::runShell(void *param) {
         const uint8_t shell_status =
             instance_->shell.run_command_line(received_command.text);
 
-        if (from_terminal) {
+        if (from_terminal || from_remote) {
             std::string captured;
             logger.end_capture(captured);
-            instance_->terminal_responder.deliver_command_output(
-                received_command.terminal_source_id,
-                received_command.terminal_boot_id, captured.c_str(), shell_status);
+            if (from_terminal) {
+                instance_->terminal_responder.deliver_command_output(
+                    received_command.terminal_source_id,
+                    received_command.terminal_boot_id, captured.c_str(), shell_status);
+                continue;
+            }
+
+            CommandProcessor::ResultView result{};
+            if (instance_->command_processor.complete(
+                    received_command.cache_slot, shell_status,
+                    static_cast<uint64_t>(esp_timer_get_time()), captured.c_str(),
+                    &result)) {
+                instance_->command_processor.send_result(result);
+            }
             continue;
         }
 
