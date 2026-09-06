@@ -140,10 +140,13 @@ private:
  */
 class ScheduledDebugTest {
 public:
-    bool schedule(uint32_t samples, uint32_t interval_ms) {
+    bool schedule(uint32_t samples, uint32_t interval_ms,
+                  uint32_t source_id = 0U, uint32_t boot_id = 0U) {
         if (samples == 0) return false;
 
         interval_ms_.store(interval_ms, std::memory_order_relaxed);
+        source_id_.store(source_id, std::memory_order_relaxed);
+        boot_id_.store(boot_id, std::memory_order_relaxed);
         next_ms_.store(static_cast<uint32_t>(esp_timer_get_time() / 1000ULL),
                        std::memory_order_relaxed);
         remaining_.store(samples, std::memory_order_release);
@@ -155,6 +158,9 @@ public:
     bool active() const {
         return remaining_.load(std::memory_order_acquire) != 0;
     }
+
+    uint32_t source_id() const { return source_id_.load(std::memory_order_relaxed); }
+    uint32_t boot_id() const { return boot_id_.load(std::memory_order_relaxed); }
 
     /**
      * @brief Check whether a sample is due right now.
@@ -182,6 +188,8 @@ private:
     std::atomic<uint32_t> remaining_{0};
     std::atomic<uint32_t> interval_ms_{0};
     std::atomic<uint32_t> next_ms_{0};
+    std::atomic<uint32_t> source_id_{0};
+    std::atomic<uint32_t> boot_id_{0};
 };
 
 class ROBOT {
@@ -448,6 +456,8 @@ private:
     ScheduledDebugTest imu_i2c_test_;
     uint32_t           imu_i2c_ok_count_    = 0;
     uint32_t           imu_i2c_fail_count_  = 0;
+    std::atomic<uint32_t> active_terminal_source_id_{0};
+    std::atomic<uint32_t> active_terminal_boot_id_{0};
     std::atomic<bool> direct_next_shell_output{false};
 
     // matriz of data to kalman filter

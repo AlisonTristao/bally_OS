@@ -808,7 +808,9 @@ bool ROBOT::canScheduleDebugTest() const {
 bool ROBOT::scheduleDebugTest(ScheduledDebugTest& test, uint32_t samples,
                               uint32_t interval_ms) {
     if (!canScheduleDebugTest()) return false;
-    return test.schedule(samples, interval_ms);
+    return test.schedule(samples, interval_ms,
+                         active_terminal_source_id_.load(std::memory_order_relaxed),
+                         active_terminal_boot_id_.load(std::memory_order_relaxed));
 }
 
 bool ROBOT::anyDebugTestActive() const {
@@ -847,23 +849,37 @@ void ROBOT::processDebug() {
     // Add one `if (test.poll()) { ... }` block per ScheduledDebugTest member
     // (H-bridge current, ...).
     if (array_sensor_test_.poll()) {
-        logger.insert_log(logType::INFO, array_sensor->debug().c_str());
+        const std::string text = array_sensor->debug();
+        logger.insert_log(logType::INFO, text.c_str());
+        terminal_responder.push_async_output(array_sensor_test_.source_id(),
+                                             array_sensor_test_.boot_id(), text.c_str());
     }
 
     if (encoder_test_.poll()) {
-        logger.insert_logf(
-            logType::INFO, "Encoders: left=%lld right=%lld",
-            static_cast<long long>(encoder_left->getCount()),
-            static_cast<long long>(encoder_right->getCount()));
+        char text[96];
+        std::snprintf(text, sizeof(text), "Encoders: left=%lld right=%lld",
+                      static_cast<long long>(encoder_left->getCount()),
+                      static_cast<long long>(encoder_right->getCount()));
+        logger.insert_log(logType::INFO, text);
+        terminal_responder.push_async_output(encoder_test_.source_id(),
+                                             encoder_test_.boot_id(), text);
     }
 
     if (imu_test_.poll()) {
         imu->getAGT();
-        logger.insert_logf(
-            logType::INFO,
-            "IMU: ax=%.2f\tay=%.2f\taz=%.2f\tgx=%.2f\tgy=%.2f\tgz=%.2f\tt=%.2f",
-            imu->accX(), imu->accY(), imu->accZ(),
-            imu->gyrX(), imu->gyrY(), imu->gyrZ(), imu->temp());
+        char text[192];
+        // Fixed-width fields with a plain space separator, not '\t': a raw tab
+        // lands at whatever column TraceView's terminal happens to be at (its
+        // 8-column tab-stop expansion, serialterminalwidget.cpp), which moves
+        // every sample because these values change width (sign, digit count)
+        // from one reading to the next -- that's the "\t errado" misalignment.
+        std::snprintf(text, sizeof(text),
+                      "IMU: ax=%+7.2f ay=%+7.2f az=%+7.2f gx=%+7.2f gy=%+7.2f gz=%+7.2f t=%+7.2f",
+                      imu->accX(), imu->accY(), imu->accZ(),
+                      imu->gyrX(), imu->gyrY(), imu->gyrZ(), imu->temp());
+        logger.insert_log(logType::INFO, text);
+        terminal_responder.push_async_output(imu_test_.source_id(),
+                                             imu_test_.boot_id(), text);
     }
 
     if (imu_i2c_test_.poll()) {
@@ -872,10 +888,15 @@ void ROBOT::processDebug() {
         ok ? ++imu_i2c_ok_count_ : ++imu_i2c_fail_count_;
         const uint32_t total   = imu_i2c_ok_count_ + imu_i2c_fail_count_;
         const float    ok_pct  = total ? (100.0f * imu_i2c_ok_count_) / total : 0.0f;
-        logger.insert_logf(
-            logType::INFO,
-            "IMU I2C check: %s (WHO_AM_I=0x%02X) | %u ok / %u fail (%.1f%% ok)",
-            ok ? "OK" : "FAIL", who, imu_i2c_ok_count_, imu_i2c_fail_count_, ok_pct);
+        char text[144];
+        std::snprintf(text, sizeof(text),
+                      "IMU I2C check: %s (WHO_AM_I=0x%02X) | %lu ok / %lu fail (%.1f%% ok)",
+                      ok ? "OK" : "FAIL", who,
+                      static_cast<unsigned long>(imu_i2c_ok_count_),
+                      static_cast<unsigned long>(imu_i2c_fail_count_), ok_pct);
+        logger.insert_log(logType::INFO, text);
+        terminal_responder.push_async_output(imu_i2c_test_.source_id(),
+                                             imu_i2c_test_.boot_id(), text);
     }
 }
 
@@ -1801,6 +1822,16 @@ void ROBOT::runShell(void *param) {
         // calls inside the command bodies.
         if (from_terminal || from_remote) {
             logger.begin_capture(instance_->shell_task_handle_);
+        }
+
+        if (from_terminal) {
+            instance_->active_terminal_source_id_.store(
+                received_command.terminal_source_id, std::memory_order_relaxed);
+            instance_->active_terminal_boot_id_.store(
+                received_command.terminal_boot_id, std::memory_order_relaxed);
+        } else {
+            instance_->active_terminal_source_id_.store(0U, std::memory_order_relaxed);
+            instance_->active_terminal_boot_id_.store(0U, std::memory_order_relaxed);
         }
 
         // Execute exactly once, then publish the final correlated result. A

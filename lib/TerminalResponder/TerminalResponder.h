@@ -154,6 +154,7 @@ private:
         // sets it when it flushes async_out and clears it on the pass that
         // repaints the prompt once the burst pauses.
         bool async_prompt_dirty = false;
+        std::uint64_t last_async_output_us = 0U;
     };
 
     // Bound for try_lock()'s spin. Large only because every critical section

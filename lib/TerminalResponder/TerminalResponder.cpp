@@ -253,6 +253,7 @@ void TerminalResponder::pump(std::uint64_t now_us) noexcept {
         std::uint32_t boot = 0U;
         std::string result;
         std::string input;
+        std::string async_output;
 
         // Comms task, priority 4, core 0. deliver_command_output() on the
         // shell task (priority 2) also takes lock_, so a spin-wait here could
@@ -277,6 +278,9 @@ void TerminalResponder::pump(std::uint64_t now_us) noexcept {
             if (!s.in.empty()) {
                 input.swap(s.in);
             }
+            if (!s.async_out.empty()) {
+                async_output.swap(s.async_out);
+            }
         }
         unlock();
 
@@ -292,6 +296,8 @@ void TerminalResponder::pump(std::uint64_t now_us) noexcept {
             s.prompt_painted = false;
             s.awaiting_result = false;
             s.pending_line.clear();
+            s.async_prompt_dirty = false;
+            s.last_async_output_us = 0U;
         }
         if (!s.prompt_painted) {
             s.editor.setPrompt(prompt_, out);
@@ -335,6 +341,15 @@ void TerminalResponder::pump(std::uint64_t now_us) noexcept {
                 continue;
             }
             submit_line(s, src, boot, line, out);
+        }
+
+        if (!async_output.empty()) {
+            s.editor.writeAsyncOutput(async_output, out);
+            s.async_prompt_dirty = true;
+            s.last_async_output_us = now_us;
+        } else if (s.async_prompt_dirty && now_us - s.last_async_output_us >= 250000U) {
+            s.editor.refreshLine(out);
+            s.async_prompt_dirty = false;
         }
 
         emit_terminal_out(out, now_us);

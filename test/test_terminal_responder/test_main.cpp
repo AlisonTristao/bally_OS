@@ -190,6 +190,21 @@ void test_line_submits_and_output_mirrors_back() {
     TEST_ASSERT_EQUAL_STRING("link -stats", g_submit.lines[1].c_str());
 }
 
+void test_async_output_is_mirrored_to_terminal() {
+    const std::uint32_t src = 0xAAAA0009U;
+    const std::uint32_t boot = 0xBBBB0009U;
+
+    feed(src, boot, "x");
+    pump();
+    g_sent.clear();
+
+    g_responder->push_async_output(src, boot, "IMU: ax=1.00");
+    pump();
+
+    const std::string out = all_sent();
+    TEST_ASSERT_TRUE(out.find("! IMU: ax=1.00\r\n") != std::string::npos);
+}
+
 // Tab completion runs against the configured provider.
 void test_tab_completion() {
     feed(0xAAAA0003U, 0xBBBB0003U, "he\t");
@@ -304,6 +319,7 @@ int main(int, char**) {
     RUN_TEST(test_keystrokes_are_echoed);
     RUN_TEST(test_keystrokes_are_coloured_by_command_token);
     RUN_TEST(test_line_submits_and_output_mirrors_back);
+    RUN_TEST(test_async_output_is_mirrored_to_terminal);
     RUN_TEST(test_tab_completion);
     RUN_TEST(test_nonzero_status_is_reported);
     RUN_TEST(test_consecutive_commands_each_run);
