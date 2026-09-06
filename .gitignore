@@ -2,4 +2,5 @@
 .vscode
 .log
 .claude
+/build/
 /managed_components/
