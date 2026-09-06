@@ -177,6 +177,11 @@ namespace btp_command {
 constexpr std::uint16_t kCommandRequestObjectId = 0x0001U;
 constexpr std::uint16_t kShellActionId = 0x0001U;
 constexpr std::uint16_t kShellActionVersion = 0x0001U;
+// A no-op, side-effect-free action a peer can send purely to measure RTT
+// (round-trip to a COMMAND_RESULT and back) -- answered directly by
+// CommandProcessor::intake, never reaching the shell queue.
+constexpr std::uint16_t kPingActionId = 0x0002U;
+constexpr std::uint16_t kPingActionVersion = 0x0001U;
 constexpr std::size_t kRequestPrefixSize = 20U;
 constexpr std::size_t kMaxShellCommandSize = 512U;
 constexpr std::size_t kMaxLogicalRequestSize =

@@ -90,6 +90,19 @@ std::vector<std::uint8_t> shell_request_payload(std::uint32_t target_source,
     return payload;
 }
 
+std::vector<std::uint8_t> ping_request_payload(std::uint32_t target_source,
+                                               std::uint32_t target_boot) {
+    std::vector<std::uint8_t> payload(btp_command::kRequestPrefixSize);
+    write_u32(payload.data(), target_source);
+    write_u32(payload.data() + 4U, target_boot);
+    write_u16(payload.data() + 8U, btp_command::kPingActionId);
+    write_u16(payload.data() + 10U, btp_command::kPingActionVersion);
+    write_u16(payload.data() + 12U, 0U);
+    write_u16(payload.data() + 14U, 0U);
+    write_u32(payload.data() + 16U, 0U);
+    return payload;
+}
+
 btp::Header command_header(std::uint32_t sequence) {
     return {
         .type = btp::MessageType::Command,
@@ -694,6 +707,34 @@ void test_saturated_execution_queue_returns_cached_busy_result() {
     TEST_ASSERT_EQUAL_UINT32(busy.sequence, retry.result.sequence);
     TEST_ASSERT_EQUAL_UINT8_ARRAY(busy.payload, retry.result.payload,
                                   busy.payload_size);
+    TEST_ASSERT_EQUAL_UINT32(0U, processor.stats().executed);
+}
+
+// A ping is answered synchronously at RX time (CommandProcessor::intake),
+// never touching the shell queue -- so an RTT measurement over it is the
+// round trip alone, not shell execution latency plus the round trip.
+void test_ping_action_is_answered_immediately_without_touching_the_shell() {
+    BtpEndpoint endpoint;
+    TEST_ASSERT_TRUE(endpoint.configure(1U, 2U));
+    CommandProcessor processor;
+    processor.configure(endpoint);
+    const btp::Header header = command_header(91U);
+    const auto payload = ping_request_payload(1U, 2U);
+    const btp::ByteView bytes{payload.data(), payload.size()};
+
+    const auto result = processor.intake(header, bytes, 40U);
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<std::uint8_t>(CommandProcessor::IntakeKind::ResultReady),
+        static_cast<std::uint8_t>(result.kind));
+    TEST_ASSERT_EQUAL_HEX8(
+        static_cast<std::uint8_t>(CommandProcessor::Status::Success),
+        result.result.payload[16U]);
+    TEST_ASSERT_EQUAL_HEX16(
+        static_cast<std::uint16_t>(CommandProcessor::ErrorCode::None),
+        static_cast<std::uint16_t>(result.result.payload[18U]) |
+            static_cast<std::uint16_t>(result.result.payload[19U] << 8U));
+    // Never queued for the shell: stats().executed only counts what
+    // TinyShell actually ran.
     TEST_ASSERT_EQUAL_UINT32(0U, processor.stats().executed);
 }
 
@@ -1371,6 +1412,7 @@ int main(int, char**) {
     RUN_TEST(test_channel_b_reply_without_endpoint_key_configured_is_dropped);
     RUN_TEST(test_conflicting_duplicate_is_rejected_without_execution);
     RUN_TEST(test_saturated_execution_queue_returns_cached_busy_result);
+    RUN_TEST(test_ping_action_is_answered_immediately_without_touching_the_shell);
     RUN_TEST(test_dedup_ring_evicts_oldest_and_never_re_executes_it);
     RUN_TEST(test_full_telemetry_queue_cannot_block_command_result);
     RUN_TEST(test_scheduler_counts_delivery_timeout_and_link_delivery);

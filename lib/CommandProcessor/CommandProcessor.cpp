@@ -299,6 +299,17 @@ CommandProcessor::Intake CommandProcessor::intake(
     btp_command::ParseError parse_error = btp_command::parse_request(
         header, payload, endpoint_->source_id(), endpoint_->boot_id(),
         &request);
+    if (parse_error == btp_command::ParseError::Ok &&
+        action_id == btp_command::kPingActionId) {
+        // Answered here, at RX time -- no shell involvement, no side
+        // effects, so this measures the round trip alone.
+        accepted_.fetch_add(1U, std::memory_order_relaxed);
+        if (finish(slot, Status::Success, ErrorCode::None, "", now_us, rx_view_,
+                   &intake.result)) {
+            intake.kind = IntakeKind::ResultReady;
+        }
+        return intake;
+    }
     if (parse_error == btp_command::ParseError::Ok) {
         parse_error = btp_command::copy_shell_command(
             request, intake.work.command, sizeof(intake.work.command));
