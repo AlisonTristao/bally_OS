@@ -43,18 +43,25 @@ constexpr std::size_t kMaxSourceInfoEntries = 16U;
 // whenever a firmware build changes the topics or fields TelemetryPublisher
 // exposes. RobotSettings.h's own comment on "the field's documented meaning"
 // refers to this constant.
-constexpr std::uint32_t kConfigRevision = 2U;
+//
+// Bumped to 3: added robot.sensors (encoder speeds, IMU, current_a/current_b)
+// and robot.flags (buttons/side_sensors/leds/pwm) topics.
+constexpr std::uint32_t kConfigRevision = 3U;
 
 // btp::Role::Producer -- a leaf node describing only itself (see
 // bindProtocolTransport()'s serve_catalog() call).
 constexpr std::uint8_t kSourceRoleRobot = 0x01U;
 
-// Bound on field-bearing topics/fields this function will load; matches
-// node_'s StaticNode CatalogTopics/CatalogFields template arguments
-// (BallyRobot.h). A schema exceeding either is a programming error caught at
+// Bound on the TOTAL field-record pool across every topic this function will
+// load (btp::StaticCatalog's Fields template argument -- one flat pool shared
+// by every topic, not a per-topic cap); matches node_'s StaticNode
+// CatalogFields template argument (BallyRobot.h). Today's schemas need 2
+// (protocol.test) + 1 (robot.state) + 0 (system.monitor) + 15 (robot.sensors,
+// including its 8 array-sensor channels) + 5 (robot.flags) = 23, with
+// headroom to spare. A total exceeding this is a programming error caught at
 // boot (see populate()'s return value), the same role ManifestResponder::
 // buildCatalog()'s catalog_valid_ used to play.
-constexpr std::size_t kMaxCatalogFields = 8U;
+constexpr std::size_t kMaxCatalogFields = 24U;
 
 // Loads every topic of `schemas`[0..schema_count) into `catalog` via
 // Catalog::add_topic() -- a body-only topic (field_count == 0, e.g.

@@ -15,6 +15,42 @@ constexpr TelemetryPublisher::FieldSchema kRobotStateFields[] = {
     {1U, 0U, "state", btp::WireType::Uint8, "1", 1.0F, 0.0F, 1U, false},
 };
 
+constexpr TelemetryPublisher::FieldSchema kSensorsFields[] = {
+    {1U, 0U, "linear_speed", btp::WireType::Float32, "m/s", 1.0F, 0.0F, 1U, false},
+    {2U, 1U, "angular_speed", btp::WireType::Float32, "rad/s", 1.0F, 0.0F, 1U, false},
+    {3U, 2U, "gyro_z", btp::WireType::Float32, "rad/s", 1.0F, 0.0F, 1U, false},
+    {4U, 3U, "accel_x", btp::WireType::Float32, "m/s^2", 1.0F, 0.0F, 1U, false},
+    {5U, 4U, "accel_y", btp::WireType::Float32, "m/s^2", 1.0F, 0.0F, 1U, false},
+    // Raw ADC counts (0-4095), not amps -- see ROBOT::sampleEKF()/
+    // SensorSnapshot. Calibrating to amps is a follow-up once the DRV8251A
+    // current-sense scale is known.
+    {6U, 5U, "current_a", btp::WireType::Uint16, "counts", 1.0F, 0.0F, 1U, false},
+    {7U, 6U, "current_b", btp::WireType::Uint16, "counts", 1.0F, 0.0F, 1U, false},
+    // ArraySensor channel i's raw ADC reading, downscaled >>4 to fit one
+    // byte (0-255) -- uncalibrated, plotting only. Field order/count must
+    // track TelemetryPublisher::kArraySensorChannels.
+    {8U, 7U, "array_0", btp::WireType::Uint8, "counts", 1.0F, 0.0F, 1U, false},
+    {9U, 8U, "array_1", btp::WireType::Uint8, "counts", 1.0F, 0.0F, 1U, false},
+    {10U, 9U, "array_2", btp::WireType::Uint8, "counts", 1.0F, 0.0F, 1U, false},
+    {11U, 10U, "array_3", btp::WireType::Uint8, "counts", 1.0F, 0.0F, 1U, false},
+    {12U, 11U, "array_4", btp::WireType::Uint8, "counts", 1.0F, 0.0F, 1U, false},
+    {13U, 12U, "array_5", btp::WireType::Uint8, "counts", 1.0F, 0.0F, 1U, false},
+    {14U, 13U, "array_6", btp::WireType::Uint8, "counts", 1.0F, 0.0F, 1U, false},
+    {15U, 14U, "array_7", btp::WireType::Uint8, "counts", 1.0F, 0.0F, 1U, false},
+};
+static_assert(sizeof(kSensorsFields) / sizeof(kSensorsFields[0]) ==
+                  7U + TelemetryPublisher::kArraySensorChannels,
+              "kSensorsFields must have one array_N entry per "
+              "kArraySensorChannels, in addition to the 7 non-array fields");
+
+constexpr TelemetryPublisher::FieldSchema kFlagsFields[] = {
+    {1U, 0U, "buttons", btp::WireType::Uint8, "1", 1.0F, 0.0F, 1U, false},
+    {2U, 1U, "side_sensors", btp::WireType::Uint8, "1", 1.0F, 0.0F, 1U, false},
+    {3U, 2U, "leds", btp::WireType::Uint8, "1", 1.0F, 0.0F, 1U, false},
+    {4U, 3U, "pwm_left", btp::WireType::Int8, "%", 1.0F, 0.0F, 1U, false},
+    {5U, 4U, "pwm_right", btp::WireType::Int8, "%", 1.0F, 0.0F, 1U, false},
+};
+
 constexpr TelemetryPublisher::TopicSchema kSchemas[] = {
     {TelemetryPublisher::kProtocolTestTopicId,
      TelemetryPublisher::kSchemaVersion,
@@ -48,6 +84,26 @@ constexpr TelemetryPublisher::TopicSchema kSchemas[] = {
      1000U,  // max: 1 Hz (one report per second)
      1U,    // min: 0.001 Hz; slower dashboard periods remain valid
      333U},  // default: approximately 0.33 Hz (one report every 3 s)
+    {TelemetryPublisher::kSensorsTopicId,
+     TelemetryPublisher::kSchemaVersion,
+     "robot.sensors",
+     TelemetryPublisher::Encoding::PackedLe,
+     kSensorsFields,
+     sizeof(kSensorsFields) / sizeof(kSensorsFields[0]),
+     TelemetryPublisher::kSensorsPayloadSize,
+     50000U,  // max: 50 Hz -- same ceiling as protocol.test
+     100U,    // min: 0.1 Hz
+     10000U},  // default: 10 Hz
+    {TelemetryPublisher::kFlagsTopicId,
+     TelemetryPublisher::kSchemaVersion,
+     "robot.flags",
+     TelemetryPublisher::Encoding::PackedLe,
+     kFlagsFields,
+     sizeof(kFlagsFields) / sizeof(kFlagsFields[0]),
+     TelemetryPublisher::kFlagsPayloadSize,
+     50000U,  // max: 50 Hz
+     100U,    // min: 0.1 Hz
+     10000U},  // default: 10 Hz
 };
 
 // system.monitor (UTF8) is the one topic btp::SampleWriter does not build --
@@ -117,6 +173,32 @@ TelemetryPublisher::PublishResult TelemetryPublisher::publish_robot_state(
     std::uint8_t payload[kRobotStatePayloadSize];
     pack_robot_state(state, payload);
     return enqueue(kRobotStateTopicId, payload, sizeof(payload), timestamp_us);
+}
+
+TelemetryPublisher::PublishResult TelemetryPublisher::publish_sensors(
+    float linear_speed, float angular_speed, float gyro_z, float accel_x,
+    float accel_y, std::uint16_t current_a, std::uint16_t current_b,
+    const std::uint8_t array_sensor[kArraySensorChannels],
+    std::uint64_t timestamp_us) noexcept {
+    std::uint8_t payload[kSensorsPayloadSize];
+    if (!pack_sensors(linear_speed, angular_speed, gyro_z, accel_x, accel_y,
+                      current_a, current_b, array_sensor, payload)) {
+        count_invalid();
+        return PublishResult::InvalidValue;
+    }
+    return enqueue(kSensorsTopicId, payload, sizeof(payload), timestamp_us);
+}
+
+TelemetryPublisher::PublishResult TelemetryPublisher::publish_flags(
+    std::uint8_t buttons, std::uint8_t side_sensors, std::uint8_t leds,
+    std::int8_t pwm_left, std::int8_t pwm_right,
+    std::uint64_t timestamp_us) noexcept {
+    std::uint8_t payload[kFlagsPayloadSize];
+    if (!pack_flags(buttons, side_sensors, leds, pwm_left, pwm_right, payload)) {
+        count_invalid();
+        return PublishResult::InvalidValue;
+    }
+    return enqueue(kFlagsTopicId, payload, sizeof(payload), timestamp_us);
 }
 
 TelemetryPublisher::PublishResult TelemetryPublisher::publish_system_monitor(
@@ -291,6 +373,55 @@ void TelemetryPublisher::pack_robot_state(
         writer.put_u64(state) == btp::MessageError::Ok) {
         (void)writer.finish(&written);
     }
+}
+
+bool TelemetryPublisher::pack_sensors(
+    float linear_speed, float angular_speed, float gyro_z, float accel_x,
+    float accel_y, std::uint16_t current_a, std::uint16_t current_b,
+    const std::uint8_t array_sensor[kArraySensorChannels],
+    std::uint8_t output[kSensorsPayloadSize]) noexcept {
+    if (output == nullptr || array_sensor == nullptr) return false;
+
+    constexpr std::size_t kFieldCount = 7U + TelemetryPublisher::kArraySensorChannels;
+    btp::FieldSpec specs[kFieldCount];
+    for (std::size_t i = 0U; i < kFieldCount; ++i) {
+        specs[i] = kSensorsFields[i].spec();
+    }
+    btp::SampleWriter writer(output, kSensorsPayloadSize, specs, kFieldCount);
+    std::size_t written = 0U;
+    bool ok = writer.begin(kSchemaVersion) == btp::MessageError::Ok &&
+             writer.put_f64(static_cast<double>(linear_speed)) == btp::MessageError::Ok &&
+             writer.put_f64(static_cast<double>(angular_speed)) == btp::MessageError::Ok &&
+             writer.put_f64(static_cast<double>(gyro_z)) == btp::MessageError::Ok &&
+             writer.put_f64(static_cast<double>(accel_x)) == btp::MessageError::Ok &&
+             writer.put_f64(static_cast<double>(accel_y)) == btp::MessageError::Ok &&
+             writer.put_u64(current_a) == btp::MessageError::Ok &&
+             writer.put_u64(current_b) == btp::MessageError::Ok;
+    for (std::size_t i = 0U; ok && i < kArraySensorChannels; ++i) {
+        ok = writer.put_u64(array_sensor[i]) == btp::MessageError::Ok;
+    }
+    return ok && writer.finish(&written) == btp::MessageError::Ok;
+}
+
+bool TelemetryPublisher::pack_flags(
+    std::uint8_t buttons, std::uint8_t side_sensors, std::uint8_t leds,
+    std::int8_t pwm_left, std::int8_t pwm_right,
+    std::uint8_t output[kFlagsPayloadSize]) noexcept {
+    if (output == nullptr) return false;
+
+    const btp::FieldSpec specs[] = {
+        kFlagsFields[0].spec(), kFlagsFields[1].spec(), kFlagsFields[2].spec(),
+        kFlagsFields[3].spec(), kFlagsFields[4].spec(),
+    };
+    btp::SampleWriter writer(output, kFlagsPayloadSize, specs, 5U);
+    std::size_t written = 0U;
+    return writer.begin(kSchemaVersion) == btp::MessageError::Ok &&
+           writer.put_u64(buttons) == btp::MessageError::Ok &&
+           writer.put_u64(side_sensors) == btp::MessageError::Ok &&
+           writer.put_u64(leds) == btp::MessageError::Ok &&
+           writer.put_i64(pwm_left) == btp::MessageError::Ok &&
+           writer.put_i64(pwm_right) == btp::MessageError::Ok &&
+           writer.finish(&written) == btp::MessageError::Ok;
 }
 
 bool TelemetryPublisher::pack_system_monitor(

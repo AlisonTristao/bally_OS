@@ -7,6 +7,7 @@
 #include <esp_timer.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
+#include "esp_adc/adc_oneshot.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include <stdio.h>
@@ -191,6 +192,40 @@ private:
     std::atomic<uint32_t> source_id_{0};
     std::atomic<uint32_t> boot_id_{0};
 };
+
+/**
+ * @brief High-rate snapshot of encoder/IMU readings, written once per
+ * sampleEKF() tick (cfg.sample_micros) and read by anyone who needs the
+ * latest values without re-reading hardware: runEKF() (same task, right
+ * after the write) and sampleTelemetry() (state-machine task, publishing
+ * "robot.sensors" at whatever rate is subscribed). Each field is an
+ * independent atomic -- same tolerated-torn-read posture already used by
+ * ScheduledDebugTest and documented on TelemetryPublisher's subscriptions_:
+ * a cross-task reader may see a value from one tick earlier, never a
+ * corrupt one, and self-heals on the next tick. No lock, so the 1kHz writer
+ * never waits on a slower reader.
+ *
+ * Deliberately does NOT hold current_a/current_b or the array sensor: an
+ * earlier version sampled all of that here too, at the full 1kHz rate --
+ * up to 10 ADC reads with mux-settle delays every tick made this task run
+ * long enough to starve every other task on the core (every shell command
+ * hanging forever on the bench). Neither feeds the EKF, so both are instead
+ * read directly inside sampleTelemetry(), at whatever much slower rate
+ * "robot.sensors" is actually subscribed at -- see its own comment.
+ */
+struct SensorSnapshot {
+    std::atomic<float> enc_linear_speed{0.0f};    // m/s
+    std::atomic<float> enc_angular_speed{0.0f};   // rad/s
+    std::atomic<float> gyro_z{0.0f};              // rad/s
+    std::atomic<float> accel_x{0.0f};             // m/s^2
+    std::atomic<float> accel_y{0.0f};             // m/s^2
+};
+
+// TelemetryPublisher deliberately does not include ArraySensor.h (see its own
+// kArraySensorChannels comment) -- this is the one place both are visible
+// together to catch the two constants drifting apart.
+static_assert(TelemetryPublisher::kArraySensorChannels == ArraySensor::MAX_LEN,
+             "TelemetryPublisher::kArraySensorChannels must match ArraySensor::MAX_LEN");
 
 class ROBOT {
     // protocol_link_ (node_'s btp::NodeConfig) forwards open() into
@@ -459,6 +494,42 @@ private:
     std::atomic<uint32_t> active_terminal_source_id_{0};
     std::atomic<uint32_t> active_terminal_boot_id_{0};
     std::atomic<bool> direct_next_shell_output{false};
+
+    // High-rate encoder/IMU/current snapshot, written by sampleEKF() -- see
+    // SensorSnapshot's own comment. The single source of truth for both the
+    // EKF's measurement[] (below) and "robot.sensors" telemetry.
+    SensorSnapshot sensor_snapshot_;
+
+    // ADC oneshot handles for cfg.current_a/current_b (DRV8251A current
+    // sense), set up once by initCurrentSensors() -- same
+    // adc_oneshot_io_to_channel()/adc_oneshot_new_unit()/
+    // adc_oneshot_config_channel() idiom ArraySensor's constructor already
+    // uses for its own "sig" pin, same attenuation/bitwidth
+    // (ADC_ATTEN_DB_12/ADC_BITWIDTH_12) for consistency. Two independent
+    // handles because the two pins do not necessarily share a physical ADC
+    // unit (ESP32-S3: GPIO1-10 are ADC1, GPIO11-20 are ADC2) -- current_a
+    // (GPIO14) lands on the same unit (ADC2) ArraySensor's "sig" pin (GPIO13)
+    // already owns. initCurrentSensors() detects that and skips current_a
+    // entirely rather than calling adc_oneshot_new_unit() on an
+    // already-owned unit: on the bench that second call did NOT fail
+    // cleanly, it left the ADC in a state where every later read (this
+    // robot's own array_sensor reads included) ran pathologically long,
+    // starving every other task on the core. A null handle here just means
+    // readCurrentRaw() returns 0 for that channel, same fail-soft posture
+    // ArraySensor::read() already has.
+    adc_oneshot_unit_handle_t current_a_adc_handle_ = nullptr;
+    adc_oneshot_unit_handle_t current_b_adc_handle_ = nullptr;
+    adc_channel_t current_a_adc_channel_ = ADC_CHANNEL_0;
+    adc_channel_t current_b_adc_channel_ = ADC_CHANNEL_0;
+    // Sets up current_a_adc_handle_/current_b_adc_handle_ above from
+    // settings.data().current_a/current_b. Called once from init(), right
+    // after configurePinsFromSettings() resets those two pins to floating
+    // analog input (same point ArraySensor's own ADC setup effectively runs,
+    // via array_sensor.emplace()).
+    void initCurrentSensors();
+    // Reads one already-configured current-sense channel. Returns 0 when its
+    // handle is null (setup failed/skipped) -- never blocks, never retries.
+    uint16_t readCurrentRaw(adc_oneshot_unit_handle_t handle, adc_channel_t channel);
 
     // matriz of data to kalman filter
     float control_input[EKF_CONTROL_DIM] = {0, 0}; // left and right motor pwm
@@ -766,24 +837,40 @@ private:
     // Slot sizing (4 slots, 600 octets, 4000 ms) is unchanged from before
     // RxRouter existed -- the two ends of the radio link still need to
     // tolerate the same loss and reordering. SealBytes/ScratchBytes hold one
-    // built-and-sealed MANIFEST_DATA (kMaxManifestScratchBytes -- matches ManifestResponder's
-    // old kMaxManifestPayloadSize bound; SealBytes carries the same payload
-    // plus the AEAD tag, so it shares the bound with slack to spare).
-    // Catalog* match ManifestResponder::buildCatalog()'s old bounds (this
-    // robot's schemas today: protocol.test 4 fields, robot.state 1,
-    // system.monitor 0 -- headroom for a third small field-bearing topic).
+    // built-and-sealed MANIFEST_DATA (kMaxManifestScratchBytes; SealBytes
+    // carries the same payload plus the AEAD tag, so it shares the bound
+    // with slack to spare). Bumped 640->1900 (still under
+    // BtpEndpoint::kMaxLogicalPayloadSize=1920 -- the hard ceiling for one
+    // fragmented logical message) when robot.sensors/robot.flags brought the
+    // served catalogue to 5 topics/23 fields. Unlike populate()'s own
+    // catalog-population truncation (a diagnostic-only bound, see its own
+    // comment), running ScratchBytes too small at the WIRE-serialization
+    // step is not gracefully degraded: node_->receive() still reports
+    // RequestServed but ends up sending zero fragments (found via
+    // test_source_info_truncates_before_crowding_out_the_topic_records,
+    // which deliberately maxes out source_info too) -- so this bound must
+    // stay comfortably above the real worst case, not just "big enough for
+    // the common case", and any future schema growth should re-run that test
+    // before trusting a new value.
+    // Catalog* match TelemetryPublisher::kSchemas today: protocol.test (2
+    // fields), robot.state (1), system.monitor (0), robot.sensors (15,
+    // including its 8 array-sensor channels), robot.flags (5) --
+    // CatalogTopics has one spare slot, CatalogFields comes from
+    // ManifestCatalog::kMaxCatalogFields (the total field-record pool across
+    // every topic, see its own comment); CatalogStringBytes bumped 256->768
+    // for the extra field name/unit strings.
     static constexpr std::size_t kNodeSlotCount = 4U;
     static constexpr std::size_t kNodeSlotBytes = 600U;
     static constexpr std::uint64_t kNodeReassemblyTimeoutMs = 4000U;
-    static constexpr std::size_t kMaxManifestScratchBytes = 640U;
+    static constexpr std::size_t kMaxManifestScratchBytes = 1900U;
     RobotLink protocol_link_{*this};
     std::optional<btp::StaticNode<
         kNodeSlotCount, kNodeSlotBytes,
         /*SealBytes=*/kMaxManifestScratchBytes,
         /*ScratchBytes=*/kMaxManifestScratchBytes,
-        /*CatalogTopics=*/4U,
+        /*CatalogTopics=*/6U,
         /*CatalogFields=*/ManifestCatalog::kMaxCatalogFields,
-        /*CatalogStringBytes=*/256U,
+        /*CatalogStringBytes=*/768U,
         /*MaxSubscriptions=*/TelemetryPublisher::kMaxSubscriptions,
         /*MaxCommands=*/1U, /*CommandBytes=*/16U,
         /*CatalogSourceInfo=*/ManifestCatalog::kMaxSourceInfoEntries>>
@@ -848,6 +935,10 @@ private:
     // still 50000 millihz = 20000us, see TelemetryPublisher.cpp's kSchemas).
     uint64_t next_protocol_test_us_ = 0U;
     uint64_t next_system_monitor_us_ = 0U;
+    // "robot.sensors"/"robot.flags": same gated-periodic pattern as
+    // next_protocol_test_us_ above -- see sampleTelemetry().
+    uint64_t next_sensors_us_ = 0U;
+    uint64_t next_flags_us_ = 0U;
     uint32_t protocol_test_counter_ = 0U;
     stateName last_telemetry_state_ = NONE;
 

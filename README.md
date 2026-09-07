@@ -27,10 +27,10 @@ Este projeto implementa o controle de um robô baseado em ESP32-S3, utilizando a
 - **HBridge**: Controle dos motores via ponte H, incluindo direção e PWM.
 - **BtpTransport**: Endpoint BTP v1 com identidade de boot e sequência atômica. O pipeline seal → fragment → encode é o `btp::Endpoint` da lib BTP (2.7.0); o que fica aqui é o callback de envio (o `TxScheduler`) e o perfil ESP-NOW.
 - **CommandProcessor**: Valida `COMMAND_REQUEST`, executa cada intenção uma vez e reproduz o mesmo `COMMAND_RESULT` correlacionado nos retries. A deduplicação por boot (cache em anel, high-water mark por requester) é o `btp::DedupCache` da lib BTP (2.6.0); o que fica aqui é executar a ação, selar/enviar a resposta e escolher as capacidades.
-- **ManifestCatalog**: Carrega os schemas estáticos de `TelemetryPublisher` (`protocol.test`, `robot.state`, `system.monitor`) e o `source_info` no `btp::Catalog` que `node_` serve — quem responde `CONTROL/MANIFEST_REQUEST` de verdade é o próprio `node_->receive()` (`btp::Node::serve_catalog`, BTP 2.35.0+2.39.0); `config_revision` é uma constante por build e é incrementada quando o catálogo muda.
+- **ManifestCatalog**: Carrega os schemas estáticos de `TelemetryPublisher` (`protocol.test`, `robot.state`, `system.monitor`, `robot.sensors`, `robot.flags`) e o `source_info` no `btp::Catalog` que `node_` serve — quem responde `CONTROL/MANIFEST_REQUEST` de verdade é o próprio `node_->receive()` (`btp::Node::serve_catalog`, BTP 2.35.0+2.39.0); `config_revision` é uma constante por build e é incrementada quando o catálogo muda.
 - **TxScheduler**: Filas estáticas separadas e FIFO por classe; transmite `COMMAND_RESULT > STATUS > LOG` crítico `> TELEMETRY > DEBUG`, com um único envio ESP-NOW pendente e contadores de aceite, entrega, timeout e drop.
 - **Logger**: Ring de eventos em PSRAM; emite exclusivamente frames `LOG` BTP de tamanho real via ESP-NOW.
-- **TelemetryPublisher**: Fila SPSC estática e não bloqueante para as amostras numéricas (`protocol.test` em `PACKED_LE` a até 50 Hz, `robot.state` nas transições); o documento `system.monitor` em `UTF8` (padrão de 0,33 Hz, configurável por assinatura até 1 Hz) é grande e de baixa taxa, então usa um slot de staging próprio, fora da fila. Todos preservam o timestamp da coleta.
+- **TelemetryPublisher**: Fila SPSC estática e não bloqueante para as amostras numéricas (`protocol.test` em `PACKED_LE` a até 50 Hz, `robot.state` nas transições, `robot.sensors`/`robot.flags` a até 50 Hz cada); o documento `system.monitor` em `UTF8` (padrão de 0,33 Hz, configurável por assinatura até 1 Hz) é grande e de baixa taxa, então usa um slot de staging próprio, fora da fila. Todos preservam o timestamp da coleta.
 - **OTAUpdater**: Atualização de firmware sem fio a partir do estado DEBUG — conecta a uma rede Wi-Fi cadastrada no cartão SD, anuncia `<hostname>.local` via mDNS e recebe o novo binário via HTTP (`POST /update`). `GET /status` (JSON: `device`, `online`, `firmware`, `ota_ready`) deixa uma ferramenta externa checar se o robô está pronto para receber o upload antes de mandá-lo.
 - **RobotSettings**: Armazena e persiste (`settings.conf` no SD) todos os parâmetros configuráveis em runtime. `settings -set` só muda a memória; `settings -apply <module>` empurra a mudança para o subsistema que já a consumiu no boot, sem reiniciar — ver "Aplicar configuração sem reboot" abaixo.
 - **SDCard** / **USBMassStorage**: Acesso ao cartão SD e transferência de propriedade exclusiva do FAT entre o robô e um host USB.
@@ -330,10 +330,22 @@ amostra sem esperar. A sequência BTP e o `timestamp_us` são reservados na
 coleta; a task `routine` apenas codifica e envia depois. Falhas imediatas de
 rádio também são contabilizadas e removidas para não travar a fila.
 
-Os schemas estáticos iniciais são `protocol.test` (`topic_id=0x0001`,
-`counter:uint32`, `value:float32`) e `robot.state` (`topic_id=0x0002`,
-`state:uint8`), ambos `PACKED_LE`, versão 1. Não há CSV, formatação textual,
-terminador nem passagem pelo `Logger`.
+Os schemas estáticos são `protocol.test` (`topic_id=0x0001`, `counter:uint32`,
+`value:float32`), `robot.state` (`topic_id=0x0002`, `state:uint8`),
+`robot.sensors` (`topic_id=0x0004`: `linear_speed`/`angular_speed`/`gyro_z`/
+`accel_x`/`accel_y` em `float32`, `current_a`/`current_b` em `uint16` — contagem
+bruta do ADC, ainda não calibrada em amperes — e `array_0`..`array_7` em
+`uint8`, a leitura bruta de cada canal do array sensor (line follower)
+reduzida para 1 byte (`>>4`); nenhum desses campos é calibrado, todos são só
+para plotar — o EKF e a lógica de seguir linha continuam usando
+`get_line_position()`/`normalize()` do `ArraySensor`, sem depender disso) e
+`robot.flags` (`topic_id=0x0005`: `buttons`/`side_sensors`/`leds` em `uint8`
+(bitmask) e `pwm_left`/`pwm_right` em `int8`), todos `PACKED_LE`, versão 1.
+Não há CSV, formatação textual, terminador nem passagem pelo `Logger`.
+
+`robot.sensors` é alimentado pelo mesmo snapshot de alta taxa (`SensorSnapshot`,
+atualizado a `cfg.sample_micros` por `ROBOT::sampleEKF()`) que monta o vetor de
+medição do EKF — ver `utils/BallyRobot/BallyRobot.h`.
 
 ### Flags (Eventos Temporizados e Segurança)
 O projeto utiliza uma biblioteca de *flags* para facilitar a gestão de eventos temporizados e garantir segurança no controle dos atuadores:

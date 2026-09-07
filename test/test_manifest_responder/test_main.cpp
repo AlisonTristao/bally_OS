@@ -31,12 +31,20 @@
 
 namespace {
 
-std::uint8_t sent_frames[4][btp::kEspNowMaxFrameSize]{};
-std::size_t sent_sizes[4]{};
+// Capped at 12 (was 4): robot.sensors/robot.flags brought the served
+// catalogue to 5 topics/23 fields (kScratchBytes=1900), so a full
+// MANIFEST_DATA response can need close to ceil(1900/210)=10 ESP-NOW
+// fragments now, well past the old 3-topic catalogue's needs -- see
+// test_full_manifest_response_matches_telemetry_schemas and
+// test_source_info_truncates_before_crowding_out_the_topic_records (the
+// worst case: kMaxSourceInfoEntries long entries pushes the reply close to
+// kScratchBytes itself).
+std::uint8_t sent_frames[12][btp::kEspNowMaxFrameSize]{};
+std::size_t sent_sizes[12]{};
 std::size_t sent_count = 0U;
 
 bool capture_send(const std::uint8_t* data, std::size_t size) {
-    if (sent_count >= 4U || size > btp::kEspNowMaxFrameSize) return false;
+    if (sent_count >= 12U || size > btp::kEspNowMaxFrameSize) return false;
     std::memcpy(sent_frames[sent_count], data, size);
     sent_sizes[sent_count] = size;
     ++sent_count;
@@ -71,9 +79,9 @@ public:
 // node_ comment for the reasoning).
 constexpr std::size_t kSlots = 4U;
 constexpr std::size_t kSlotBytes = 600U;
-constexpr std::size_t kScratchBytes = 640U;
-constexpr std::size_t kCatalogTopics = 4U;
-constexpr std::size_t kCatalogStringBytes = 256U;
+constexpr std::size_t kScratchBytes = 1900U;
+constexpr std::size_t kCatalogTopics = 6U;
+constexpr std::size_t kCatalogStringBytes = 768U;
 constexpr std::uint64_t kReassemblyTimeoutMs = 4000U;
 
 using TestNode = btp::StaticNode<

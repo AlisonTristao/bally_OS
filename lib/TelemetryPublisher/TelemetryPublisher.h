@@ -21,6 +21,8 @@ public:
     static constexpr std::uint16_t kProtocolTestTopicId = 0x0001U;
     static constexpr std::uint16_t kRobotStateTopicId = 0x0002U;
     static constexpr std::uint16_t kSystemMonitorTopicId = 0x0003U;
+    static constexpr std::uint16_t kSensorsTopicId = 0x0004U;
+    static constexpr std::uint16_t kFlagsTopicId = 0x0005U;
 
     // Reserved subscriber identity for a subscription created ON the robot
     // (the "telemetry -sub" shell command) rather than by a SUBSCRIBE arriving
@@ -38,6 +40,20 @@ public:
     static constexpr std::size_t kQueueCapacity = 16U;
     static constexpr std::size_t kProtocolTestPayloadSize = 10U;
     static constexpr std::size_t kRobotStatePayloadSize = 3U;
+    // Channel count of the array sensor (line follower) folded into
+    // robot.sensors below -- must match ArraySensor::MAX_LEN (kept as its own
+    // constant rather than including ArraySensor.h here, so TelemetryPublisher
+    // stays free of that dependency).
+    static constexpr std::size_t kArraySensorChannels = 8U;
+    // robot.sensors: schema_version (2) + linear_speed/angular_speed/gyro_z/
+    // accel_x/accel_y (float32 x5) + current_a/current_b (uint16 x2, raw ADC
+    // counts -- not yet calibrated to amps, see ROBOT::sampleEKF()) +
+    // kArraySensorChannels (uint8 x8, raw ADC >>4, uncalibrated).
+    static constexpr std::size_t kSensorsPayloadSize =
+        26U + kArraySensorChannels;
+    // robot.flags: schema_version (2) + buttons/side_sensors/leds (uint8
+    // bitmask x3) + pwm_left/pwm_right (int8 x2, -100..100).
+    static constexpr std::size_t kFlagsPayloadSize = 7U;
     // The system.monitor document is the full `sys -health` report
     // (SystemMonitor::getFullReport): banner + CPU + memory + the complete
     // per-task table. TELEMETRY reserves the first two payload octets for
@@ -223,6 +239,19 @@ public:
     // it -- rather than racing flush().
     PublishResult publish_system_monitor(const char* text, std::size_t length,
                                          std::uint64_t timestamp_us) noexcept;
+    // robot.sensors: current_a/current_b are raw ADC counts (0-4095), and
+    // array_sensor[i] is channel i's raw ADC reading >>4 (0-255) -- neither
+    // is calibrated to a physical unit, both are plotting only, the EKF
+    // never reads them (see BallyRobot.cpp's sampleEKF()/SensorSnapshot).
+    PublishResult publish_sensors(float linear_speed, float angular_speed,
+                                  float gyro_z, float accel_x, float accel_y,
+                                  std::uint16_t current_a, std::uint16_t current_b,
+                                  const std::uint8_t array_sensor[kArraySensorChannels],
+                                  std::uint64_t timestamp_us) noexcept;
+    PublishResult publish_flags(std::uint8_t buttons, std::uint8_t side_sensors,
+                               std::uint8_t leds, std::int8_t pwm_left,
+                               std::int8_t pwm_right,
+                               std::uint64_t timestamp_us) noexcept;
 
     // Sends and removes at most max_samples. A radio rejection drops that
     // sample and is counted, so one bad sample cannot stall the queue.
@@ -242,14 +271,24 @@ public:
         const char* text, std::size_t length,
         std::uint8_t output[kMaxSystemMonitorPayloadSize],
         std::size_t* bytes_written) noexcept;
+    static bool pack_sensors(float linear_speed, float angular_speed,
+                             float gyro_z, float accel_x, float accel_y,
+                             std::uint16_t current_a, std::uint16_t current_b,
+                             const std::uint8_t array_sensor[kArraySensorChannels],
+                             std::uint8_t output[kSensorsPayloadSize]) noexcept;
+    static bool pack_flags(std::uint8_t buttons, std::uint8_t side_sensors,
+                           std::uint8_t leds, std::int8_t pwm_left,
+                           std::int8_t pwm_right,
+                           std::uint8_t output[kFlagsPayloadSize]) noexcept;
 
 private:
     // queue_[] only ever holds the small numeric samples now (system.monitor
     // has its own staging slot, see monitor_stage_), so it is sized for them
     // and not the ~1.8 KB UTF-8 document -- that is what keeps queue_[16] at a
     // few hundred bytes instead of ~29 KB of mostly-idle static RAM.
-    static constexpr std::size_t kMaxPayloadSize = kProtocolTestPayloadSize;
-    static constexpr std::size_t kMaxTopics = 3U;  // matches kSchemas today
+    // robot.sensors (26 bytes) is the largest of the queued topics today.
+    static constexpr std::size_t kMaxPayloadSize = kSensorsPayloadSize;
+    static constexpr std::size_t kMaxTopics = 5U;  // matches kSchemas today
 public:
     // kMaxTopics topics times a handful of concurrent desktop sessions behind
     // the single ESP-NOW peer -- node_'s own btp::SubscriptionTable is what
@@ -257,7 +296,9 @@ public:
     // template argument), sized from this same constant so the two can never
     // drift apart. A request past capacity is answered CAPACITY_EXHAUSTED
     // instead of evicting somebody else's subscription.
-    static constexpr std::size_t kMaxSubscriptions = 8U;
+    // 5 topics x a few concurrent sessions -- enough for 2+ TraceView sessions
+    // each subscribing to every topic without exhausting the pool.
+    static constexpr std::size_t kMaxSubscriptions = 16U;
 
 private:
     struct Sample {

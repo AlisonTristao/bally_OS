@@ -341,7 +341,7 @@ void test_publisher_registers_static_schemas_and_rejects_nan() {
     std::size_t schema_count = 0U;
     const auto* schemas = TelemetryPublisher::schemas(&schema_count);
     TEST_ASSERT_NOT_NULL(schemas);
-    TEST_ASSERT_EQUAL_UINT32(3U, schema_count);
+    TEST_ASSERT_EQUAL_UINT32(5U, schema_count);
     TEST_ASSERT_EQUAL_STRING("protocol.test", schemas[0].name);
     TEST_ASSERT_EQUAL_HEX16(TelemetryPublisher::kProtocolTestTopicId,
                             schemas[0].topic_id);
@@ -355,6 +355,15 @@ void test_publisher_registers_static_schemas_and_rejects_nan() {
     TEST_ASSERT_EQUAL_UINT32(0U, schemas[2].field_count);
     TEST_ASSERT_EQUAL_UINT32(1000U, schemas[2].max_rate_millihz);
     TEST_ASSERT_EQUAL_UINT32(333U, schemas[2].default_rate_millihz);
+    TEST_ASSERT_EQUAL_STRING("robot.sensors", schemas[3].name);
+    TEST_ASSERT_EQUAL_HEX16(TelemetryPublisher::kSensorsTopicId,
+                            schemas[3].topic_id);
+    TEST_ASSERT_EQUAL_UINT32(7U + TelemetryPublisher::kArraySensorChannels,
+                             schemas[3].field_count);
+    TEST_ASSERT_EQUAL_STRING("robot.flags", schemas[4].name);
+    TEST_ASSERT_EQUAL_HEX16(TelemetryPublisher::kFlagsTopicId,
+                            schemas[4].topic_id);
+    TEST_ASSERT_EQUAL_UINT32(5U, schemas[4].field_count);
 
     BtpEndpoint endpoint;
     TEST_ASSERT_TRUE(endpoint.configure(1U, 2U));
@@ -1260,7 +1269,10 @@ void test_topic_status_is_measured_and_serialized() {
             99U, float_from_bits(0x3F0D0A00U), 3000U)));
 
     TelemetryPublisher::TopicStats stats[4]{};
-    TEST_ASSERT_EQUAL_UINT32(3U, publisher.topic_stats(stats, 4U));
+    // 4, not the full 5 schemas now registered (protocol.test/robot.state/
+    // system.monitor/robot.sensors) -- topic_stats() is capped by the
+    // caller's max_count, same as StatusReporter::kMaxTopicRecords below.
+    TEST_ASSERT_EQUAL_UINT32(4U, publisher.topic_stats(stats, 4U));
     TEST_ASSERT_EQUAL_HEX16(TelemetryPublisher::kProtocolTestTopicId,
                             stats[0].topic_id);
     TEST_ASSERT_EQUAL_UINT16(1U, stats[0].subscriber_count);
@@ -1349,9 +1361,15 @@ void test_status_is_published_as_a_control_message() {
     TEST_ASSERT_EQUAL_HEX16(StatusReporter::kStatusObjectId,
                             decoded.header.object_id);
     TEST_ASSERT_EQUAL_UINT8(1U, decoded.header.fragment_count);
-    TEST_ASSERT_EQUAL_UINT32(92U + 2U + (28U * 3U), decoded.payload.size);
+    // 4, not 5: StatusReporter::kMaxTopicRecords stays 4 -- STATUS is one
+    // unfragmented ESP-NOW frame (max_payload_size(ESP-NOW) == 210 octets),
+    // and 92+2+28*5=234 would no longer fit. robot.flags (the 5th schema)
+    // is simply the one topic STATUS's per-topic block never reaches; it is
+    // still fully visible on "robot.sensors"/"robot.flags" telemetry and in
+    // MANIFEST_DATA.
+    TEST_ASSERT_EQUAL_UINT32(92U + 2U + (28U * 4U), decoded.payload.size);
     TEST_ASSERT_EQUAL_UINT16(2U, read_u16(decoded.payload.data));
-    TEST_ASSERT_EQUAL_UINT16(3U, read_u16(decoded.payload.data + 92U));
+    TEST_ASSERT_EQUAL_UINT16(4U, read_u16(decoded.payload.data + 92U));
     TEST_ASSERT_EQUAL_HEX32(kLocalSource, read_u32(decoded.payload.data + 94U));
     TEST_ASSERT_EQUAL_UINT32(50000U, read_u32(decoded.payload.data + 102U));
 }

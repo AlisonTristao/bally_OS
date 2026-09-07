@@ -292,6 +292,87 @@ bool ROBOT::configurePinsFromSettings()
     return true;
 }
 
+// Sets up ADC oneshot reads for cfg.current_a/current_b -- see the member
+// declaration comment in BallyRobot.h for why this is two independent
+// handles and what happens when one fails to init. Same idiom
+// ArraySensor::ArraySensor() already uses for its own "sig" pin.
+//
+// Must run AFTER array_sensor.emplace() (see its call site in init()):
+// array_sensor's own ADC unit is resolved below (re-deriving the same
+// mapping ArraySensor::ArraySensor() already made for cfg.sig) so a
+// current-sense pin sharing that physical unit can be skipped entirely
+// instead of attempting a second adc_oneshot_new_unit() on it. On the bench
+// that second call did not fail cleanly the way a "unit already in use"
+// error would -- it left the ADC in a state where every later read (this
+// robot's own array_sensor reads included) ran pathologically long, which
+// starved every other task on the core (every shell command hanging
+// forever, even after a reboot). Skipping the call outright avoids the
+// state entirely; sharing array_sensor's own handle for that channel is a
+// possible follow-up, not attempted here.
+void ROBOT::initCurrentSensors() {
+    const SettingsData& cfg = settings.data();
+
+    adc_unit_t array_sensor_unit{};
+    adc_channel_t array_sensor_channel{};
+    const bool has_array_sensor_unit =
+        adc_oneshot_io_to_channel(static_cast<uint8_t>(cfg.sig), &array_sensor_unit,
+                                  &array_sensor_channel) == ESP_OK;
+
+    const struct { uint8_t pin; adc_oneshot_unit_handle_t* handle; adc_channel_t* channel; } kSensors[] = {
+        {static_cast<uint8_t>(cfg.current_a), &current_a_adc_handle_, &current_a_adc_channel_},
+        {static_cast<uint8_t>(cfg.current_b), &current_b_adc_handle_, &current_b_adc_channel_},
+    };
+
+    for (const auto& s : kSensors) {
+        adc_unit_t unit{};
+        if (adc_oneshot_io_to_channel(s.pin, &unit, s.channel) != ESP_OK) {
+            continue;
+        }
+
+        if (has_array_sensor_unit && unit == array_sensor_unit) {
+            ROBOT::logger.insert_logf(
+                logType::WARN,
+                "Current sense on GPIO%u: shares ADC unit %d with array_sensor's "
+                "sig pin (GPIO%u) -- skipped, always reads 0",
+                s.pin, static_cast<int>(unit), cfg.sig);
+            *s.handle = nullptr;
+            continue;
+        }
+
+        adc_oneshot_unit_init_cfg_t adc_config = {};
+        adc_config.unit_id = unit;
+        adc_config.clk_src = ADC_RTC_CLK_SRC_DEFAULT;
+        adc_config.ulp_mode = ADC_ULP_MODE_DISABLE;
+
+        if (adc_oneshot_new_unit(&adc_config, s.handle) != ESP_OK) {
+            ROBOT::logger.insert_logf(
+                logType::WARN,
+                "Current sense on GPIO%u: adc_oneshot_new_unit failed (unit %d)",
+                s.pin, static_cast<int>(unit));
+            *s.handle = nullptr;
+            continue;
+        }
+
+        adc_oneshot_chan_cfg_t channel_config = {};
+        channel_config.atten = ADC_ATTEN_DB_12;
+        channel_config.bitwidth = ADC_BITWIDTH_12;
+        if (adc_oneshot_config_channel(*s.handle, *s.channel, &channel_config) != ESP_OK) {
+            adc_oneshot_del_unit(*s.handle);
+            *s.handle = nullptr;
+        }
+    }
+}
+
+uint16_t ROBOT::readCurrentRaw(adc_oneshot_unit_handle_t handle, adc_channel_t channel) {
+    if (handle == nullptr) return 0U;
+
+    int raw_val = 0;
+    if (adc_oneshot_read(handle, channel, &raw_val) != ESP_OK) {
+        return 0U;
+    }
+    return static_cast<uint16_t>(raw_val);
+}
+
 void ROBOT::buildSourceInfo() {
     // Values for MANIFEST_DATA's source_info block (BTP/docs/commands.md
     // section 3.12). Each string is static (an app-descriptor field, a
@@ -865,7 +946,13 @@ void ROBOT::processDebug() {
 
     if (encoder_test_.poll()) {
         char text[96];
-        std::snprintf(text, sizeof(text), "Encoders: left=%lld right=%lld",
+        // Fixed-width fields with a plain space separator, not '\t': same
+        // reasoning as imu_test_ below -- a raw tab lands at whatever column
+        // TraceView's terminal happens to be at (its 8-column tab-stop
+        // expansion, serialterminalwidget.cpp), which moves every sample
+        // because these counts change width (sign, digit count) as they
+        // accumulate from one reading to the next.
+        std::snprintf(text, sizeof(text), "Encoders: left=%+9lld right=%+9lld",
                       static_cast<long long>(encoder_left->getCount()),
                       static_cast<long long>(encoder_right->getCount()));
         logger.insert_log(logType::INFO, text);
@@ -1327,26 +1414,52 @@ void ROBOT::getVelocitiesFromEncoders(float& linear_speed, float& angular_speed)
 }
 
 void ROBOT::sampleEKF(void *param) {
-    // save the pwm values to the control input vector for the EKF
+    // save the pwm values to the control input vector for the EKF (PWM is
+    // not a "sensor" reading, it stays direct)
     instance_->control_input[0] = static_cast<float>(instance_->motors.getValue(MOTOR_RIGHT_idx));
     instance_->control_input[1] = static_cast<float>(instance_->motors.getValue(MOTOR_LEFT_idx));
 
-    instance_->getVelocitiesFromEncoders(instance_->measurement[0],
-                                         instance_->measurement[1]);
+    // Fill sensor_snapshot_ first -- the single source of truth both the EKF
+    // (below) and "robot.sensors" telemetry (sampleTelemetry()) read from.
+    SensorSnapshot& snap = instance_->sensor_snapshot_;
+
+    float linear_speed = 0.0f;
+    float angular_speed = 0.0f;
+    instance_->getVelocitiesFromEncoders(linear_speed, angular_speed);
+    snap.enc_linear_speed.store(linear_speed, std::memory_order_relaxed);
+    snap.enc_angular_speed.store(angular_speed, std::memory_order_relaxed);
 
     // Skipped while the IMU never answered at boot (imu_ready_ == false):
     // retrying an I2C transaction against a disconnected sensor here would
     // block this same timer callback on an I2C timeout every tick.
     if (instance_->imu_ready_) {
         instance_->imu->getAGT();
-        instance_->measurement[2] = instance_->imu->gyrZ() * kDegToRad;
-        instance_->measurement[3] = instance_->imu->accX() * kGravityMss;
-        instance_->measurement[4] = instance_->imu->accY() * kGravityMss;
+        snap.gyro_z.store(instance_->imu->gyrZ() * kDegToRad, std::memory_order_relaxed);
+        snap.accel_x.store(instance_->imu->accX() * kGravityMss, std::memory_order_relaxed);
+        snap.accel_y.store(instance_->imu->accY() * kGravityMss, std::memory_order_relaxed);
     } else {
-        instance_->measurement[2] = 0.0f;
-        instance_->measurement[3] = 0.0f;
-        instance_->measurement[4] = 0.0f;
+        snap.gyro_z.store(0.0f, std::memory_order_relaxed);
+        snap.accel_x.store(0.0f, std::memory_order_relaxed);
+        snap.accel_y.store(0.0f, std::memory_order_relaxed);
     }
+
+    // Current sense and the array sensor are NOT read here on purpose: they
+    // are plotting-only fields the EKF never touches (see SensorSnapshot's
+    // own comment), and sampled instead from sampleTelemetry() at whatever
+    // (much slower) rate "robot.sensors" is actually subscribed at -- doing
+    // up to 10 ADC reads with mux-settle delays every single 1kHz tick here
+    // caused this task to run long enough to starve every other task on the
+    // core (observed on the bench as every shell command hanging forever).
+    // See sampleTelemetry()'s own comment.
+
+    // Build the EKF's own measurement vector from the snapshot just written
+    // above -- same task, same instant, so a relaxed load back is exact (no
+    // cross-task race to guard against here).
+    instance_->measurement[0] = snap.enc_linear_speed.load(std::memory_order_relaxed);
+    instance_->measurement[1] = snap.enc_angular_speed.load(std::memory_order_relaxed);
+    instance_->measurement[2] = snap.gyro_z.load(std::memory_order_relaxed);
+    instance_->measurement[3] = snap.accel_x.load(std::memory_order_relaxed);
+    instance_->measurement[4] = snap.accel_y.load(std::memory_order_relaxed);
 
     // notify the EKF task that new measurements are available
     if (instance_->ekf_task_handle != nullptr)
@@ -2083,6 +2196,53 @@ void ROBOT::sampleTelemetry() {
                                       now_us);
         last_telemetry_state_ = current_state;
     }
+
+    // robot.sensors: linear/angular speed and IMU come from sensor_snapshot_
+    // (sampleEKF() already refreshed them at 1kHz). current_a/current_b and
+    // the array sensor are read FRESH right here instead -- they used to be
+    // sampled at 1kHz inside sampleEKF() too, but up to 10 ADC reads with
+    // mux-settle delays every single 1kHz tick made that task run long
+    // enough to starve every other task on the core (every shell command
+    // hanging forever on the bench). Reading them here means they only cost
+    // CPU at whatever (much slower) rate this topic is actually subscribed
+    // at -- and only while someone IS subscribed, same as protocol.test
+    // above -- which is all "plotting only" data needs.
+    const uint64_t sensors_period_us =
+        telemetry.topic_period_us(TelemetryPublisher::kSensorsTopicId);
+    if (sensors_period_us != 0U && now_us >= next_sensors_us_) {
+        uint8_t array_sensor_raw[TelemetryPublisher::kArraySensorChannels];
+        for (size_t i = 0U; i < TelemetryPublisher::kArraySensorChannels; ++i) {
+            array_sensor_raw[i] =
+                static_cast<uint8_t>(array_sensor->read_channel(static_cast<uint8_t>(i)) >> 4U);
+        }
+        telemetry.publish_sensors(
+            sensor_snapshot_.enc_linear_speed.load(std::memory_order_relaxed),
+            sensor_snapshot_.enc_angular_speed.load(std::memory_order_relaxed),
+            sensor_snapshot_.gyro_z.load(std::memory_order_relaxed),
+            sensor_snapshot_.accel_x.load(std::memory_order_relaxed),
+            sensor_snapshot_.accel_y.load(std::memory_order_relaxed),
+            readCurrentRaw(current_a_adc_handle_, current_a_adc_channel_),
+            readCurrentRaw(current_b_adc_handle_, current_b_adc_channel_),
+            array_sensor_raw, now_us);
+        next_sensors_us_ = now_us + sensors_period_us;
+    } else if (sensors_period_us == 0U) {
+        next_sensors_us_ = now_us;
+    }
+
+    // robot.flags: buttons/side_sensors/leds/pwm, read straight from the
+    // Flags_*/HBridge state this class already owns -- no new I/O either.
+    const uint64_t flags_period_us =
+        telemetry.topic_period_us(TelemetryPublisher::kFlagsTopicId);
+    if (flags_period_us != 0U && now_us >= next_flags_us_) {
+        telemetry.publish_flags(
+            buttons.getFlags(), sideSensors.getFlags(), leds.getFlags(),
+            static_cast<int8_t>(motors.getValue(MOTOR_LEFT_idx)),
+            static_cast<int8_t>(motors.getValue(MOTOR_RIGHT_idx)),
+            now_us);
+        next_flags_us_ = now_us + flags_period_us;
+    } else if (flags_period_us == 0U) {
+        next_flags_us_ = now_us;
+    }
 }
 
 // SDA/SCL short check — see the declaration comment in BallyRobot.h.
@@ -2465,6 +2625,10 @@ bool ROBOT::init() {
         gpio_get_level(static_cast<gpio_num_t>(cfg.btn1)) == 0;
 
     array_sensor.emplace(cfg.s0, cfg.s1, cfg.s2, cfg.sig, cfg.len_sensor);
+    // After array_sensor above: if cfg.current_a shares a physical ADC unit
+    // with array_sensor's own "sig" pin (see initCurrentSensors()'s comment),
+    // array_sensor's ADC init has already succeeded by the time this runs.
+    initCurrentSensors();
     encoder_left.emplace(cfg.enc_a0, cfg.enc_a1);
     encoder_right.emplace(cfg.enc_b0, cfg.enc_b1);
     // Two LEDC channels per motor (IN1/IN2); CH0..CH3 (Settings.h) are

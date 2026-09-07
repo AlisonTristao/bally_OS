@@ -38,6 +38,13 @@ public:
 
     std::string raw();
 
+    // Raw ADC reading (0-4095) for one channel, same value raw()/debug()
+    // format as tab-separated text -- public so a caller needing the numeric
+    // value directly (ROBOT's SensorSnapshot) doesn't have to parse a
+    // formatted string. index >= len_ (or a failed ADC init) returns 0, same
+    // as raw()/debug() already tolerate.
+    uint16_t read_channel(uint8_t index) { return read(index); }
+
     /**
      * @brief Register this sensor's "sensor" shell module commands
      * (calibrate/calibrate_status/position/raw). Owned here instead of the
