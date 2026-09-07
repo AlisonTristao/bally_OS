@@ -785,8 +785,16 @@ void ROBOT::setOutputs() {
         motor_left->coast();
         motor_right->coast();
     } else {
-        motor_left->applyPWM(left_pwm);
-        motor_right->applyPWM(right_pwm);
+        const esp_err_t left_result = motor_left->applyPWM(left_pwm);
+        const esp_err_t right_result = motor_right->applyPWM(right_pwm);
+        if (left_result != ESP_OK || right_result != ESP_OK) {
+            logger.insert_logf(logType::ERRO,
+                               "motor PWM failed left=0x%X right=0x%X values=%d,%d",
+                               static_cast<unsigned>(left_result),
+                               static_cast<unsigned>(right_result),
+                               static_cast<int>(left_pwm),
+                               static_cast<int>(right_pwm));
+        }
     }
 
     // Green, red and blue are stronger than yellow on the board, so their

@@ -1516,16 +1516,25 @@ void ROBOT::registerRobotIOCommands() {
     // force the output to zero anyway ("motion -disarm" is enforced there, not
     // here), but accepting the command and moving nothing reads as a hardware
     // fault -- say which software gate is closed instead.
-    shell.add([](uint8_t led_idx, int8_t pwm_value, uint32_t time) -> uint8_t {
+    shell.add([](uint8_t motor_idx, int8_t pwm_value, uint32_t time) -> uint8_t {
         // set the PWM value for the motor with the given index (-100..100)
-        if (led_idx >= Flags_in::MAX_FLAGS)
+        if (motor_idx > MOTOR_RIGHT_idx) {
+            ROBOT::logger.insert_logf(logType::ERRO,
+                                      "invalid motor index=%u (use 0=left or 1=right)",
+                                      static_cast<unsigned>(motor_idx));
             return RESULT_ERROR;
+        }
         if (!instance_->motors_armed_.load(std::memory_order_acquire)) {
             ROBOT::logger.insert_log(logType::ERRO,
                                      "refused: motors are disarmed (motion -arm)");
             return RESULT_ERROR;
         }
-        instance_->motors.setValue(led_idx, pwm_value, time);
+        instance_->motors.setValue(motor_idx, pwm_value, time);
+        ROBOT::logger.insert_logf(logType::INFO,
+                                  "motor=%u pwm=%d time_ms=%lu",
+                                  static_cast<unsigned>(motor_idx),
+                                  static_cast<int>(pwm_value),
+                                  static_cast<unsigned long>(time));
         return RESULT_OK;
     }, "set_pwm", "Set PWM value for a motor (0 for left, 1 for right)", "robot");
 
