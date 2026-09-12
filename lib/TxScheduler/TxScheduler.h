@@ -63,9 +63,27 @@ public:
 private:
     static constexpr std::size_t kPriorityCount =
         static_cast<std::size_t>(Priority::Count);
+    // Status used to sit at 4 back when CONTROL meant only single-frame
+    // STATUS heartbeats. classify() (TxScheduler.cpp) also routes
+    // MANIFEST_DATA here (also CONTROL), and BallyRobot::kMaxManifestScratchBytes
+    // (1900 plaintext + 16 AEAD tag = 1916) can need up to
+    // ceil(1916 / btp::kEspNowMaxPayloadSize) = 10 ESP-NOW fragments --
+    // Endpoint::send_logical_impl's fragmentation loop aborts the whole send
+    // the instant one fragment fails to enqueue (no partial retry), so a
+    // 4-deep queue silently dropped fragments 4-8 of any manifest big enough
+    // to need more than 4, and the robot's catalog never reached the dongle
+    // (see this repo's manifest-capacity fix; ManifestCatalog measured 1710
+    // plaintext / 1726 sealed / 9 fragments once robot.sensors/robot.flags
+    // existed -- already past 4). 10 would match that scratch ceiling exactly,
+    // but Status is shared with STATUS heartbeats and SUBSCRIBE_RESULT/
+    // UNSUBSCRIBE_RESULT, either of which landing mid-manifest-send eats back
+    // into that same margin -- and every Queue below already reserves
+    // kMaxCapacity frames regardless of its priority's cap, so rounding up to
+    // the full 16 instead of the bare per-message minimum costs no additional
+    // RAM either way.
     static constexpr std::size_t kQueueCapacity[kPriorityCount] = {
         //  cmd  status  terminal  crit-log  telemetry  debug
-        8U,  4U,     16U,      8U,       16U,       8U,
+        8U,  16U,     16U,      8U,       16U,       8U,
     };
     static constexpr std::size_t kMaxCapacity = 16U;
 
