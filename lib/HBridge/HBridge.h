@@ -71,14 +71,19 @@ private:
     static constexpr ledc_timer_t PWM_TIMER =
         LEDC_TIMER_0;
 
+    // 12-bit duty resolution caps out at ~19.5kHz on the 80MHz APB clock,
+    // which is below this timer's 25kHz target -- ledc_timer_config()
+    // would fail with ESP_ERR_INVALID_ARG. 11-bit keeps the divisor exact
+    // (80MHz / (25kHz * 2048) = 1.5625) while still giving 2048 duty steps.
     static constexpr ledc_timer_bit_t PWM_RESOLUTION =
-        LEDC_TIMER_12_BIT;
+        LEDC_TIMER_11_BIT;
 
+    // above 20kHz to avoid audible noise
     static constexpr uint32_t PWM_FREQUENCY_HZ =
-        5000;
+        25000;
 
     static constexpr uint32_t PWM_MAX_DUTY =
-        4095;
+        2047;
 
     static esp_err_t initTimer();
 

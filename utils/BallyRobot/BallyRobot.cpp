@@ -43,6 +43,11 @@ static constexpr uint8_t IMU_I2C_ADDRESS = 0x68;
 // This is a mitigation, not a fix -- add real pull-ups (2.2-4.7kOhm to
 // 3.3V on SDA and SCL) and this can go back to the default.
 static constexpr uint32_t IMU_I2C_CLOCK_HZ = 100'000;
+// The flaky bus described above (~95% frame success rate once running) also
+// occasionally drops the very first WHO_AM_I read/config write at boot, so
+// begin() gets a few tries before the IMU is declared absent.
+static constexpr int      kImuInitAttempts    = 3;
+static constexpr uint32_t kImuInitRetryDelayMs = 50;
 static constexpr float   kDegToRad       = static_cast<float>(PI) / 180.0f;
 static constexpr float   kGravityMss     = 9.81f;
 
@@ -2738,18 +2743,32 @@ bool ROBOT::init() {
         return false;
     }
 
-    // Not fatal: the IMU is optional hardware. Missing/unpowered, EKF just
-    // keeps running on encoder-only measurements (see sampleEKF()).
-    const int imu_begin_ret = imu->begin();
-    imu_ready_              = imu_begin_ret > 0;
+    // Retry a few times: on a real but flaky bus, a failed attempt leaves
+    // the ICM42688's I2C bus/device handles open (see initI2CBus()), so a
+    // bare re-call of begin() would just fail again with the pins already
+    // claimed. Re-emplacing the object first runs ~ICM42688() and tears
+    // those handles down, letting the retry claim the bus fresh.
+    int imu_begin_ret = -1;
+    for (int attempt = 1; attempt <= kImuInitAttempts; ++attempt) {
+        if (attempt > 1) {
+            vTaskDelay(pdMS_TO_TICKS(kImuInitRetryDelayMs));
+            imu.emplace(cfg.sda_pin, cfg.scl_pin, IMU_I2C_ADDRESS, IMU_I2C_CLOCK_HZ);
+        }
+        imu_begin_ret = imu->begin();
+        if (imu_begin_ret > 0) break;
+    }
+    imu_ready_ = imu_begin_ret > 0;
     if (!imu_ready_) {
         // begin()'s return codes (see ICM42688::begin()): -2 bus/device open
         // failed, -3 WHO_AM_I mismatch (something else is answering at this
         // address, or the chip isn't responding correctly), -4/-7/-8 a later
         // config/calibration step failed.
-        ROBOT::logger.insert_logf(logType::WARN,
-                                  "IMU (ICM42688) not detected (begin()=%d); EKF running on encoders only",
-                                  imu_begin_ret);
+        ROBOT::logger.insert_logf(logType::ERRO,
+                                  "IMU (ICM42688) not detected after %d attempt(s) (begin()=%d)",
+                                  kImuInitAttempts, imu_begin_ret);
+        ESP_LOGE("ROBOT_INIT", "Failed to initialize IMU after %d attempt(s) (begin()=%d)",
+                kImuInitAttempts, imu_begin_ret);
+        return false;
     }
 
     // Not fatal: a buzzer that fails to configure just means no music, not
