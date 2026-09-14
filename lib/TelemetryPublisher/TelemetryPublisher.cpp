@@ -2,41 +2,45 @@
 
 #include <BtpTransport.h>
 
+#include <cmath>
 #include <cstring>
 
 namespace {
 
 constexpr TelemetryPublisher::FieldSchema kProtocolTestFields[] = {
-    {1U, 0U, "counter", btp::WireType::Uint32, "1", 1.0F, 0.0F, 1U, false},
-    {2U, 1U, "value", btp::WireType::Float32, "1", 1.0F, 0.0F, 1U, false},
+    {1U, 0U, "counter", btp::WireType::Uint32, "1", 1.0F, 0.0F, 1U, false, NAN, NAN},
+    {2U, 1U, "value", btp::WireType::Float32, "1", 1.0F, 0.0F, 1U, false, NAN, NAN},
 };
 
 constexpr TelemetryPublisher::FieldSchema kRobotStateFields[] = {
-    {1U, 0U, "state", btp::WireType::Uint8, "1", 1.0F, 0.0F, 1U, false},
+    {1U, 0U, "state", btp::WireType::Uint8, "1", 1.0F, 0.0F, 1U, false, NAN, NAN},
 };
 
 constexpr TelemetryPublisher::FieldSchema kSensorsFields[] = {
-    {1U, 0U, "linear_speed", btp::WireType::Float32, "m/s", 1.0F, 0.0F, 1U, false},
-    {2U, 1U, "angular_speed", btp::WireType::Float32, "rad/s", 1.0F, 0.0F, 1U, false},
-    {3U, 2U, "gyro_z", btp::WireType::Float32, "rad/s", 1.0F, 0.0F, 1U, false},
-    {4U, 3U, "accel_x", btp::WireType::Float32, "m/s^2", 1.0F, 0.0F, 1U, false},
-    {5U, 4U, "accel_y", btp::WireType::Float32, "m/s^2", 1.0F, 0.0F, 1U, false},
+    {1U, 0U, "linear_speed", btp::WireType::Float32, "m/s", 1.0F, 0.0F, 1U, false, NAN, NAN},
+    {2U, 1U, "angular_speed", btp::WireType::Float32, "rad/s", 1.0F, 0.0F, 1U, false, NAN, NAN},
+    {3U, 2U, "gyro_z", btp::WireType::Float32, "rad/s", 1.0F, 0.0F, 1U, false, NAN, NAN},
+    {4U, 3U, "accel_x", btp::WireType::Float32, "m/s^2", 1.0F, 0.0F, 1U, false, NAN, NAN},
+    {5U, 4U, "accel_y", btp::WireType::Float32, "m/s^2", 1.0F, 0.0F, 1U, false, NAN, NAN},
     // Raw ADC counts (0-4095), not amps -- see ROBOT::sampleEKF()/
     // SensorSnapshot. Calibrating to amps is a follow-up once the DRV8251A
-    // current-sense scale is known.
-    {6U, 5U, "current_a", btp::WireType::Uint16, "counts", 1.0F, 0.0F, 1U, false},
-    {7U, 6U, "current_b", btp::WireType::Uint16, "counts", 1.0F, 0.0F, 1U, false},
+    // current-sense scale is known; 0-4095 is the ADC's own range and holds
+    // regardless of that future calibration.
+    {6U, 5U, "current_a", btp::WireType::Uint16, "counts", 1.0F, 0.0F, 1U, false, 0.0F, 4095.0F},
+    {7U, 6U, "current_b", btp::WireType::Uint16, "counts", 1.0F, 0.0F, 1U, false, 0.0F, 4095.0F},
     // ArraySensor channel i's raw ADC reading, downscaled >>4 to fit one
     // byte (0-255) -- uncalibrated, plotting only. Field order/count must
-    // track TelemetryPublisher::kArraySensorChannels.
-    {8U, 7U, "array_0", btp::WireType::Uint8, "counts", 1.0F, 0.0F, 1U, false},
-    {9U, 8U, "array_1", btp::WireType::Uint8, "counts", 1.0F, 0.0F, 1U, false},
-    {10U, 9U, "array_2", btp::WireType::Uint8, "counts", 1.0F, 0.0F, 1U, false},
-    {11U, 10U, "array_3", btp::WireType::Uint8, "counts", 1.0F, 0.0F, 1U, false},
-    {12U, 11U, "array_4", btp::WireType::Uint8, "counts", 1.0F, 0.0F, 1U, false},
-    {13U, 12U, "array_5", btp::WireType::Uint8, "counts", 1.0F, 0.0F, 1U, false},
-    {14U, 13U, "array_6", btp::WireType::Uint8, "counts", 1.0F, 0.0F, 1U, false},
-    {15U, 14U, "array_7", btp::WireType::Uint8, "counts", 1.0F, 0.0F, 1U, false},
+    // track TelemetryPublisher::kArraySensorChannels. No declared range: 0-255
+    // is already the uint8 wire type's own full range, so it adds nothing a
+    // consumer doesn't already know from `type`.
+    {8U, 7U, "array_0", btp::WireType::Uint8, "counts", 1.0F, 0.0F, 1U, false, NAN, NAN},
+    {9U, 8U, "array_1", btp::WireType::Uint8, "counts", 1.0F, 0.0F, 1U, false, NAN, NAN},
+    {10U, 9U, "array_2", btp::WireType::Uint8, "counts", 1.0F, 0.0F, 1U, false, NAN, NAN},
+    {11U, 10U, "array_3", btp::WireType::Uint8, "counts", 1.0F, 0.0F, 1U, false, NAN, NAN},
+    {12U, 11U, "array_4", btp::WireType::Uint8, "counts", 1.0F, 0.0F, 1U, false, NAN, NAN},
+    {13U, 12U, "array_5", btp::WireType::Uint8, "counts", 1.0F, 0.0F, 1U, false, NAN, NAN},
+    {14U, 13U, "array_6", btp::WireType::Uint8, "counts", 1.0F, 0.0F, 1U, false, NAN, NAN},
+    {15U, 14U, "array_7", btp::WireType::Uint8, "counts", 1.0F, 0.0F, 1U, false, NAN, NAN},
 };
 static_assert(sizeof(kSensorsFields) / sizeof(kSensorsFields[0]) ==
                   7U + TelemetryPublisher::kArraySensorChannels,
@@ -44,11 +48,13 @@ static_assert(sizeof(kSensorsFields) / sizeof(kSensorsFields[0]) ==
               "kArraySensorChannels, in addition to the 7 non-array fields");
 
 constexpr TelemetryPublisher::FieldSchema kFlagsFields[] = {
-    {1U, 0U, "buttons", btp::WireType::Uint8, "1", 1.0F, 0.0F, 1U, false},
-    {2U, 1U, "side_sensors", btp::WireType::Uint8, "1", 1.0F, 0.0F, 1U, false},
-    {3U, 2U, "leds", btp::WireType::Uint8, "1", 1.0F, 0.0F, 1U, false},
-    {4U, 3U, "pwm_left", btp::WireType::Int8, "%", 1.0F, 0.0F, 1U, false},
-    {5U, 4U, "pwm_right", btp::WireType::Int8, "%", 1.0F, 0.0F, 1U, false},
+    {1U, 0U, "buttons", btp::WireType::Uint8, "1", 1.0F, 0.0F, 1U, false, NAN, NAN},
+    {2U, 1U, "side_sensors", btp::WireType::Uint8, "1", 1.0F, 0.0F, 1U, false, NAN, NAN},
+    {3U, 2U, "leds", btp::WireType::Uint8, "1", 1.0F, 0.0F, 1U, false, NAN, NAN},
+    // -100..100 is the documented PWM duty-cycle range (TelemetryPublisher.h's
+    // kFlagsPayloadSize comment), narrower than int8's full -128..127.
+    {4U, 3U, "pwm_left", btp::WireType::Int8, "%", 1.0F, 0.0F, 1U, false, -100.0F, 100.0F},
+    {5U, 4U, "pwm_right", btp::WireType::Int8, "%", 1.0F, 0.0F, 1U, false, -100.0F, 100.0F},
 };
 
 constexpr TelemetryPublisher::TopicSchema kSchemas[] = {

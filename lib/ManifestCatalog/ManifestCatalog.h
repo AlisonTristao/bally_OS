@@ -46,7 +46,10 @@ constexpr std::size_t kMaxSourceInfoEntries = 16U;
 //
 // Bumped to 3: added robot.sensors (encoder speeds, IMU, current_a/current_b)
 // and robot.flags (buttons/side_sensors/leds/pwm) topics.
-constexpr std::uint32_t kConfigRevision = 3U;
+// Bumped to 4: current_a/current_b and pwm_left/pwm_right now declare a
+// min_value/max_value range (BTP 2.45.0, manifest_format_version 3) -- a
+// consumer holding revision 3 has the field, but not its range.
+constexpr std::uint32_t kConfigRevision = 4U;
 
 // btp::Role::Producer -- a leaf node describing only itself (see
 // bindProtocolTransport()'s serve_catalog() call).

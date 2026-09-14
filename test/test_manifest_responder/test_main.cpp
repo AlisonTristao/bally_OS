@@ -5,6 +5,7 @@
 #include <btp/codec.hpp>
 #include <btp/node.hpp>
 
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -328,7 +329,10 @@ void test_full_manifest_response_matches_telemetry_schemas() {
     TEST_ASSERT_EQUAL_UINT8(static_cast<std::uint8_t>(btp::ResultStatus::Success), reader.u8());
     TEST_ASSERT_EQUAL_UINT8(btp::kManifestCatalogComplete, reader.u8());
     TEST_ASSERT_EQUAL_HEX16(static_cast<std::uint16_t>(btp::ResultError::None), reader.u16());
-    TEST_ASSERT_EQUAL_UINT16(1U, reader.u16());  // format_version: no source_info configured
+    // format_version: no source_info configured, but current_a/current_b and
+    // pwm_left/pwm_right declare a min_value/max_value range (BTP 2.44.0),
+    // which alone is enough for btp::Node::emit_manifest() to pick format 3.
+    TEST_ASSERT_EQUAL_UINT16(3U, reader.u16());
     TEST_ASSERT_EQUAL_UINT16(0U, reader.u16());  // reserved
     TEST_ASSERT_EQUAL_UINT32(ManifestCatalog::kConfigRevision, reader.u32());
 
@@ -353,8 +357,10 @@ void test_full_manifest_response_matches_telemetry_schemas() {
     TEST_ASSERT_EQUAL_UINT16(0U, reader.u16());  // action_count
     TEST_ASSERT_EQUAL_STRING("bally_software", reader.utf8().c_str());
 
-    // source_info block: this fixture configures no entries -> format 1, no
-    // block at all (unlike the old always-format-2 ManifestResponder).
+    // source_info block: this fixture configures no entries, but format 3
+    // (like format 2) always carries the block -- an empty info_count, not
+    // its absence (that's format 1 only).
+    TEST_ASSERT_EQUAL_UINT16(0U, reader.u16());  // info_count
 
     for (std::size_t t = 0U; t < expected_topic_count; ++t) {
         const TelemetryPublisher::TopicSchema& topic = schemas[t];
@@ -377,16 +383,31 @@ void test_full_manifest_response_matches_telemetry_schemas() {
             const std::uint32_t field_record_size = reader.u32();
             const std::size_t field_content_start = reader.pos();
 
+            // kFieldHasRange (flags bit 2) is derived by ManifestWriter from
+            // whether either bound is declared (BTP 2.45.0) -- a field with
+            // neither costs nothing extra on the wire, so this loop must only
+            // expect min_value/max_value for the fields that actually have one.
+            const bool has_range = !std::isnan(static_cast<double>(field.min_value)) ||
+                                   !std::isnan(static_cast<double>(field.max_value));
+
             TEST_ASSERT_EQUAL_UINT16(field.field_id, reader.u16());
             TEST_ASSERT_EQUAL_UINT16(field.order, reader.u16());
             TEST_ASSERT_EQUAL_UINT8(expected_wire_type_code(field.type), reader.u8());
-            TEST_ASSERT_EQUAL_UINT8(field.nullable ? 0x01U : 0x00U, reader.u8());
+            TEST_ASSERT_EQUAL_UINT8(
+                (field.nullable ? 0x01U : 0x00U) | (has_range ? 0x04U : 0x00U),
+                reader.u8());
             TEST_ASSERT_EQUAL_UINT16(field.element_count, reader.u16());
             TEST_ASSERT_EQUAL_UINT16(0U, reader.u16());  // max_element_count
             TEST_ASSERT_EQUAL_UINT64(double_bits(static_cast<double>(field.scale)),
                                      double_bits(reader.f64()));
             TEST_ASSERT_EQUAL_UINT64(double_bits(static_cast<double>(field.offset)),
                                      double_bits(reader.f64()));
+            if (has_range) {
+                TEST_ASSERT_EQUAL_UINT64(double_bits(static_cast<double>(field.min_value)),
+                                         double_bits(reader.f64()));
+                TEST_ASSERT_EQUAL_UINT64(double_bits(static_cast<double>(field.max_value)),
+                                         double_bits(reader.f64()));
+            }
             TEST_ASSERT_EQUAL_UINT16(0U, reader.u16());  // enum_count
             TEST_ASSERT_EQUAL_STRING(field.name, reader.utf8().c_str());
             TEST_ASSERT_EQUAL_STRING(field.unit, reader.utf8().c_str());
@@ -505,7 +526,10 @@ void test_known_revision_returns_not_modified_with_no_topics() {
     TEST_ASSERT_EQUAL_UINT8(static_cast<std::uint8_t>(btp::ResultStatus::Success), reader.u8());
     TEST_ASSERT_EQUAL_UINT8(btp::kManifestNotModified, reader.u8());
     TEST_ASSERT_EQUAL_HEX16(static_cast<std::uint16_t>(btp::ResultError::None), reader.u16());
-    TEST_ASSERT_EQUAL_UINT16(1U, reader.u16());  // format_version: no source_info configured
+    // format_version: no source_info configured, but current_a/current_b and
+    // pwm_left/pwm_right declare a min_value/max_value range (BTP 2.44.0),
+    // which alone is enough for btp::Node::emit_manifest() to pick format 3.
+    TEST_ASSERT_EQUAL_UINT16(3U, reader.u16());
     reader.u16();  // reserved
     TEST_ASSERT_EQUAL_UINT32(ManifestCatalog::kConfigRevision, reader.u32());
     std::uint8_t uuid[16]{};
@@ -519,6 +543,9 @@ void test_known_revision_returns_not_modified_with_no_topics() {
     TEST_ASSERT_EQUAL_UINT16(0U, reader.u16());  // topic_count
     TEST_ASSERT_EQUAL_UINT16(0U, reader.u16());  // action_count
     TEST_ASSERT_EQUAL_STRING("bally_software", reader.utf8().c_str());
+    // format 3 still carries the (empty) source_info block on a NOT_MODIFIED
+    // reply too -- commands.md 3.3: it is not covered by config_revision.
+    TEST_ASSERT_EQUAL_UINT16(0U, reader.u16());  // info_count
     TEST_ASSERT_EQUAL_UINT32(logical.size(), reader.pos());
 }
 
@@ -678,8 +705,10 @@ void test_reply_is_sealed_when_link_has_a_seal_function() {
 
 // ---------------------------------------------------------------------------
 // A configured source_info block (commands.md 3.12) round-trips: format
-// version bumps to 2, then info_count, then key/label/value per entry, in
-// order; an entry with an empty value is dropped by ManifestCatalog::
+// version bumps to 2 (3 here, since some fields also declare a min/max
+// range -- see skip_prefix_and_name_to_source_info's own comment), then
+// info_count, then key/label/value per entry, in order; an entry with an
+// empty value is dropped by ManifestCatalog::
 // populate() (btp::Catalog::add_source_info() -- see its own comment). It
 // rides a full response AND a NOT_MODIFIED one, since source_info is not
 // gated by config_revision.
@@ -689,7 +718,11 @@ void skip_prefix_and_name_to_source_info(Reader& reader, std::uint16_t* topic_co
     reader.u8();                               // status
     reader.u8();                               // flags
     reader.u16();                              // error_code
-    TEST_ASSERT_EQUAL_UINT16(2U, reader.u16());  // manifest_format_version: source_info present
+    // manifest_format_version: source_info present would already be format 2;
+    // current_a/current_b/pwm_left/pwm_right's declared ranges (BTP 2.44.0)
+    // push it to format 3 regardless (cumulative -- 3 implies 2's source_info
+    // block too).
+    TEST_ASSERT_EQUAL_UINT16(3U, reader.u16());
     reader.u16();                              // reserved
     reader.u32();                              // config_revision
     std::uint8_t uuid[16]{};

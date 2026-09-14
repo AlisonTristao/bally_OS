@@ -35,6 +35,18 @@
 # answers TERMINAL_IN directly now (RobotLink::terminal()) but still leaves
 # CommandProcessor's async task model alone -- Node's NodeActionFn is
 # synchronous only (see its own "first cut" comment in btp/node.hpp).
+# ACTUAL minimum today is v2.45.0, past this comment's last update: some
+# TelemetryPublisher::FieldSchema fields (current_a/current_b, pwm_left/
+# pwm_right) now declare a min_value/max_value range, which
+# ManifestCatalog::populate() forwards onto btp::FieldRecord::min_value/
+# max_value -- a field only that version added, gated behind
+# manifest_format_version 3 (btp::Node::emit_manifest() picks it automatically
+# via btp::Catalog::has_field_ranges(), no code here depends on the format
+# number directly). v2.44.0 first added it but wrote min_value/max_value for
+# EVERY field once format 3 was used, even ones with nothing to declare --
+# +16 bytes/field, which alone ate nearly all of this robot's fixed 1900-byte
+# manifest scratch buffer; v2.45.0 made it per-field opt-in (flags bit
+# kFieldHasRange, derived from whether a range is actually set).
 # Keep this in step with [env:native]'s symlink; this can become a submodule
 # pinned to the tag.
 #

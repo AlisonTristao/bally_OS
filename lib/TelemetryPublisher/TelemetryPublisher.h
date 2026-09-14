@@ -79,8 +79,18 @@ public:
         float offset;
         std::uint16_t element_count;
         bool nullable;
+        // Declared valid value range, engineering-unit space (post scale/
+        // offset -- same space `unit` describes), NAN meaning "no bound on
+        // that side" -- mirrors btp::FieldRecord::min_value/max_value
+        // (btp::kNoRangeBound), carried onto the wire via
+        // ManifestCatalog::populate() only when the manifest it builds is
+        // btp manifest_format_version >= 3.
+        float min_value;
+        float max_value;
 
-        // The subset btp::SampleWriter / btp::SampleReader consume.
+        // The subset btp::SampleWriter / btp::SampleReader consume. Min/max
+        // are not part of it -- like unit/description, the sample codec
+        // never touches them, only the manifest does.
         btp::FieldSpec spec() const noexcept {
             btp::FieldSpec s{};
             s.field_id = field_id;

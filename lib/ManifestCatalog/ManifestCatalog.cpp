@@ -57,6 +57,8 @@ bool populate(btp::Catalog& catalog,
             fr.max_element_count = 0U;
             fr.scale = static_cast<double>(field.scale);
             fr.offset = static_cast<double>(field.offset);
+            fr.min_value = static_cast<double>(field.min_value);
+            fr.max_value = static_cast<double>(field.max_value);
             fr.enum_count = 0U;
             fr.name = view_of(field.name);
             fr.unit = view_of(field.unit);
