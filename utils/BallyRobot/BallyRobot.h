@@ -6,6 +6,7 @@
 #include <optional>
 #include <esp_timer.h>
 #include <esp_now.h>
+#include <esp_system.h>
 #include <esp_wifi.h>
 #include "esp_adc/adc_oneshot.h"
 #include "freertos/FreeRTOS.h"
@@ -60,6 +61,12 @@
 #define JOB_SAVE_FILE "jobs.conf"
 
 #include <SystemMonitor.h>
+
+// Human-readable name for esp_reset_reason() ("panic", "brownout", ...).
+// Defined once in BallyRobotShell.cpp (the "sys reset_reason" command) and
+// declared here so ROBOT::init() can log the same string automatically at
+// boot without duplicating the table.
+const char* resetReasonName(esp_reset_reason_t reason);
 
 class ROBOT;
 

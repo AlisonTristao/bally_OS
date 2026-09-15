@@ -982,10 +982,16 @@ void ROBOT::processDebug() {
     if (ota.is_active()) return;
 
     // Add one `if (test.poll()) { ... }` block per ScheduledDebugTest member
-    // (H-bridge current, ...).
+    // (H-bridge current, ...). Terminal-only, deliberately: these are live
+    // feedback for whoever's watching the terminal session that started the
+    // test (push_async_output addresses that same (source_id, boot_id)), not
+    // a persisted record -- unlike kalman_log_test_ below (registerKalmanCommands'
+    // "start_log", ROBOT::runEKF()), which IS meant to be retained/reviewed
+    // later and stays LOG-only on purpose. Putting these in LOG too would
+    // flood the retained ring (and TraceView's Robot Log widget) with
+    // throwaway per-sample noise for the length of the test.
     if (array_sensor_test_.poll()) {
         const std::string text = array_sensor->debug();
-        logger.insert_log(logType::INFO, text.c_str());
         terminal_responder.push_async_output(array_sensor_test_.source_id(),
                                              array_sensor_test_.boot_id(), text.c_str());
     }
@@ -1001,7 +1007,6 @@ void ROBOT::processDebug() {
         std::snprintf(text, sizeof(text), "Encoders: left=%+9lld right=%+9lld",
                       static_cast<long long>(encoder_left->getCount()),
                       static_cast<long long>(encoder_right->getCount()));
-        logger.insert_log(logType::INFO, text);
         terminal_responder.push_async_output(encoder_test_.source_id(),
                                              encoder_test_.boot_id(), text);
     }
@@ -1018,7 +1023,6 @@ void ROBOT::processDebug() {
                       "IMU: ax=%+7.2f ay=%+7.2f az=%+7.2f gx=%+7.2f gy=%+7.2f gz=%+7.2f t=%+7.2f",
                       imu->accX(), imu->accY(), imu->accZ(),
                       imu->gyrX(), imu->gyrY(), imu->gyrZ(), imu->temp());
-        logger.insert_log(logType::INFO, text);
         terminal_responder.push_async_output(imu_test_.source_id(),
                                              imu_test_.boot_id(), text);
     }
@@ -1035,7 +1039,6 @@ void ROBOT::processDebug() {
                       ok ? "OK" : "FAIL", who,
                       static_cast<unsigned long>(imu_i2c_ok_count_),
                       static_cast<unsigned long>(imu_i2c_fail_count_), ok_pct);
-        logger.insert_log(logType::INFO, text);
         terminal_responder.push_async_output(imu_i2c_test_.source_id(),
                                              imu_i2c_test_.boot_id(), text);
     }
@@ -2600,6 +2603,15 @@ bool ROBOT::init() {
 
     logger.begin();
     shell.begin();
+
+    // Why the chip is starting this boot -- previously only discoverable by
+    // typing "sys reset_reason" right after it happened, so an unattended
+    // brownout/panic/watchdog reset in the field went unrecorded unless
+    // someone happened to ask at exactly the right moment. One line, every
+    // boot, so it survives into the retained/radioed LOG history instead.
+    const esp_reset_reason_t reset_reason = esp_reset_reason();
+    logger.insert_logf(logType::INFO, "Boot: reset_reason=%d name=%s",
+                       static_cast<int>(reset_reason), resetReasonName(reset_reason));
 
     // Persist whatever the retained PSRAM ring holds before an ORDERLY
     // restart wipes it -- esp_restart() (sys -reboot, factory_reset, the

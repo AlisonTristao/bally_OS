@@ -133,11 +133,21 @@ static void setup_system_callbacks() {
     }
 
     // configure the state machine to log errors using the logger's insert_log method
-    // if an error occurs in the state machine, it will call the error callback function, 
+    // if an error occurs in the state machine, it will call the error callback function,
     // which will log the error message using the logger
+    //
+    // Also goes through robot.logger, not just ESP_LOGE: by the time this
+    // callback can even be registered, robot.init() (which calls
+    // logger.begin() as one of its first steps) has already returned, so the
+    // logger is ready for every reportError() call this can ever receive --
+    // including the ones raised later during normal operation (StateMachine::
+    // run()/next() catching an exception thrown from a state's own action),
+    // not just the verifyCallbacks() check right below. ESP_LOGE alone left
+    // those invisible to anyone not physically wired to the UART.
     robot.machine.setErrorCallback([](const char* message) {
-        // need to use the esp log, because the logger dont work if the state machine is not properly configured
-        if (message != nullptr) ESP_LOGE("STATE_MACHINE", "%s", message); 
+        if (message == nullptr) return;
+        ESP_LOGE("STATE_MACHINE", "%s", message);
+        robot.logger.insert_log(logType::ERRO, message);
     });
 
     // Retain normal shell output in PSRAM. While USB owns the SD card, or just

@@ -45,20 +45,8 @@
 // TraceView -- read it, never edit it from here.
 #include <bally_channels.h>
 
-namespace {
-
-// verify_e/verify_l and protocol_uuid_ are public-by-construction values, so
-// this is only ever pointed at those. Never at key_e()/key_l() -- see the
-// SECURITY RULE on the KeyStore class.
-void hexEncode(const std::uint8_t* data, std::size_t size, char* out) {
-    static const char kDigits[] = "0123456789abcdef";
-    for (std::size_t i = 0; i < size; ++i) {
-        out[i * 2U]      = kDigits[(data[i] >> 4) & 0x0FU];
-        out[i * 2U + 1U] = kDigits[data[i] & 0x0FU];
-    }
-    out[size * 2U] = '\0';
-}
-
+// Declared in BallyRobot.h (external linkage) so ROBOT::init() can also log
+// this name once at boot, not just from the "sys reset_reason" command below.
 const char* resetReasonName(esp_reset_reason_t reason) {
     switch (reason) {
         case ESP_RST_POWERON:  return "poweron";
@@ -74,6 +62,20 @@ const char* resetReasonName(esp_reset_reason_t reason) {
         case ESP_RST_UNKNOWN:
         default:               return "unknown";
     }
+}
+
+namespace {
+
+// verify_e/verify_l and protocol_uuid_ are public-by-construction values, so
+// this is only ever pointed at those. Never at key_e()/key_l() -- see the
+// SECURITY RULE on the KeyStore class.
+void hexEncode(const std::uint8_t* data, std::size_t size, char* out) {
+    static const char kDigits[] = "0123456789abcdef";
+    for (std::size_t i = 0; i < size; ++i) {
+        out[i * 2U]      = kDigits[(data[i] >> 4) & 0x0FU];
+        out[i * 2U + 1U] = kDigits[data[i] & 0x0FU];
+    }
+    out[size * 2U] = '\0';
 }
 
 const char* otaStateName(esp_ota_img_states_t state) {
