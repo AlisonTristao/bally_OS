@@ -106,6 +106,20 @@ static void setup_system_callbacks() {
         static const uint8_t peer_mac[6] = {MAC_ADDR};
         return (esp_now_send(peer_mac, data, len)) == ESP_OK;
     }, nullptr, 5U);
+
+    // Telemetry's own fire-and-forget path (TxScheduler::pump_telemetry(),
+    // driven by its own esp_timer -- see kTelemetryTxPeriodUs): broadcast,
+    // not the dongle's unicast peer_mac above, so a missing/late send
+    // callback never costs a hardware MAC retry -- see configureCommunication()'s
+    // comment on the broadcast peer for why that is safe here. esp_now_send()
+    // itself is the only backpressure signal (a false return just means the
+    // driver's own TX queue is full for this pass); nothing here waits on
+    // on_delivery().
+    robot.tx_scheduler.configure_telemetry([](void*, const uint8_t *data, size_t len) {
+        static const uint8_t broadcast_mac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+        return (esp_now_send(broadcast_mac, data, len)) == ESP_OK;
+    }, nullptr);
+
     robot.protocol.set_send_callback(TxScheduler::enqueue_callback,
                                      &robot.tx_scheduler);
 

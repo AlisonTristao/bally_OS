@@ -35,17 +35,18 @@
 
 // IMU I2C address (AD0 strapped low); gyro/accel unit conversions for the EKF.
 static constexpr uint8_t IMU_I2C_ADDRESS = 0x68;
-// Dropped from the ICM42688 driver's 400kHz default: this bus currently has
-// no external pull-ups (relies on the ESP32's own weak ~45kOhm ones), which
-// shows up as intermittent NACKs/garbled reads at 400kHz (scan_i2c: address
-// ACKs but WHO_AM_I reads back 0xFF, or the whole bus goes briefly silent).
-// 100kHz gives the lines more time to slew and tolerates noise better.
-// This is a mitigation, not a fix -- add real pull-ups (2.2-4.7kOhm to
-// 3.3V on SDA and SCL) and this can go back to the default.
-static constexpr uint32_t IMU_I2C_CLOCK_HZ = 100'000;
-// The flaky bus described above (~95% frame success rate once running) also
-// occasionally drops the very first WHO_AM_I read/config write at boot, so
-// begin() gets a few tries before the IMU is declared absent.
+// Back to the ICM42688 driver's 400kHz default now that real pull-ups
+// (1kOhm to 3.3V on SDA and SCL) are on the bus -- see the removed 100kHz
+// mitigation this replaces: without them, the ESP32's own weak ~45kOhm
+// internal pull-ups gave intermittent NACKs/garbled reads at 400kHz
+// (scan_i2c: address ACKs but WHO_AM_I reads back 0xFF, or the whole bus
+// goes briefly silent). If that symptom resurfaces on the bench, suspect
+// the physical bus again before this constant.
+static constexpr uint32_t IMU_I2C_CLOCK_HZ = 400'000;
+// This retry margin predates the pull-up fix above (the bus used to
+// occasionally drop the very first WHO_AM_I read/config write at boot too).
+// Costs nothing at boot to keep, so it stays as a cushion against whatever
+// transient noise the bus still sees before begin() declares the IMU absent.
 static constexpr int      kImuInitAttempts    = 3;
 static constexpr uint32_t kImuInitRetryDelayMs = 50;
 static constexpr float   kDegToRad       = static_cast<float>(PI) / 180.0f;
@@ -790,6 +791,20 @@ bool ROBOT::configureCommunication() {
 
     readMacAddress();
 
+    // A fixed, explicit rate for every ESP-NOW peer below instead of the
+    // driver's default (legacy 802.11b, ~1 Mbps): MCS5_SGI trades some of
+    // HT20's ceiling (MCS7_SGI, 72.2 Mbps) for margin, since this is also
+    // the rate the confirm-gated command/status/log traffic rides -- worth
+    // walking up to MCS7_SGI later once bench numbers (TxScheduler::stats(),
+    // dongle-side RSSI) confirm there is margin to spare. This is per-peer
+    // state (see esp_now_set_peer_rate_config()'s own doc comment), so it
+    // has to be (re)applied after each esp_now_add_peer(), not once globally.
+    esp_now_rate_config_t fast_rate_cfg = {};
+    fast_rate_cfg.phymode = WIFI_PHY_MODE_HT20;
+    fast_rate_cfg.rate = WIFI_PHY_RATE_MCS5_SGI;
+    fast_rate_cfg.ersu = false;
+    fast_rate_cfg.dcm = false;
+
     #ifdef MAC_ADDR
         uint8_t peer_addr[6] = {MAC_ADDR};
         esp_now_peer_info_t peerInfo = {};
@@ -803,9 +818,35 @@ bool ROBOT::configureCommunication() {
             ESP_LOGE("ROBOT_INIT", "Failed to add ESP-NOW peer (0x%x)", err);
             return false;
         }
+        esp_now_set_peer_rate_config(peer_addr, &fast_rate_cfg);
     #else
         #warning "MAC_ADDR not defined; ESP-NOW peer not added"
     #endif
+
+    // Telemetry's own destination (see TxScheduler::pump_telemetry()):
+    // ESP-NOW broadcast, not the dongle's unicast peer above. Broadcast
+    // frames get no 802.11 MAC-layer ACK and no automatic retry, which is
+    // exactly what a fire-and-forget stream wants -- no frame sits around
+    // waiting on an ACK/retry cycle it was never going to use. Payload
+    // confidentiality is unaffected either way: robot.sensors/robot.flags
+    // already travel AEAD-sealed under channel B's key E (RadioSeal::seal_e),
+    // and this peer's own `encrypt` stays false like every other one here --
+    // ESP-NOW's own link-layer encryption was never in use, and it does not
+    // support a broadcast/multicast peer regardless.
+    static constexpr std::uint8_t kBroadcastMac[6] = {0xFF, 0xFF, 0xFF,
+                                                       0xFF, 0xFF, 0xFF};
+    esp_now_peer_info_t broadcastPeer = {};
+    memcpy(broadcastPeer.peer_addr, kBroadcastMac, 6);
+    broadcastPeer.channel = 0;
+    broadcastPeer.encrypt = false;
+    broadcastPeer.ifidx = WIFI_IF_STA;
+    err = esp_now_add_peer(&broadcastPeer);
+    if (err != ESP_OK && err != ESP_ERR_ESPNOW_EXIST) {
+        ROBOT::logger.insert_log(logType::ERRO, "Failed to add ESP-NOW broadcast peer");
+        ESP_LOGE("ROBOT_INIT", "Failed to add ESP-NOW broadcast peer (0x%x)", err);
+        return false;
+    }
+    esp_now_set_peer_rate_config(kBroadcastMac, &fast_rate_cfg);
 
     communication_configured_ = true;
     return true;
@@ -1279,6 +1320,17 @@ void ROBOT::processCommandRequest(const btp::Header& header,
     }
 }
 
+// esp_timer callback (kTelemetryTxPeriodUs) -- drains whatever is queued in
+// TxScheduler's Telemetry lane straight to the radio, fire-and-forget. See
+// TxScheduler::pump_telemetry()'s own comment for why this bypasses pump()'s
+// confirm-gated state machine entirely.
+void ROBOT::pumpTelemetryRadio(void *arg) {
+    (void)arg;
+    if (instance_ != nullptr) {
+        instance_->tx_scheduler.pump_telemetry();
+    }
+}
+
 void ROBOT::handleSendStatic(const wifi_tx_info_t *tx_info, esp_now_send_status_t status) {
     (void)tx_info;
     if (instance_ != nullptr) {
@@ -1481,9 +1533,15 @@ void ROBOT::runEKF(void *param) {
         // wait to be notified by the sampleEKF function that new measurements are available
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
-        // run the EKF prediction and update steps with the latest control input and measurement
-        instance_->EKF->predict(instance_->control_input);
-        instance_->EKF->update(instance_->control_input, instance_->measurement);
+        // EKF predict/update temporarily disabled: nothing outside this task
+        // consumes get_state() except the debug log right below and a shell
+        // status command (BallyRobotShell.cpp) -- motor control does not
+        // depend on the filter's estimate today -- so this is safe to park
+        // while the sensor-sampling rework (possibly I2C->I3C for the IMU)
+        // and a revisit of the filter itself are pending. x[] simply stays
+        // at its last (or initial) value until this is re-enabled.
+        // instance_->EKF->predict(instance_->control_input);
+        // instance_->EKF->update(instance_->control_input, instance_->measurement);
 
         // Read back x[] right after writing it, in this same task — no
         // cross-task race with whoever else might read the filter state.
@@ -1909,6 +1967,20 @@ void ROBOT::initInterruptions(void *param){
     // timers" needs the handle later to change the period without a reboot.
     esp_timer_create(&timer_args, &instance_->ekf_timer_handle_);
     esp_timer_start_periodic(instance_->ekf_timer_handle_, cfg.sample_micros);
+
+    // Same esp_timer mechanism as kalman_trigger above, on the hardware
+    // systimer rather than the FreeRTOS tick -- see pump_telemetry()'s and
+    // kTelemetryTxPeriodUs's own comments for why Telemetry gets a private
+    // drain cadence instead of riding runComms()'s 1 kHz pump().
+    const esp_timer_create_args_t telemetry_tx_timer_args = {
+        .callback = &ROBOT::pumpTelemetryRadio,
+        .arg = nullptr,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "telemetry_tx",
+        .skip_unhandled_events = true
+    };
+    esp_timer_create(&telemetry_tx_timer_args, &instance_->telemetry_tx_timer_handle_);
+    esp_timer_start_periodic(instance_->telemetry_tx_timer_handle_, kTelemetryTxPeriodUs);
 
     vTaskDelete(NULL);
 }

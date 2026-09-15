@@ -287,6 +287,11 @@ public:
     // run the ekf in parallel processing
     static void runEKF(void *param);
 
+    // esp_timer callback (kTelemetryTxPeriodUs, independent of
+    // configTICK_RATE_HZ/WDOG_TIMEOUT_TK on purpose -- see tx_scheduler's
+    // pump_telemetry() comment) that drains the Telemetry fast lane.
+    static void pumpTelemetryRadio(void *arg);
+
     // core utility objects
     static Logger logger;
     BtpEndpoint protocol;
@@ -414,6 +419,10 @@ private:
     // and then thrown away) so "settings apply timers" can esp_timer_restart()
     // it with a new period instead of the value being frozen until reboot.
     esp_timer_handle_t ekf_timer_handle_ = nullptr;
+    // Drives pumpTelemetryRadio() at kTelemetryTxPeriodUs. esp_timer runs off
+    // the hardware systimer, not the FreeRTOS tick, so this cadence is
+    // independent of configTICK_RATE_HZ/WDOG_TIMEOUT_TK.
+    esp_timer_handle_t telemetry_tx_timer_handle_ = nullptr;
 
     // Signals and flags for buttons, sensors, LEDs, and motors
     Flags_in buttons;
@@ -953,6 +962,16 @@ private:
     // dongle reliably hear at least one per second and keeps a healthy robot
     // from flickering "offline". Still a small frame on a lightly used channel.
     static constexpr uint64_t kStatusPeriodUs = 500000ULL;
+
+    // pumpTelemetryRadio()'s cadence: 2 kHz. Deliberately NOT tied to
+    // configTICK_RATE_HZ/WDOG_TIMEOUT_TK (1 kHz) -- esp_timer runs off the
+    // hardware systimer, so this can out-pace the FreeRTOS tick without
+    // raising it for every other task in the system. This only bounds how
+    // often the Telemetry fast lane is drained; how much there IS to drain
+    // is still gated upstream by each topic's granted subscription rate
+    // (topic_period_us()) and by sampleTelemetry()'s own 1 kHz loop -- see
+    // that method's comment before raising this further.
+    static constexpr uint64_t kTelemetryTxPeriodUs = 500ULL;
     uint64_t next_status_us_ = 0U;
     void publishStatus();
 

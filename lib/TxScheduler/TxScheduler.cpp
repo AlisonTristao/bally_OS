@@ -13,6 +13,12 @@ void TxScheduler::configure(RadioSendCallback callback, void* context,
                                : delivery_timeout_ms;
 }
 
+void TxScheduler::configure_telemetry(RadioSendCallback callback,
+                                      void* context) noexcept {
+    telemetry_radio_send_ = callback;
+    telemetry_radio_context_ = context;
+}
+
 bool TxScheduler::enqueue_callback(void* context, const std::uint8_t* data,
                                    std::size_t size) noexcept {
     return context != nullptr &&
@@ -125,6 +131,11 @@ bool TxScheduler::pump(std::uint64_t now_ms) noexcept {
     if (radio_send_ == nullptr) return false;
     bool found = false;
     for (std::size_t value = 0U; value < kPriorityCount; ++value) {
+        // Telemetry has its own fire-and-forget lane (pump_telemetry()) --
+        // skip it here so it never competes with the confirm-gated classes
+        // for the single pending_ slot, and never sits behind a stalled
+        // awaiting_delivery_ that has nothing to do with it.
+        if (static_cast<Priority>(value) == Priority::Telemetry) continue;
         if (pop(static_cast<Priority>(value), &pending_)) {
             found = true;
             break;
@@ -143,6 +154,28 @@ bool TxScheduler::pump(std::uint64_t now_ms) noexcept {
         return false;
     }
     return true;
+}
+
+bool TxScheduler::pump_telemetry() noexcept {
+    if (telemetry_radio_send_ == nullptr) return false;
+
+    bool sent_any = false;
+    EncodedFrame frame{};
+    while (pop(Priority::Telemetry, &frame)) {
+        if (!telemetry_radio_send_(telemetry_radio_context_, frame.bytes,
+                                   frame.size)) {
+            // Backpressure from the radio itself (e.g. the driver's TX queue
+            // is full) or a hard failure -- either way, stop this pass
+            // instead of busy-spinning against it. The frame already popped
+            // is lost: telemetry is fire-and-forget on purpose, never
+            // retried, so there is nothing to push back into the queue.
+            telemetry_dropped_.fetch_add(1U, std::memory_order_relaxed);
+            break;
+        }
+        telemetry_sent_.fetch_add(1U, std::memory_order_relaxed);
+        sent_any = true;
+    }
+    return sent_any;
 }
 
 void TxScheduler::on_delivery(bool delivered) noexcept {
@@ -177,6 +210,8 @@ TxScheduler::Stats TxScheduler::stats() const noexcept {
         delivery_failed_.load(std::memory_order_relaxed),
         {},
         {},
+        telemetry_sent_.load(std::memory_order_relaxed),
+        telemetry_dropped_.load(std::memory_order_relaxed),
     };
     for (std::size_t value = 0U; value < kPriorityCount; ++value) {
         result.queued_by_priority[value] =

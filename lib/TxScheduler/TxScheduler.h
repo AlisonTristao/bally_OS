@@ -36,6 +36,11 @@ public:
         std::uint32_t delivery_failed;
         std::uint32_t queued_by_priority[6];
         std::uint32_t dropped_by_priority[6];
+        // Telemetry's own fire-and-forget lane (pump_telemetry()) -- not
+        // folded into accepted/delivered/dropped above, which only ever
+        // reflect the confirm-gated classes pump() drives.
+        std::uint32_t telemetry_sent;
+        std::uint32_t telemetry_dropped;
     };
 
     static constexpr std::uint64_t kDefaultDeliveryTimeoutMs = 250U;
@@ -44,17 +49,38 @@ public:
                    std::uint64_t delivery_timeout_ms =
                        kDefaultDeliveryTimeoutMs) noexcept;
 
+    // Second, independent send path used ONLY by the Telemetry priority
+    // class -- see pump_telemetry(). Kept separate from configure() above
+    // because telemetry fire-and-forgets to a different destination
+    // (ESP-NOW broadcast, not the paired dongle's unicast peer) and never
+    // waits for delivery, so it has no business sharing pump()'s
+    // pending_/awaiting_delivery_ state machine.
+    void configure_telemetry(RadioSendCallback callback,
+                             void* context) noexcept;
+
     // Adapter installed as BtpEndpoint's send callback. It validates and
     // copies the complete encoded frame into a queue dedicated to its class.
     static bool enqueue_callback(void* context, const std::uint8_t* data,
                                  std::size_t size) noexcept;
     bool enqueue(const std::uint8_t* data, std::size_t size) noexcept;
 
-    // Starts at most one ESP-NOW transmission. Only one frame may await a
-    // callback, which makes callback correlation unambiguous on IDF versions
-    // that do not expose a per-send token.
+    // Starts at most one ESP-NOW transmission, for every class EXCEPT
+    // Telemetry (see pump_telemetry() for that one). Only one frame may
+    // await a callback, which makes callback correlation unambiguous on IDF
+    // versions that do not expose a per-send token.
     bool pump(std::uint64_t now_ms) noexcept;
     void on_delivery(bool delivered) noexcept;
+
+    // Drains the Telemetry queue directly, bypassing pending_/
+    // awaiting_delivery_ entirely: telemetry is a state stream (a newer
+    // sample always supersedes an older one, and BTP's sequence field
+    // already exposes gaps downstream), so unlike pump() it never waits for
+    // a delivery confirmation or times out waiting for one -- it sends
+    // everything queued, back to back, until the queue empties or the radio
+    // itself pushes back (telemetry_radio_send_ returning false -- e.g. the
+    // driver's own TX queue is full). Meant to be driven by its own
+    // high-rate esp_timer, independent of pump()'s tick-driven cadence.
+    bool pump_telemetry() noexcept;
 
     bool idle() const noexcept;
     std::size_t queued_count(Priority priority) const noexcept;
@@ -110,6 +136,14 @@ private:
     RadioSendCallback radio_send_ = nullptr;
     void* radio_context_ = nullptr;
     std::uint64_t delivery_timeout_ms_ = kDefaultDeliveryTimeoutMs;
+
+    // pump_telemetry()'s own send path -- deliberately not shared with
+    // radio_send_/radio_context_ above, since it targets a different
+    // destination (broadcast) and is never gated on delivery.
+    RadioSendCallback telemetry_radio_send_ = nullptr;
+    void* telemetry_radio_context_ = nullptr;
+    std::atomic<std::uint32_t> telemetry_sent_{0U};
+    std::atomic<std::uint32_t> telemetry_dropped_{0U};
 
     EncodedFrame pending_{};
     std::uint64_t pending_since_ms_ = 0U;
