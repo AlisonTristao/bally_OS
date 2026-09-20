@@ -330,9 +330,10 @@ public:
     OTAUpdater ota;
     // Always built (the old ENABLE_SYSTEM_MONITOR build flag is gone):
     // observability that a commented-out line in platformio.ini can switch
-    // off is observability the field build never has. To silence only the
-    // periodic report, set timers.sysmon_freq_ms = 0 -- the on-demand
-    // "sysmon"/"sys" commands keep working either way.
+    // off is observability the field build never has. Periodic reporting
+    // goes out over the BTP system.monitor telemetry topic (see
+    // TelemetryPublisher::kSystemMonitorTopicId); this instance also backs
+    // the on-demand "sysmon"/"sys" shell commands.
     SystemMonitor sysmon;
 
     // Time- and state-triggered shell commands (the "job" module). Public

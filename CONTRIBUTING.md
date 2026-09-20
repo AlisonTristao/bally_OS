@@ -24,7 +24,7 @@ Checklist para criar `lib/NomeDaLib/`:
    - Só deixe um módulo de shell inteiro em `ROBOT::registerRobotIOCommands/registerKalmanCommands/registerDebugCommands` (`utils/BallyRobot/BallyRobot.cpp`) quando ele não tiver dono natural — ver os três exemplos documentados lá (raw I/O dos `Flags`, EKF vendorizado sem wrapper próprio, *gate* de DEBUG compartilhado entre sensores).
 6. **Nomeie de forma consistente**: PascalCase para classe/arquivo/pasta, mesmo nome nos três.
 7. **Não precisa registrar nada em `platformio.ini`** — o Library Dependency Finder do PlatformIO encontra `lib/*` sozinho a partir do primeiro `#include <NomeDaLib.h>`.
-8. **Antes de considerar pronto**, rode `pio run -e esp32-s3` **e** `pio test -e native`. Evite colocar funcionalidade atrás de uma flag de build desligada por padrão: código assim nunca é compilado no binário que roda em campo (foi o caso do `SystemMonitor`, que ficou fora do firmware por um `;` no `platformio.ini`). Se algo precisa poder ser desligado, faça disso um *setting* em runtime com um valor sentinela documentado (ex: `timers.sysmon_freq_ms = 0` silencia o relatório periódico sem tirar os comandos do ar).
+8. **Antes de considerar pronto**, rode `pio run -e esp32-s3` **e** `pio test -e native`. Evite colocar funcionalidade atrás de uma flag de build desligada por padrão: código assim nunca é compilado no binário que roda em campo (foi o caso do `SystemMonitor`, que ficou fora do firmware por um `;` no `platformio.ini`). Se algo precisa poder ser desligado, faça disso um *setting* em runtime com um valor sentinela documentado.
 
 ### Como decidir "isso é da lib ou do ROBOT?"
 

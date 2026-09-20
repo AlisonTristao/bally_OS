@@ -10,7 +10,6 @@
 SystemMonitor::SystemMonitor() {
     temp_sensor = NULL;
     is_initialized = false;
-    output_cb = nullptr;
     logger_index_cb = nullptr;
     last_total_runtime = 0;
     core0_load = 0.0f;
@@ -30,18 +29,8 @@ void SystemMonitor::begin() {
     is_initialized = true;
 }
 
-void SystemMonitor::setOutputCallback(MonitorCallback cb) {
-    output_cb = cb;
-}
-
 void SystemMonitor::setLoggerCallback(GetLoggerIndexCallback cb) {
     logger_index_cb = cb;
-}
-
-void SystemMonitor::dispatch(const std::string& data) {
-    if (output_cb) {
-        output_cb(data);
-    }
 }
 
 void SystemMonitor::update() {
@@ -289,10 +278,6 @@ std::string SystemMonitor::getTelemetryReport(std::size_t max_bytes) {
     report.resize((cut == std::string::npos) ? 0U : (cut + 1U));
     report += kMarker;
     return report;
-}
-
-void SystemMonitor::report() {
-    dispatch(getFullReport());
 }
 
 // ============================================================================

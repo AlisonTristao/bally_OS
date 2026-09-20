@@ -27,7 +27,6 @@ const SettingEntry RobotSettings::kTable[] = {
     ENTRY("identity", description, STRING),
 
     ENTRY("timers", sample_micros,  U32),
-    ENTRY("timers", sysmon_freq_ms, U32),
     ENTRY("timers", delay_flags,    U32),
     ENTRY("timers", timezone,       STRING),
 

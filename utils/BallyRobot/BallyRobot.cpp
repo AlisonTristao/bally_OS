@@ -1380,9 +1380,8 @@ void ROBOT::registerSettingsAppliers() {
     // "timers": sample_micros needs the running EKF timer restarted with the
     // new period; timezone needs setenv/tzset applied directly rather than
     // waiting for the next "logger -set_datetime" to happen to read it.
-    // delay_flags and sysmon_freq_ms need nothing here -- checkStateMachine()
-    // and the system-monitor task in main.cpp already read settings.data()
-    // fresh on every pass, so they are live already.
+    // delay_flags needs nothing here -- checkStateMachine() already reads
+    // settings.data() fresh on every pass, so it is live already.
     settings.register_applier("timers", [this](const SettingsData& cfg) -> bool {
         bool ok = true;
         if (ekf_timer_handle_ != nullptr) {
@@ -2734,9 +2733,6 @@ bool ROBOT::init() {
     imu.emplace(cfg.sda_pin, cfg.scl_pin, IMU_I2C_ADDRESS, IMU_I2C_CLOCK_HZ);
 
     sysmon.begin();
-    sysmon.setOutputCallback([](const std::string& data) {
-        if (!data.empty()) ROBOT::logger.insert_log(logType::DEBG, data.c_str());
-    });
     sysmon.setLoggerCallback([]() { return ROBOT::logger.get_write_pct(); });
 
     receivedDataQueue = xQueueCreateStatic(

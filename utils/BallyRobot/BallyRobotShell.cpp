@@ -1278,10 +1278,9 @@ void ROBOT::registerSystemCommands() {
     }, "identity", "BTP source_id/boot_id, MAC, uuid, radio channel and peer", "sys");
 
     shell.add([]() -> uint8_t {
-        // update() before reading: with timers.sysmon_freq_ms == 0 nobody
-        // else refreshes the task table, and even with the periodic report
-        // running, an on-demand read should not show whatever the last cycle
-        // happened to leave behind.
+        // update() before reading: nothing else refreshes the task table on
+        // its own, so an on-demand read should not show whatever the BTP
+        // system.monitor publish cycle happened to leave behind.
         instance_->sysmon.update();
         ROBOT::logger.insert_log(logType::INFO,
                                  instance_->sysmon.getFullReport().c_str());

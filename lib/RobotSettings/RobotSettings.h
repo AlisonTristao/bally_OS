@@ -52,7 +52,6 @@ struct SettingsData {
 
     // -------- timers --------
     uint32_t sample_micros  = 1000;   // EKF sample period, us (1000 -> 1kHz)
-    uint32_t sysmon_freq_ms = 10000;  // system monitor report period, ms
     uint32_t delay_flags    = 250;    // flags reset / state-change check period, ms
     char     timezone[16]   = "BRT3"; // POSIX TZ string, local log filenames
 

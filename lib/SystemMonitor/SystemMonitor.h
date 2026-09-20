@@ -9,10 +9,8 @@
 #include "driver/temperature_sensor.h"
 #include <string>
 #include <cstddef>
-#include <functional>
 #include <vector>
 
-using MonitorCallback = std::function<void(const std::string&)>;
 using GetLoggerIndexCallback = float (*)();
 
 class TinyShell;
@@ -33,7 +31,6 @@ class SystemMonitor {
 private:
     temperature_sensor_handle_t temp_sensor;
     bool is_initialized;
-    MonitorCallback output_cb;
     GetLoggerIndexCallback logger_index_cb;
 
     uint32_t last_total_runtime;
@@ -48,7 +45,6 @@ private:
     StaticSemaphore_t state_mutex_buffer;
     SemaphoreHandle_t state_mutex;
 
-    void dispatch(const std::string& data);
     std::string getTaskStatsUnlocked();
     // Body of getFullReport(); caller must already hold state_mutex.
     std::string getFullReportUnlocked();
@@ -58,7 +54,6 @@ public:
     
     void begin();
     
-    void setOutputCallback(MonitorCallback cb);
     void setLoggerCallback(GetLoggerIndexCallback cb);
     void update(); 
 
@@ -75,8 +70,6 @@ public:
     // oversized task table is cut on a line boundary with a trailing
     // "... (truncated)" marker.
     std::string getTelemetryReport(std::size_t max_bytes);
-
-    void report();
 
     /**
      * @brief Register the "sysmon" shell module (temp/uptime/memory/tasks/

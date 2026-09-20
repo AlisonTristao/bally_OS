@@ -31,10 +31,6 @@
 ROBOT& robot = ROBOT::getInstance();
 States& states = States::getInstance();
 
-static StackType_t xSystemMonitorStack[M4KB];
-static StaticTask_t xSystemMonitorBuffer;
-static void init_system_monitor();
-
 static StackType_t xRoutineStack[M8KB];
 static StaticTask_t xRoutineBuffer;
 static StackType_t xCommsStack[M8KB];
@@ -76,10 +72,6 @@ extern "C" void app_main(void) {
     
     // start the FreeRTOS tasks for the robot's operation
     start_freertos_tasks();
-
-    // System health reporting. Always started; timers.sysmon_freq_ms == 0
-    // silences the periodic report without taking the on-demand commands away.
-    init_system_monitor();
 
     vTaskDelete(NULL); // goodbye main app
 }
@@ -212,33 +204,4 @@ static void start_freertos_tasks() {
     xTaskCreateStaticPinnedToCore(robot.runEKF,            "EKF_task",      M2KB, NULL, 4,  xEKFStack,          &xEKFBuffer,          PRO_CPU_NUM);
     xTaskCreateStaticPinnedToCore(Junkebox::task,          "junkebox_task", M4KB, &(*robot.junkebox), 1, xJunkeboxStack, &xJunkeboxBuffer, PRO_CPU_NUM);
     ESP_LOGI("ROBOT_MAIN", "All FreeRTOS tasks started successfully");
-}
-
-static void init_system_monitor() {
-    // robot.sysmon is already configured (begin()/callbacks) by robot.init();
-    // this task only drives its periodic report.
-    //
-    // sysmon_freq_ms is read every pass, not captured: "settings set timers
-    // sysmon_freq_ms 0" silences the report from the next pass on, and any
-    // non-zero value resumes it, with no reboot and without disturbing the
-    // on-demand sysmon/sys commands. The idle poll below is what makes 0 mean
-    // "quiet" instead of "spin at full speed on vTaskDelay(0)".
-    static constexpr uint32_t kDisabledPollMs = 1000;
-
-    xTaskCreateStaticPinnedToCore(
-        [](void* param) {
-            (void)param;
-            while (true) {
-                const uint32_t period_ms = robot.settings.data().sysmon_freq_ms;
-                if (period_ms == 0) {
-                    vTaskDelay(pdMS_TO_TICKS(kDisabledPollMs));
-                    continue;
-                }
-                robot.sysmon.update();
-                robot.sysmon.report();
-                vTaskDelay(pdMS_TO_TICKS(period_ms));
-            }
-        }, "system_monitor", M4KB, NULL, 1, xSystemMonitorStack, &xSystemMonitorBuffer, PRO_CPU_NUM
-    );
-    ESP_LOGI("ROBOT_MAIN", "System monitor task started");
 }
