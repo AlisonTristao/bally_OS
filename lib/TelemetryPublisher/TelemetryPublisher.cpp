@@ -161,6 +161,35 @@ void TelemetryPublisher::bind_subscriptions(
     subscriptions_ = &subscriptions;
 }
 
+void TelemetryPublisher::bind_tcp_target(
+    BtpEndpoint& endpoint, BtpSealFn seal, void* seal_context,
+    const btp::SubscriptionTable& subscriptions) noexcept {
+    tcp_endpoint_ = &endpoint;
+    tcp_seal_ = seal;
+    tcp_seal_context_ = seal_context;
+    tcp_subscriptions_ = &subscriptions;
+}
+
+void TelemetryPublisher::unbind_tcp_target() noexcept {
+    tcp_endpoint_ = nullptr;
+    tcp_seal_ = nullptr;
+    tcp_seal_context_ = nullptr;
+    tcp_subscriptions_ = nullptr;
+}
+
+std::size_t TelemetryPublisher::collect_targets(
+    TargetView out[kMaxTargets]) const noexcept {
+    std::size_t n = 0U;
+    if (endpoint_ != nullptr) {
+        out[n++] = TargetView{endpoint_, seal_, seal_context_, subscriptions_};
+    }
+    if (tcp_endpoint_ != nullptr) {
+        out[n++] = TargetView{tcp_endpoint_, tcp_seal_, tcp_seal_context_,
+                              tcp_subscriptions_};
+    }
+    return n;
+}
+
 TelemetryPublisher::PublishResult TelemetryPublisher::publish_protocol_test(
     std::uint32_t counter,
     float value,
@@ -257,7 +286,9 @@ TelemetryPublisher::PublishResult TelemetryPublisher::publish_system_monitor(
 }
 
 std::size_t TelemetryPublisher::flush(std::size_t max_samples) noexcept {
-    if (endpoint_ == nullptr) return 0U;
+    TargetView targets[kMaxTargets];
+    const std::size_t target_count = collect_targets(targets);
+    if (target_count == 0U) return 0U;
 
     std::size_t processed = 0U;
 
@@ -265,28 +296,42 @@ std::size_t TelemetryPublisher::flush(std::size_t max_samples) noexcept {
     // how many wire fragments it needs. Drain it before the numeric queue:
     // its sequence was reserved earlier (low-rate topic), so sending it first
     // keeps sequences ascending on the wire in the common case. send_logical_
-    // reserved() seals the whole document once, then fragments it; a failed
-    // seal stays fail-closed.
+    // reserved() seals the whole document once per TARGET (each target's own
+    // transport limits decide how many wire fragments that seal needs), then
+    // fragments it; a failed seal stays fail-closed. A target whose own table
+    // shows no subscriber for this topic is skipped entirely -- an ESP-NOW
+    // peer subscribing does not make this reach a TCP client and vice versa
+    // (see bind_tcp_target()'s comment); `subscriptions == nullptr` (a target
+    // that never bound a table at all) stays ungated, matching this
+    // function's original single-target behavior.
     if (processed < max_samples &&
         monitor_stage_.pending.load(std::memory_order_acquire)) {
-        const bool sent = endpoint_->send_logical_reserved(
-            btp::MessageType::Telemetry, kSystemMonitorTopicId,
-            monitor_stage_.sequence, monitor_stage_.payload,
-            monitor_stage_.payload_size, monitor_stage_.timestamp_us, seal_,
-            seal_context_);
-        if (sent) {
-            sent_total_.fetch_add(1U, std::memory_order_relaxed);
-            RuntimeLockGuard guard(runtime_lock_);
-            if (guard.acquired()) {
-                init_runtime_if_needed();
-                const int idx = find_topic_index(kSystemMonitorTopicId);
-                if (idx >= 0) {
-                    runtime_[static_cast<std::size_t>(idx)].bytes_sent_total +=
-                        monitor_stage_.payload_size;
-                }
+        for (std::size_t i = 0U; i < target_count; ++i) {
+            const TargetView& target = targets[i];
+            if (target.subscriptions != nullptr &&
+                target.subscriptions->subscriber_count(kSystemMonitorTopicId) ==
+                    0U) {
+                continue;
             }
-        } else {
-            send_failed_.fetch_add(1U, std::memory_order_relaxed);
+            const bool sent = target.endpoint->send_logical_reserved(
+                btp::MessageType::Telemetry, kSystemMonitorTopicId,
+                monitor_stage_.sequence, monitor_stage_.payload,
+                monitor_stage_.payload_size, monitor_stage_.timestamp_us,
+                target.seal, target.seal_context);
+            if (sent) {
+                sent_total_.fetch_add(1U, std::memory_order_relaxed);
+                RuntimeLockGuard guard(runtime_lock_);
+                if (guard.acquired()) {
+                    init_runtime_if_needed();
+                    const int idx = find_topic_index(kSystemMonitorTopicId);
+                    if (idx >= 0) {
+                        runtime_[static_cast<std::size_t>(idx)]
+                            .bytes_sent_total += monitor_stage_.payload_size;
+                    }
+                }
+            } else {
+                send_failed_.fetch_add(1U, std::memory_order_relaxed);
+            }
         }
         monitor_stage_.pending.store(false, std::memory_order_release);
         ++processed;
@@ -299,24 +344,37 @@ std::size_t TelemetryPublisher::flush(std::size_t max_samples) noexcept {
 
         const Sample& sample = queue_[read % kQueueCapacity];
         // queue_[] now only carries the few-octet numeric samples: one sealed
-        // fragment each, sequence already reserved by the producer.
-        const bool sent = endpoint_->send_fragment(
-            btp::MessageType::Telemetry, sample.topic_id, sample.sequence,
-            sample.timestamp_us, sample.payload, sample.payload_size, 0U, 1U,
-            seal_, seal_context_);
-        if (sent) {
-            sent_total_.fetch_add(1U, std::memory_order_relaxed);
-            RuntimeLockGuard guard(runtime_lock_);
-            if (guard.acquired()) {
-                init_runtime_if_needed();
-                const int idx = find_topic_index(sample.topic_id);
-                if (idx >= 0) {
-                    runtime_[static_cast<std::size_t>(idx)].bytes_sent_total +=
-                        sample.payload_size;
-                }
+        // fragment each PER TARGET that still wants this topic, sequence
+        // already reserved by the producer. A slow/full target (e.g. the TCP
+        // frame queue at capacity) only fails its own send_fragment() call --
+        // it never blocks or corrupts delivery to the other target, and the
+        // sample is removed from this shared queue exactly once regardless of
+        // how many targets it reached.
+        for (std::size_t i = 0U; i < target_count; ++i) {
+            const TargetView& target = targets[i];
+            if (target.subscriptions != nullptr &&
+                target.subscriptions->subscriber_count(sample.topic_id) ==
+                    0U) {
+                continue;
             }
-        } else {
-            send_failed_.fetch_add(1U, std::memory_order_relaxed);
+            const bool sent = target.endpoint->send_fragment(
+                btp::MessageType::Telemetry, sample.topic_id, sample.sequence,
+                sample.timestamp_us, sample.payload, sample.payload_size, 0U,
+                1U, target.seal, target.seal_context);
+            if (sent) {
+                sent_total_.fetch_add(1U, std::memory_order_relaxed);
+                RuntimeLockGuard guard(runtime_lock_);
+                if (guard.acquired()) {
+                    init_runtime_if_needed();
+                    const int idx = find_topic_index(sample.topic_id);
+                    if (idx >= 0) {
+                        runtime_[static_cast<std::size_t>(idx)]
+                            .bytes_sent_total += sample.payload_size;
+                    }
+                }
+            } else {
+                send_failed_.fetch_add(1U, std::memory_order_relaxed);
+            }
         }
 
         read_index_.store(read + 1U, std::memory_order_release);
@@ -533,23 +591,46 @@ bool TelemetryPublisher::topic_active(std::uint16_t topic_id) const noexcept {
 
 std::uint16_t TelemetryPublisher::topic_subscriber_count(
     std::uint16_t topic_id) const noexcept {
-    if (topic_id == 0U || subscriptions_ == nullptr) return 0U;
-    return static_cast<std::uint16_t>(subscriptions_->subscriber_count(topic_id));
+    if (topic_id == 0U) return 0U;
+    // Aggregate over BOTH tables (T22): the ESP-NOW peer and a direct TCP
+    // client are two independent audiences for the same topic (see
+    // bind_tcp_target()'s comment) -- either one bound is enough to count.
+    std::uint32_t count = 0U;
+    if (subscriptions_ != nullptr) {
+        count += subscriptions_->subscriber_count(topic_id);
+    }
+    if (tcp_subscriptions_ != nullptr) {
+        count += tcp_subscriptions_->subscriber_count(topic_id);
+    }
+    return static_cast<std::uint16_t>(count);
 }
 
 std::uint32_t TelemetryPublisher::topic_effective_rate_millihz(
     std::uint16_t topic_id) const noexcept {
-    if (topic_id == 0U || subscriptions_ == nullptr) return 0U;
-    return subscriptions_->aggregate_rate_millihz(topic_id);
+    if (topic_id == 0U) return 0U;
+    // Same aggregation rule flush()'s single-target predecessor already had
+    // for several ESP-NOW sessions behind the dongle: the fastest subscriber
+    // across EITHER table wins, so a slow one never throttles a fast one --
+    // now extended across the ESP-NOW/TCP table boundary too.
+    std::uint32_t rate = 0U;
+    if (subscriptions_ != nullptr) {
+        rate = subscriptions_->aggregate_rate_millihz(topic_id);
+    }
+    if (tcp_subscriptions_ != nullptr) {
+        const std::uint32_t tcp_rate =
+            tcp_subscriptions_->aggregate_rate_millihz(topic_id);
+        if (tcp_rate > rate) rate = tcp_rate;
+    }
+    return rate;
 }
 
 std::size_t TelemetryPublisher::active_subscription_count() const noexcept {
-    if (subscriptions_ == nullptr) return 0U;
     std::size_t schema_count = 0U;
     const TopicSchema* schema_list = schemas(&schema_count);
     std::size_t count = 0U;
     for (std::size_t i = 0U; i < schema_count; ++i) {
-        count += subscriptions_->subscriber_count(schema_list[i].topic_id);
+        // topic_subscriber_count() already aggregates both tables.
+        count += topic_subscriber_count(schema_list[i].topic_id);
     }
     return count;
 }

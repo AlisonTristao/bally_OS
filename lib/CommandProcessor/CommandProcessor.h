@@ -129,11 +129,29 @@ public:
                      ResultView* result_out) noexcept;
 
     bool send_result(const ResultView& result) noexcept;
+
+    // Same as send_result(), but frames/sends through `endpoint` instead of
+    // the one bound at configure() time -- for a COMMAND_REQUEST that did
+    // not arrive over this robot's normal ESP-NOW `protocol` at all (a
+    // direct TCP control session, topico T22: TAREFAS_TCP_BLE_ANDROID.txt).
+    // Sealing still follows result.channel exactly as the single-endpoint
+    // overload does (seal_link_/seal_endpoint_ stay whatever configure()
+    // set -- a TCP-originated request is always channel B, so this sends
+    // sealed with seal_endpoint_/RadioSeal::seal_e, the same key TraceView
+    // already holds for channel B over ESP-NOW/the hub). Dedup bookkeeping,
+    // stats and the drop counters are identical to the single-endpoint
+    // overload; only the wire destination differs.
+    bool send_result(const ResultView& result, BtpEndpoint& endpoint) noexcept;
+
     void note_unauthorized() noexcept;
     void note_drop() noexcept;
     Stats stats() const noexcept;
 
 private:
+    // Shared body for both send_result() overloads; `endpoint` is
+    // endpoint_ for the zero-arg one, or the caller-supplied one otherwise.
+    bool send_result_via(const ResultView& result, BtpEndpoint* endpoint) noexcept;
+
     // btp::DedupCache stores the verbatim request then the COMMAND_RESULT in
     // one region per slot. The result is prefixed with the 12 octets the
     // replay needs that the payload does not carry -- the result frame's own

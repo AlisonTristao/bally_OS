@@ -369,8 +369,9 @@ bool CommandProcessor::reject_busy(std::uint8_t cache_slot,
                   "command execution queue full", now_us, rx_view_, result_out);
 }
 
-bool CommandProcessor::send_result(const ResultView& result) noexcept {
-    if (endpoint_ == nullptr || result.sequence == 0U ||
+bool CommandProcessor::send_result_via(const ResultView& result,
+                                       BtpEndpoint* endpoint) noexcept {
+    if (endpoint == nullptr || result.sequence == 0U ||
         result.payload == nullptr || result.payload_size == 0U ||
         result.payload_size > btp::kEspNowMaxPayloadSize) {
         note_drop();
@@ -399,12 +400,21 @@ bool CommandProcessor::send_result(const ResultView& result) noexcept {
         return false;
     }
 
-    const bool sent = endpoint_->send_fragment(
+    const bool sent = endpoint->send_fragment(
         btp::MessageType::Command, kCommandResultObjectId, result.sequence,
         result.timestamp_us, result.payload, result.payload_size, 0U, 1U,
         seal, seal_context);
     if (!sent) note_drop();
     return sent;
+}
+
+bool CommandProcessor::send_result(const ResultView& result) noexcept {
+    return send_result_via(result, endpoint_);
+}
+
+bool CommandProcessor::send_result(const ResultView& result,
+                                   BtpEndpoint& endpoint) noexcept {
+    return send_result_via(result, &endpoint);
 }
 
 void CommandProcessor::note_unauthorized() noexcept {

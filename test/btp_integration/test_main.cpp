@@ -4,11 +4,14 @@
 #include <CommandProcessor.h>
 #include <ManifestCatalog.h>
 #include <StatusReporter.h>
+#include <TcpSendAdmission.h>
 #include <TelemetryPublisher.h>
 #include <TxScheduler.h>
 #include <bally_channels.h>
 #include <btp/codec.hpp>
 #include <btp/fragmentation.hpp>
+#include <btp/messages.hpp>
+#include <btp/stream.hpp>
 #include <btp/subscription.hpp>
 
 #include <cstdint>
@@ -48,6 +51,20 @@ bool capture_send(const std::uint8_t* data, std::size_t size) {
     std::memcpy(sent_frames[sent_count], data, size);
     sent_sizes[sent_count] = size;
     ++sent_count;
+    return true;
+}
+
+// A second capture callback/counter for the T22 (TAREFAS_TCP_BLE_ANDROID.txt)
+// multi-target TelemetryPublisher test below -- a direct-TCP session's own
+// send path, separate from sent_frames/sent_count's ESP-NOW one. Only a
+// count is needed there (not the frame bytes), unlike the ESP-NOW capture
+// several other tests decode.
+std::size_t tcp_sent_count = 0U;
+
+bool capture_tcp_send(const std::uint8_t* data, std::size_t size) {
+    (void)data;
+    if (size > btp::kEspNowMaxFrameSize) return false;
+    ++tcp_sent_count;
     return true;
 }
 
@@ -1232,6 +1249,83 @@ void test_lease_expiry_and_new_boot_id_end_a_session() {
                 TelemetryPublisher::kRobotStateTopicId));
 }
 
+// T22 (TAREFAS_TCP_BLE_ANDROID.txt): bind_tcp_target() makes a direct-TCP
+// session a SECOND, independent audience. A sample must reach a target only
+// when THAT target's own table has a live subscriber for the topic -- an
+// ESP-NOW peer subscribing must never cause delivery to the TCP client and
+// vice versa -- and unbind_tcp_target() must stop delivery there and drop it
+// out of the aggregate subscriber count, without disturbing the ESP-NOW side.
+void test_telemetry_multi_target_isolates_esp_now_and_tcp_subscribers() {
+    sent_count = 0U;
+    tcp_sent_count = 0U;
+
+    BtpEndpoint esp_endpoint;
+    TEST_ASSERT_TRUE(esp_endpoint.configure(kLocalSource, kLocalBoot));
+    esp_endpoint.set_send_callback(capture_send);
+
+    BtpEndpoint tcp_endpoint;
+    TEST_ASSERT_TRUE(tcp_endpoint.configure(kLocalSource, kLocalBoot));
+    tcp_endpoint.set_send_callback(capture_tcp_send);
+
+    SubscriptionFixture<4> esp_subs;
+    SubscriptionFixture<4> tcp_subs;
+    const auto catalog = make_telemetry_catalog();
+
+    TelemetryPublisher publisher;
+    publisher.configure(esp_endpoint);
+    publisher.bind_subscriptions(esp_subs.table);
+    publisher.bind_tcp_target(tcp_endpoint, nullptr, nullptr, tcp_subs.table);
+
+    // Only the TCP table grants a subscription so far.
+    btp::SubscribeResult tcp_sub{};
+    tcp_subs.table.handle_subscribe(
+        catalog, subscribe_header(0xCCCCU, 1U, 1U),
+        make_subscribe(TelemetryPublisher::kProtocolTestTopicId, 50000U, 5000U),
+        0U, &tcp_sub);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<std::uint8_t>(btp::ResultStatus::Success),
+                            tcp_sub.status);
+    TEST_ASSERT_EQUAL_UINT16(
+        1U, publisher.topic_subscriber_count(
+                TelemetryPublisher::kProtocolTestTopicId));
+
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<std::uint8_t>(TelemetryPublisher::PublishResult::Queued),
+        static_cast<std::uint8_t>(
+            publisher.publish_protocol_test(1U, 1.0f, 1000U)));
+    TEST_ASSERT_EQUAL_UINT32(1U, publisher.flush(1U));
+    // The ESP-NOW table never granted anything for this topic: delivered to
+    // the TCP target alone.
+    TEST_ASSERT_EQUAL_UINT32(0U, sent_count);
+    TEST_ASSERT_EQUAL_UINT32(1U, tcp_sent_count);
+
+    // Now the ESP-NOW table grants its own, independent subscription: both
+    // tables report a subscriber, and a new sample reaches both wires.
+    btp::SubscribeResult esp_sub{};
+    esp_subs.table.handle_subscribe(
+        catalog, subscribe_header(0xDDDDU, 1U, 1U),
+        make_subscribe(TelemetryPublisher::kProtocolTestTopicId, 50000U, 5000U),
+        0U, &esp_sub);
+    TEST_ASSERT_EQUAL_UINT16(
+        2U, publisher.topic_subscriber_count(
+                TelemetryPublisher::kProtocolTestTopicId));
+    publisher.publish_protocol_test(2U, 2.0f, 2000U);
+    TEST_ASSERT_EQUAL_UINT32(1U, publisher.flush(1U));
+    TEST_ASSERT_EQUAL_UINT32(1U, sent_count);
+    TEST_ASSERT_EQUAL_UINT32(2U, tcp_sent_count);
+
+    // Disconnect the TCP session (onTcpDisconnect()): unbind_tcp_target()
+    // drops it from the aggregate count and stops delivery there, without
+    // touching the still-live ESP-NOW subscription.
+    publisher.unbind_tcp_target();
+    TEST_ASSERT_EQUAL_UINT16(
+        1U, publisher.topic_subscriber_count(
+                TelemetryPublisher::kProtocolTestTopicId));
+    publisher.publish_protocol_test(3U, 3.0f, 3000U);
+    TEST_ASSERT_EQUAL_UINT32(1U, publisher.flush(1U));
+    TEST_ASSERT_EQUAL_UINT32(2U, sent_count);      // ESP-NOW still gets it
+    TEST_ASSERT_EQUAL_UINT32(2U, tcp_sent_count);  // TCP no longer a target
+}
+
 // PASSO 8/9: bytes and drops are measured per topic and reach the wire as the
 // 28-octet topic_status records of commands.md section 5.1.
 void test_topic_status_is_measured_and_serialized() {
@@ -1404,6 +1498,245 @@ void test_rate_control_changes_neither_timestamp_nor_schema() {
     TEST_ASSERT_EQUAL_HEX32(0x01020304U, read_u32(decoded.payload.data + 2U));
 }
 
+// ---------------------------------------------------------------------------
+// btp_command::TcpBusyResponder (T21/T22, TAREFAS_TCP_BLE_ANDROID.txt) --
+// the explicit HELLO_RESULT status=BUSY a TCP responder must send a second,
+// concurrent connection attempt (BTP/docs/session-and-terminal.md section
+// 2.4/3.4). Deliberately transport-free (see its own class comment in
+// BtpTransport.h), so it is exercised here the same way the rest of this
+// file already exercises pure protocol logic.
+// ---------------------------------------------------------------------------
+
+// Builds one 0x00-delimited, COBS-encoded BTP datagram exactly as it would
+// arrive off a pending TCP socket: a Control/HELLO frame carrying `hello`,
+// cleartext (HELLO is always cleartext today -- see BtpTransport.h's
+// BtpSealFn comment). `out` must be at least btp::kSerialMaxCobsBlockSize + 2
+// long. Returns the total datagram size, or 0 on any encode failure
+// (a test bug, not something these tests expect to hit).
+std::size_t build_hello_datagram(const btp::Hello& hello, std::uint32_t source_id,
+                                 std::uint32_t boot_id, std::uint8_t* out) {
+    std::uint8_t payload[256];
+    std::size_t payload_size = 0U;
+    if (btp::encode_hello(hello, payload, sizeof(payload), &payload_size) !=
+        btp::MessageError::Ok) {
+        return 0U;
+    }
+
+    btp::Header header{};
+    header.type = btp::MessageType::Control;
+    header.flags = 0U;
+    header.source_id = source_id;
+    header.boot_id = boot_id;
+    header.sequence = 1U;
+    header.timestamp_us = 0U;
+    header.object_id = btp::object_id::kHello;
+    header.fragment_index = 0U;
+    header.fragment_count = 1U;
+
+    const btp::Frame frame{header, {payload, payload_size}};
+    std::uint8_t encoded[320];
+    std::size_t encoded_size = 0U;
+    if (btp::encode(frame, btp::kTcpTransport, encoded, sizeof(encoded),
+                    &encoded_size) != btp::Error::Ok) {
+        return 0U;
+    }
+
+    out[0] = 0x00U;
+    std::size_t cobs_size = 0U;
+    if (btp::cobs_encode(encoded, encoded_size, out + 1U,
+                         btp::kSerialMaxCobsBlockSize, &cobs_size) !=
+        btp::CobsError::Ok) {
+        return 0U;
+    }
+    out[1U + cobs_size] = 0x00U;
+    return cobs_size + 2U;
+}
+
+btp::Hello make_test_hello(const std::uint8_t uuid[16]) {
+    return btp::HelloBuilder(btp::Role::Consumer, uuid).build();
+}
+
+void test_tcp_busy_responder_rejects_hello_with_busy_and_correct_version() {
+    const std::uint8_t client_uuid[16] = {1, 2, 3, 4, 5,  6,  7,  8,
+                                          9, 10, 11, 12, 13, 14, 15, 16};
+    const btp::Hello client_hello = make_test_hello(client_uuid);
+
+    std::uint8_t datagram[btp::kSerialMaxCobsBlockSize + 2U];
+    const std::size_t datagram_size =
+        build_hello_datagram(client_hello, 0xAAAAAAAAU, 0xBBBBBBBBU, datagram);
+    TEST_ASSERT_GREATER_THAN(0U, datagram_size);
+
+    const std::uint8_t robot_uuid[16] = {16, 15, 14, 13, 12, 11, 10, 9,
+                                         8,  7,  6,  5,  4,  3,  2,  1};
+    const btp::Hello local = btp::HelloBuilder(btp::Role::Producer, robot_uuid)
+                                 .config_revision(4U)
+                                 .build();
+
+    TcpBusyResponder responder;
+    const std::uint8_t* reply = nullptr;
+    std::size_t reply_size = 0U;
+    const bool built = responder.feed(datagram, datagram_size, local,
+                                      0x12345678U, 0x9ABCDEF0U,
+                                      /*now_ms=*/1000ULL, &reply, &reply_size);
+    TEST_ASSERT_TRUE(built);
+    TEST_ASSERT_NOT_NULL(reply);
+    TEST_ASSERT_GREATER_THAN(2U, reply_size);
+    TEST_ASSERT_EQUAL_HEX8(0x00U, reply[0]);
+    TEST_ASSERT_EQUAL_HEX8(0x00U, reply[reply_size - 1U]);
+
+    std::uint8_t decoded_frame_bytes[320];
+    std::size_t decoded_frame_size = 0U;
+    TEST_ASSERT_EQUAL(
+        btp::CobsError::Ok,
+        btp::cobs_decode(reply + 1U, reply_size - 2U, decoded_frame_bytes,
+                         sizeof(decoded_frame_bytes), &decoded_frame_size));
+
+    btp::DecodedFrame decoded{};
+    TEST_ASSERT_EQUAL(btp::Error::Ok,
+                      btp::decode(decoded_frame_bytes, decoded_frame_size,
+                                 btp::kTcpTransport, &decoded));
+    TEST_ASSERT_EQUAL(btp::MessageType::Control, decoded.header.type);
+    TEST_ASSERT_EQUAL_UINT16(btp::object_id::kHelloResult, decoded.header.object_id);
+    TEST_ASSERT_EQUAL_UINT32(0x12345678U, decoded.header.source_id);
+    TEST_ASSERT_EQUAL_UINT32(0x9ABCDEF0U, decoded.header.boot_id);
+
+    // NOT decoded via btp::decode_hello_result(): that function -- like
+    // btp::encode_hello_result() -- hard-rejects any status other than
+    // Success/Unsupported (BTP/src/messages.cpp), so a real BUSY reply
+    // fails to decode through the library's own public API even though
+    // session-and-terminal.md section 2.4 calls for exactly this value.
+    // TcpBusyResponder works around the encode-side half of this by
+    // patching a validly-encoded SUCCESS payload's wire bytes directly (see
+    // its own comment); this test verifies those same raw bytes for the
+    // same reason. TEST_ASSERT_EQUAL_HEX8/UINT16_ARRAY-free plain field
+    // reads mirror BTP/src/messages.cpp's own encode_hello_result() layout
+    // exactly (RequestRef 12 bytes, then status/selected_version/error_code/
+    // the five limits/peer_uuid/config_revision, all little-endian).
+    TEST_ASSERT_EQUAL_UINT32(52U, decoded.payload.size);
+    const std::uint8_t* p = decoded.payload.data;
+    TEST_ASSERT_EQUAL_UINT8(static_cast<std::uint8_t>(btp::ResultStatus::Busy), p[12]);
+    // The client offered version 1 (HelloBuilder's own default) and this
+    // robot supports it too -- section 2.4: selected_version still reports
+    // the version negotiation would otherwise have picked.
+    TEST_ASSERT_EQUAL_UINT8(1U, p[13]);
+    const std::uint16_t error_code =
+        static_cast<std::uint16_t>(p[14]) | (static_cast<std::uint16_t>(p[15]) << 8U);
+    TEST_ASSERT_EQUAL_UINT16(
+        static_cast<std::uint16_t>(btp::ResultError::CapacityExhausted), error_code);
+    // Section 2.4: "all negotiated limits are zero, no application traffic
+    // follows" -- offsets 16..31 (max_logical_payload, max_inflight_
+    // reassemblies, max_subscriptions, max_dedup_entries, session_timeout_ms).
+    for (std::size_t offset = 16U; offset < 32U; ++offset) {
+        TEST_ASSERT_EQUAL_UINT8(0U, p[offset]);
+    }
+}
+
+void test_tcp_busy_responder_ignores_non_hello_frame() {
+    // A COMMAND frame (not a HELLO) -- this responder only ever reacts to a
+    // datagram btp::Session itself would have accepted as a HELLO; anything
+    // else is left for the caller's own deadline to eventually give up on.
+    btp::Header header{};
+    header.type = btp::MessageType::Command;
+    header.flags = 0U;
+    header.source_id = 1U;
+    header.boot_id = 1U;
+    header.sequence = 1U;
+    header.timestamp_us = 0U;
+    header.object_id = btp_command::kCommandRequestObjectId;
+    header.fragment_index = 0U;
+    header.fragment_count = 1U;
+    const std::uint8_t payload[4] = {0, 0, 0, 0};
+    const btp::Frame frame{header, {payload, sizeof(payload)}};
+
+    std::uint8_t encoded[64];
+    std::size_t encoded_size = 0U;
+    TEST_ASSERT_EQUAL(btp::Error::Ok,
+                      btp::encode(frame, btp::kTcpTransport, encoded,
+                                 sizeof(encoded), &encoded_size));
+
+    std::uint8_t datagram[128];
+    datagram[0] = 0x00U;
+    std::size_t cobs_size = 0U;
+    TEST_ASSERT_EQUAL(btp::CobsError::Ok,
+                      btp::cobs_encode(encoded, encoded_size, datagram + 1U,
+                                       sizeof(datagram) - 2U, &cobs_size));
+    datagram[1U + cobs_size] = 0x00U;
+
+    const std::uint8_t uuid[16] = {0};
+    const btp::Hello local = btp::HelloBuilder(btp::Role::Producer, uuid).build();
+
+    TcpBusyResponder responder;
+    const std::uint8_t* reply = nullptr;
+    std::size_t reply_size = 0U;
+    TEST_ASSERT_FALSE(responder.feed(datagram, cobs_size + 2U, local, 1U, 1U,
+                                     1000ULL, &reply, &reply_size));
+}
+
+void test_tcp_busy_responder_ignores_garbage_bytes() {
+    const std::uint8_t garbage[16] = {0x00U, 0xFFU, 0x01U, 0x02U, 0x03U, 0x04U,
+                                      0x05U, 0x06U, 0x07U, 0x08U, 0x00U, 0x00U,
+                                      0xAAU, 0xBBU, 0xCCU, 0x00U};
+    const std::uint8_t uuid[16] = {0};
+    const btp::Hello local = btp::HelloBuilder(btp::Role::Producer, uuid).build();
+
+    TcpBusyResponder responder;
+    const std::uint8_t* reply = nullptr;
+    std::size_t reply_size = 0U;
+    // Must not crash and must never fabricate a reply out of noise.
+    TEST_ASSERT_FALSE(responder.feed(garbage, sizeof(garbage), local, 1U, 1U,
+                                     1000ULL, &reply, &reply_size));
+}
+
+// T23 (TAREFAS_TCP_BLE_ANDROID.txt): TcpBtpServer::send_queue_ is a single
+// 16-frame FIFO (ESP-IDF/lwip-only, so it cannot be exercised directly by
+// this native suite -- see TcpSendAdmission.h's own comment). This tests the
+// portable admission decision TcpBtpServer::send() now applies to every
+// enqueue, mirroring what test_full_telemetry_queue_cannot_block_command_
+// result already proves for the ESP-NOW/TxScheduler side: a queue saturated
+// with Telemetry frames must still have room for a Normal one (COMMAND_
+// RESULT/TERMINAL_OUT/catalog reply), and Telemetry itself must be refused
+// before it can ever reach that point.
+void test_tcp_admission_reserves_headroom_for_normal_frames() {
+    // Mirrors TcpBtpServer::kSendQueueDepth/kTelemetryQueueCeiling
+    // (lib/TcpBtpServer/TcpBtpServer.h) by value -- that header cannot be
+    // included here (freertos/lwip, ESP-IDF-only), see TcpSendAdmission.h's
+    // own comment on why the admission logic itself lives where this test
+    // CAN reach it.
+    constexpr std::size_t kDepth = 16U;
+    constexpr std::size_t kCeiling = (kDepth * 3U) / 4U;
+    TEST_ASSERT_EQUAL_UINT32(12U, static_cast<std::uint32_t>(kCeiling));
+
+    // Telemetry is admitted while the queue is below the reserved ceiling...
+    for (std::size_t count = 0U; count < kCeiling; ++count) {
+        TEST_ASSERT_TRUE(tcp_btp_server::admit(
+            tcp_btp_server::FramePriority::Telemetry, count, kDepth, kCeiling));
+    }
+    // ...and refused from the ceiling up to (and including) a full queue --
+    // well before the hard cap, so a Normal frame always still fits.
+    for (std::size_t count = kCeiling; count < kDepth; ++count) {
+        TEST_ASSERT_FALSE(tcp_btp_server::admit(
+            tcp_btp_server::FramePriority::Telemetry, count, kDepth, kCeiling));
+    }
+
+    // Normal frames (COMMAND_RESULT, TERMINAL_OUT, catalog/session replies)
+    // keep being admitted all the way up to the hard cap, including every
+    // slot in the reserved margin telemetry was just refused from --
+    // congestion never costs a command its reply because telemetry got
+    // there first.
+    for (std::size_t count = 0U; count < kDepth; ++count) {
+        TEST_ASSERT_TRUE(tcp_btp_server::admit(
+            tcp_btp_server::FramePriority::Normal, count, kDepth, kCeiling));
+    }
+
+    // The hard cap still applies to every priority once the queue is
+    // genuinely full -- the reservation narrows telemetry's share, it never
+    // grows the queue's total worst-case memory footprint.
+    TEST_ASSERT_FALSE(tcp_btp_server::admit(tcp_btp_server::FramePriority::Normal,
+                                            kDepth, kDepth, kCeiling));
+    TEST_ASSERT_FALSE(tcp_btp_server::admit(tcp_btp_server::FramePriority::Telemetry,
+                                            kDepth, kDepth, kCeiling));
+}
+
 }  // namespace
 
 void setUp() {}
@@ -1438,8 +1771,13 @@ int main(int, char**) {
     RUN_TEST(test_multiple_subscribers_aggregate_on_one_topic);
     RUN_TEST(test_topic_keeps_publishing_until_the_last_consumer_leaves);
     RUN_TEST(test_lease_expiry_and_new_boot_id_end_a_session);
+    RUN_TEST(test_telemetry_multi_target_isolates_esp_now_and_tcp_subscribers);
     RUN_TEST(test_topic_status_is_measured_and_serialized);
     RUN_TEST(test_status_is_published_as_a_control_message);
     RUN_TEST(test_rate_control_changes_neither_timestamp_nor_schema);
+    RUN_TEST(test_tcp_busy_responder_rejects_hello_with_busy_and_correct_version);
+    RUN_TEST(test_tcp_busy_responder_ignores_non_hello_frame);
+    RUN_TEST(test_tcp_busy_responder_ignores_garbage_bytes);
+    RUN_TEST(test_tcp_admission_reserves_headroom_for_normal_frames);
     return UNITY_END();
 }

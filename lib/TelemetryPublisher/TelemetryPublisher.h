@@ -202,6 +202,36 @@ public:
     // (false / 0) until this runs.
     void bind_subscriptions(const btp::SubscriptionTable& subscriptions) noexcept;
 
+    // Binds a SECOND, independent send target + btp::SubscriptionTable for a
+    // live direct-TCP session (T22, TAREFAS_TCP_BLE_ANDROID.txt). configure()/
+    // bind_subscriptions() above keep serving the always-on ESP-NOW link
+    // exactly as before -- this makes the TCP session an audience of its own:
+    // every method below now aggregates across BOTH tables for reporting
+    // (topic_subscriber_count(), topic_effective_rate_millihz(), ...), while
+    // flush() checks EACH target's own table before sending a sample to it,
+    // so a peer subscribed only on ESP-NOW never causes a sample to reach the
+    // TCP client and vice versa. `endpoint`/`seal`/`seal_context` are the TCP
+    // session's own send path (protocol_tcp_, RadioSeal::seal_e -- channel
+    // B/key E, exactly like the ESP-NOW target: RobotTcpLink is always
+    // channel B, see its class comment in BallyRobot.h). Call once per
+    // accepted TCP connection, once tcp_node_'s own SubscriptionTable exists
+    // (mirrors bind_subscriptions()'s own call site in onTcpConnect()).
+    //
+    // A caller that never calls this (every existing native test, and the
+    // firmware whenever no TCP client is connected) is unaffected: flush()
+    // only ever sees the one ESP-NOW target, exactly as before this existed.
+    void bind_tcp_target(BtpEndpoint& endpoint, BtpSealFn seal,
+                         void* seal_context,
+                         const btp::SubscriptionTable& subscriptions) noexcept;
+
+    // Reverses bind_tcp_target() (onTcpDisconnect()): every method below goes
+    // back to reporting/publishing the ESP-NOW side alone. MUST be called
+    // before the TCP session's own SubscriptionTable is destroyed (tcp_node_.
+    // reset()) -- this only clears the pointers this class holds into it, it
+    // never touches tcp_node_ itself. Idempotent, and safe even when
+    // bind_tcp_target() was never called.
+    void unbind_tcp_target() noexcept;
+
     static const TopicSchema* find_schema(std::uint16_t topic_id) noexcept;
 
     // True when topic_id currently has at least one live, unexpired
@@ -351,9 +381,38 @@ private:
     int find_topic_index(std::uint16_t topic_id) const noexcept;
     void init_runtime_if_needed() noexcept;
 
+    // One send destination: an endpoint/seal pair plus the table flush()
+    // gates delivery on. `subscriptions == nullptr` means "not gated" (the
+    // original single-target flush() never filtered on subscriptions at all
+    // -- every existing native test that configures a publisher without ever
+    // calling bind_subscriptions() relies on this to still get an
+    // unconditional send).
+    struct TargetView {
+        BtpEndpoint* endpoint;
+        BtpSealFn seal;
+        void* seal_context;
+        const btp::SubscriptionTable* subscriptions;
+    };
+    static constexpr std::size_t kMaxTargets = 2U;
+    // Writes up to kMaxTargets currently-configured targets into `out`
+    // (index 0 ESP-NOW when endpoint_ is set, then TCP when tcp_endpoint_ is
+    // set) and returns how many were written.
+    std::size_t collect_targets(TargetView out[kMaxTargets]) const noexcept;
+
     BtpEndpoint* endpoint_ = nullptr;
     BtpSealFn seal_ = nullptr;
     void* seal_context_ = nullptr;
+    // TCP target (bind_tcp_target()/unbind_tcp_target(), T22). Read from the
+    // state-machine/comms tasks (flush(), topic_*()) and written from
+    // TcpBtpServer's own task on connect/disconnect -- the same tolerated
+    // cross-task race subscriptions_ below already documents: a plain
+    // pointer, not std::atomic, because a torn read of one word-sized
+    // pointer is not a realistic risk on this target, and a reader that
+    // catches the old value for one more tick just treats the TCP target as
+    // still there (or still gone) a moment longer, never a corrupt one.
+    BtpEndpoint* tcp_endpoint_ = nullptr;
+    BtpSealFn tcp_seal_ = nullptr;
+    void* tcp_seal_context_ = nullptr;
     Sample queue_[kQueueCapacity]{};
     MonitorStage monitor_stage_{};
     TopicRuntime runtime_[kMaxTopics]{};
@@ -371,6 +430,13 @@ private:
     // that would mean stalling the Wi-Fi RX task's SUBSCRIBE handling behind
     // whatever the state-machine task is doing at the same moment.
     const btp::SubscriptionTable* subscriptions_ = nullptr;
+    // TCP session's own SubscriptionTable (tcp_node_->subscriptions()), see
+    // bind_tcp_target()'s comment -- same tolerated race and nullptr-default
+    // posture as subscriptions_ just above, except this one is expected to
+    // flip between a real table and nullptr at runtime (bind_tcp_target()/
+    // unbind_tcp_target() on every TCP connect/disconnect), not just once at
+    // boot.
+    const btp::SubscriptionTable* tcp_subscriptions_ = nullptr;
     bool runtime_initialized_ = false;
     // Guards runtime_[] only. Independent of, and never held across, anything
     // touching BtpEndpoint/TxScheduler -- so it cannot introduce a wait on

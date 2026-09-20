@@ -7,6 +7,9 @@
 
 #include <btp/codec.hpp>
 #include <btp/endpoint.hpp>
+#include <btp/messages.hpp>
+#include <btp/session.hpp>
+#include <btp/stream.hpp>
 
 // AEAD sealer for channel C (dongle<->robot, key L -- see
 // include/bally_channels.h and lib/RadioSeal, the only real implementation
@@ -103,6 +106,13 @@ public:
     // `active_` currently points at, shared or not.
     void bind(btp::Endpoint& shared) noexcept { active_ = &shared; }
 
+    // ESP-NOW remains the default for the existing robot path. A direct TCP
+    // session can select its own BTP limits before the first send, reusing the
+    // same endpoint sequencing, sealing and fragmentation pipeline.
+    void set_transport(btp::TransportLimits transport) noexcept {
+        transport_ = transport;
+    }
+
     // Bounds the sealed[] scratch a sealed send_logical() cuts fragments from.
     // The largest logical message this firmware sends is the UTF-8
     // system.monitor telemetry document
@@ -170,6 +180,90 @@ private:
     // so bind() redirecting it is the only difference the firmware path sees.
     btp::Endpoint own_endpoint_;
     btp::Endpoint* active_ = &own_endpoint_;
+    btp::TransportLimits transport_ = btp::kEspNowTransport;
+};
+
+// Builds the explicit BUSY/CAPACITY_EXHAUSTED HELLO_RESULT a TCP BTP server
+// must send a SECOND, concurrent connection attempt while one control
+// session is already active for this robot (BTP/docs/session-and-terminal.md
+// section 2.4/3.4) -- see fragmentation-and-transports.md section 9.6 and
+// the TAREFAS_TCP_BLE_ANDROID.txt T21/T22 notes this implements. btp::Node/
+// btp::Session never construct this status themselves (confirmed by reading
+// BTP/src/session.cpp: build_hello_result() only ever writes Success or
+// Unsupported) -- rejecting a second session is entirely this responder's
+// job, not the library's.
+//
+// Deliberately transport-free (no lwip/FreeRTOS/ESP-IDF dependency, like the
+// rest of this file) so it is exercised by the native test suite the same
+// way btp_command::parse_request already is; TcpBtpServer/ROBOT feed it raw
+// bytes read off the pending socket and, on success, send frame_out()
+// verbatim before closing that connection.
+//
+// One instance handles ONE pending connection at a time -- reset() (or a
+// fresh instance) before reusing it for the next one; there is no per-byte
+// concurrency guard, same single-consumer posture as btp::SerialDecoder,
+// which this wraps.
+class TcpBusyResponder {
+public:
+    TcpBusyResponder() noexcept;
+
+    // decoder_ holds pointers into THIS object's own cobs_buffer_/
+    // decoded_buffer_ -- a copy or move would leave it aliasing the
+    // source's buffers instead of its own.
+    TcpBusyResponder(const TcpBusyResponder&) = delete;
+    TcpBusyResponder& operator=(const TcpBusyResponder&) = delete;
+
+    // Forgets whatever partial datagram was being collected. Call once per
+    // newly-accepted pending connection, before the first feed().
+    void reset() noexcept;
+
+    // Feeds one chunk of raw bytes exactly as read off the pending TCP
+    // socket (COBS-framed, 0x00-delimited -- see BTP/include/btp/stream.hpp,
+    // the same wire shape used on serial). `local` is this robot's own HELLO
+    // advertisement (the same one the real, active session was/will be
+    // enabled with); `source_id`/`boot_id` are this robot's protocol
+    // identity, used to address the reply frame.
+    //
+    // Returns true once a complete datagram decoded as a HELLO this
+    // responder would otherwise have accepted: `*frame_out`/`*frame_size`
+    // then point at a ready-to-send, already COBS-encoded and delimited BTP
+    // frame (status=BUSY, error_code=CAPACITY_EXHAUSTED, every negotiated
+    // limit zeroed, `selected_version` carried over from the negotiation
+    // that would otherwise have accepted it -- section 2.4). The caller
+    // sends it verbatim and then closes the socket; this object must not be
+    // fed again without reset() first.
+    //
+    // Returns false when nothing conclusive happened yet: not enough bytes,
+    // a COBS/frame decode error, or a datagram that is not a HELLO (a
+    // non-HELLO first message is itself a protocol violation the caller's
+    // own deadline -- 2000 ms, session-and-terminal.md section 3.4 -- is
+    // what eventually gives up on, not this class). Safe to call again with
+    // more bytes after a false return, without reset(), as long as the
+    // stream has not been resynchronized.
+    bool feed(const std::uint8_t* data, std::size_t size,
+             const btp::Hello& local, std::uint32_t source_id,
+             std::uint32_t boot_id, std::uint64_t now_ms,
+             const std::uint8_t** frame_out, std::size_t* frame_size) noexcept;
+
+private:
+    // Sized off btp::kSerialTransport (kSerialMaxCobsBlockSize/
+    // kSerialMaxFrameSize) even though the connection is TCP: a HELLO
+    // datagram is a few dozen octets, orders of magnitude under either
+    // ceiling, and btp::SerialDecoder is hardcoded to kSerialTransport
+    // internally (BTP/src/stream.cpp) regardless of the buffer sizes handed
+    // to it -- reusing it here is safe and avoids hand-rolling COBS framing
+    // a second time.
+    std::uint8_t cobs_buffer_[btp::kSerialMaxCobsBlockSize];
+    std::uint8_t decoded_buffer_[btp::kSerialMaxFrameSize];
+    btp::SerialDecoder decoder_;
+
+    // The reply this class builds: HELLO_RESULT's payload (<=
+    // btp::kSessionMaxReplySize) framed into one encode()d BTP frame, then
+    // COBS-encoded with its leading/trailing 0x00 delimiters. Sized with
+    // comfortable headroom over the worst case (52-octet payload -> ~60
+    // octets encoded -> ~65 octets COBS-encoded).
+    static constexpr std::size_t kReplyFrameCapacity = 128U;
+    std::uint8_t reply_frame_[kReplyFrameCapacity];
 };
 
 namespace btp_command {

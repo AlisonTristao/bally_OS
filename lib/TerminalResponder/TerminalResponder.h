@@ -77,10 +77,41 @@ public:
                    ShellLineEditor::CompletionProvider completion, SubmitFn submit,
                    void* submit_context, const char* prompt) noexcept;
 
+    // Which link a terminal origin's bytes arrived on -- and therefore which
+    // endpoint its own TERMINAL_OUT must leave on (T22,
+    // TAREFAS_TCP_BLE_ANDROID.txt). Recorded per-origin (Slot::target) rather
+    // than globally: an ESP-NOW peer and a direct TCP client are reached
+    // through different BtpEndpoint objects with different send queues, and
+    // a slot's whole point is to keep one origin's line editing/output
+    // isolated from another's (see this class's own comment above).
+    enum class LinkTarget : std::uint8_t { EspNow = 0U, Tcp = 1U };
+
     // One reassembled, already-opened TERMINAL_IN payload from `header`'s
-    // origin. Runs on the Wi-Fi RX task: it only allocates/looks up the
-    // origin's slot and appends the bytes, never runs the editor.
-    void on_terminal_in(const btp::Header& header, btp::ByteView plaintext) noexcept;
+    // origin, arriving on `target`. Runs on the Wi-Fi RX task: it only
+    // allocates/looks up the origin's slot (recording/refreshing `target` on
+    // it) and appends the bytes, never runs the editor.
+    void on_terminal_in(LinkTarget target, const btp::Header& header,
+                        btp::ByteView plaintext) noexcept;
+
+    // Binds a SECOND send target for a live direct-TCP session (T22): every
+    // origin whose on_terminal_in() arrives tagged LinkTarget::Tcp has its
+    // echo/prompt/output emitted through THIS endpoint instead of the one
+    // configure() set, using this same class's single per-origin state
+    // machine either way. `seal` is normally the same sealer configure() was
+    // given (RadioSeal::seal_e for both -- RobotTcpLink is always channel B,
+    // like the ESP-NOW link's own TERMINAL traffic), only the destination
+    // endpoint differs. Call once per accepted TCP connection.
+    void bind_tcp_target(BtpEndpoint& endpoint, BtpSealFn seal,
+                         void* seal_context) noexcept;
+
+    // Reverses bind_tcp_target() (onTcpDisconnect()) AND evicts every
+    // TCP-origin slot: session-and-terminal.md's "a new connection does not
+    // inherit state from a previous one" applies to the terminal too, and a
+    // slot left resident for a now-dead connection would both waste one of
+    // kMaxOrigins and keep trying to size output for a target that no longer
+    // exists. Idempotent, and safe even if bind_tcp_target() was never
+    // called.
+    void unbind_tcp_target() noexcept;
 
     // Advances every active origin: drains its buffered input through the
     // editor, emits whatever it echoed as TERMINAL_OUT frame(s), submits any
@@ -126,6 +157,12 @@ private:
         std::uint32_t source_id = 0U;
         std::uint32_t boot_id = 0U;
         std::uint64_t last_used_us = 0U;
+        // Which endpoint pump() emits this origin's TERMINAL_OUT through.
+        // Set (and refreshed on every message) by on_terminal_in() while
+        // lock_ is held -- the same hand-off discipline as the other fields
+        // in this group -- and only ever READ elsewhere (pump() snapshots it
+        // under lock_ alongside source_id/boot_id, same as those two).
+        LinkTarget target = LinkTarget::EspNow;
 
         // editor, prompt_painted, awaiting_result and pending_line are touched
         // ONLY by pump() -- never by on_terminal_in() or deliver_command_output()
@@ -171,9 +208,14 @@ private:
     Slot* find_or_alloc(std::uint32_t source_id, std::uint32_t boot_id,
                         std::uint64_t now_us) noexcept;
 
-    // Chops `bytes` into <= one-sealed-ESP-NOW-frame pieces and sends each as
-    // its own TERMINAL_OUT logical message (mirrors Logger::send_log_direct).
-    void emit_terminal_out(const std::string& bytes, std::uint64_t now_us) noexcept;
+    // Chops `bytes` into <= one-sealed-frame pieces (sized off `target`'s own
+    // transport -- ESP-NOW's small frame or TCP's much larger one, T22) and
+    // sends each as its own TERMINAL_OUT logical message through whichever
+    // endpoint `target` maps to (mirrors Logger::send_log_direct). A no-op
+    // when that target has no endpoint bound (e.g. the TCP client that owned
+    // this origin already disconnected -- see unbind_tcp_target()).
+    void emit_terminal_out(LinkTarget target, const std::string& bytes,
+                           std::uint64_t now_us) noexcept;
 
     // pump()-only: submit one completed line for execution, or write a
     // "busy" notice into `out` if the command queue refused it. `src`/`boot`
@@ -184,6 +226,13 @@ private:
     BtpEndpoint* endpoint_ = nullptr;
     BtpSealFn seal_ = nullptr;
     void* seal_context_ = nullptr;
+    // TCP target (bind_tcp_target()/unbind_tcp_target(), T22). Same
+    // plain-pointer, tolerated-cross-task-race posture as TelemetryPublisher's
+    // own tcp_endpoint_ (written from TcpBtpServer's task on connect/
+    // disconnect, read from the comms task's pump()).
+    BtpEndpoint* tcp_endpoint_ = nullptr;
+    BtpSealFn tcp_seal_ = nullptr;
+    void* tcp_seal_context_ = nullptr;
     ShellLineEditor::CompletionProvider completion_;
     SubmitFn submit_ = nullptr;
     void* submit_context_ = nullptr;

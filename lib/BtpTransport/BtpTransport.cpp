@@ -58,11 +58,11 @@ bool BtpEndpoint::send_logical(btp::MessageType type, std::uint16_t object_id,
     void* const send_context = send_context_.load(std::memory_order_acquire);
 
     if (seal == nullptr) {
-        return active_->send_logical(message, btp::kEspNowTransport,
+        return active_->send_logical(message, transport_,
                                      send, send_context, nullptr, 0U);
     }
     std::uint8_t scratch[kMaxLogicalPayloadSize + kAeadTagSize];
-    return active_->send_logical(message, btp::kEspNowTransport,
+    return active_->send_logical(message, transport_,
                                  send, send_context, scratch,
                                  sizeof(scratch), seal, seal_context);
 }
@@ -82,12 +82,12 @@ bool BtpEndpoint::send_logical_reserved(btp::MessageType type,
 
     if (seal == nullptr) {
         return active_->send_logical_reserved(
-            sequence, message, btp::kEspNowTransport, send, send_context,
+            sequence, message, transport_, send, send_context,
             nullptr, 0U);
     }
     std::uint8_t scratch[kMaxLogicalPayloadSize + kAeadTagSize];
     return active_->send_logical_reserved(
-        sequence, message, btp::kEspNowTransport, send, send_context,
+        sequence, message, transport_, send, send_context,
         scratch, sizeof(scratch), seal, seal_context);
 }
 
@@ -104,7 +104,7 @@ bool BtpEndpoint::encode_fragment(btp::MessageType type, std::uint16_t object_id
                                   void* seal_context) const noexcept {
     return active_->encode_fragment(
         make_logical(type, object_id, payload, payload_size, timestamp_us),
-        btp::kEspNowTransport, sequence, fragment_index, fragment_count,
+        transport_, sequence, fragment_index, fragment_count,
         output, output_capacity, bytes_written, seal, seal_context);
 }
 
@@ -118,7 +118,7 @@ bool BtpEndpoint::send_fragment(btp::MessageType type, std::uint16_t object_id,
                                 void* seal_context) const noexcept {
     return active_->send_fragment(
         make_logical(type, object_id, payload, payload_size, timestamp_us),
-        btp::kEspNowTransport, sequence, fragment_index, fragment_count,
+        transport_, sequence, fragment_index, fragment_count,
         send_callback_.load(std::memory_order_acquire),
         send_context_.load(std::memory_order_acquire), seal, seal_context);
 }
@@ -126,9 +126,156 @@ bool BtpEndpoint::send_fragment(btp::MessageType type, std::uint16_t object_id,
 bool BtpEndpoint::send_encoded(const std::uint8_t* frame,
                                std::size_t frame_size) const noexcept {
     return active_->send_encoded(
-        frame, frame_size, btp::kEspNowTransport,
+        frame, frame_size, transport_,
         send_callback_.load(std::memory_order_acquire),
         send_context_.load(std::memory_order_acquire));
+}
+
+// ---------------------------------------------------------------------------
+// TcpBusyResponder
+// ---------------------------------------------------------------------------
+
+TcpBusyResponder::TcpBusyResponder() noexcept
+    : decoder_(cobs_buffer_, sizeof(cobs_buffer_), decoded_buffer_,
+              sizeof(decoded_buffer_)) {}
+
+void TcpBusyResponder::reset() noexcept {
+    decoder_.reset();
+}
+
+bool TcpBusyResponder::feed(const std::uint8_t* data, std::size_t size,
+                            const btp::Hello& local, std::uint32_t source_id,
+                            std::uint32_t boot_id, std::uint64_t now_ms,
+                            const std::uint8_t** frame_out,
+                            std::size_t* frame_size) noexcept {
+    if (data == nullptr || frame_out == nullptr || frame_size == nullptr) {
+        return false;
+    }
+
+    for (std::size_t i = 0U; i < size; ++i) {
+        btp::DecodedFrame decoded{};
+        const btp::SerialDecodeResult result = decoder_.push(data[i], &decoded);
+        if (result.event != btp::SerialDecodeEvent::Frame) {
+            // None, CobsError, FrameError, Overflow: nothing conclusive from
+            // this byte alone -- keep feeding (SerialDecoder resynchronizes
+            // on the next delimiter by itself).
+            continue;
+        }
+
+        // A throwaway responder session: it exists only to reuse
+        // btp::Session's own HELLO negotiation (version selection, limits
+        // minimum) so the version this rejection reports is the exact one
+        // the real session would have picked -- see this class's own
+        // comment. hello_deadline_ms=0 disables ITS deadline (irrelevant,
+        // on_frame() is called exactly once, immediately after arm()).
+        btp::Session probe(local, /*hello_deadline_ms=*/0U);
+        probe.arm(now_ms);
+        std::uint8_t success_payload[btp::kSessionMaxReplySize];
+        const btp::SessionOutcome outcome =
+            probe.on_frame(decoded, now_ms, success_payload,
+                          sizeof(success_payload));
+        if (outcome.event != btp::SessionEvent::HelloAccepted) {
+            // Not a HELLO this responder would have accepted anyway (wrong
+            // object_id/type, malformed, no common version, or the probe
+            // itself timed out/was ignored) -- nothing to reject as BUSY;
+            // BTP/docs/session-and-terminal.md section 2.4 only calls for a
+            // BUSY reply on a HELLO that would otherwise have succeeded.
+            continue;
+        }
+
+        // LIBRARY GAP (found while implementing this, not fixed here -- BTP
+        // is read-only for this task): btp::encode_hello_result() itself
+        // hard-rejects any status other than Success/Unsupported
+        // (BTP/src/messages.cpp, encode_hello_result(): "in.status !=
+        // Success && in.status != Unsupported -> InvalidValue"), even though
+        // session-and-terminal.md section 2.4 explicitly calls for reusing
+        // this same message with status=BUSY. There is no public API to
+        // produce that wire payload, so the SUCCESS payload
+        // probe.on_frame() already built above (a real, library-validated
+        // HELLO_RESULT encoding) is patched in place instead: same wire
+        // layout (BTP/src/messages.cpp's encode_hello_result(), verified
+        // against this exact byte sequence while debugging this responder),
+        // only status/error_code/the five negotiated-limit fields change.
+        // request/selected_version/peer_uuid/config_revision are left
+        // exactly as negotiated, untouched by the patch below.
+        static_assert(btp::kSessionMaxReplySize == 52U,
+                     "HelloResult wire layout offsets below assume this size");
+        constexpr std::size_t kStatusOffset = 12U;           // u8
+        constexpr std::size_t kErrorCodeOffset = 14U;        // u16 LE
+        // The five negotiated-limit fields (max_logical_payload u32,
+        // max_inflight_reassemblies u16, max_subscriptions u16,
+        // max_dedup_entries u32, session_timeout_ms u32) are contiguous,
+        // offsets 16..31, and ALL become zero (section 2.4: "all negotiated
+        // limits are zero") -- zeroed as one 16-byte range rather than field
+        // by field. peer_uuid (32..47) and config_revision (48..51) are left
+        // exactly as negotiated.
+        constexpr std::size_t kLimitsOffset = 16U;
+        constexpr std::size_t kLimitsSize = 16U;
+        if (outcome.reply_size != btp::kSessionMaxReplySize) {
+            // A sizing assumption broke (a future library change resized
+            // HELLO_RESULT) -- refuse to guess at a possibly-wrong layout
+            // rather than corrupt a reply.
+            continue;
+        }
+
+        std::uint8_t busy_payload[btp::kSessionMaxReplySize];
+        std::memcpy(busy_payload, success_payload, sizeof(busy_payload));
+        busy_payload[kStatusOffset] = static_cast<std::uint8_t>(btp::ResultStatus::Busy);
+        const std::uint16_t error_code =
+            static_cast<std::uint16_t>(btp::ResultError::CapacityExhausted);
+        busy_payload[kErrorCodeOffset] = static_cast<std::uint8_t>(error_code);
+        busy_payload[kErrorCodeOffset + 1U] = static_cast<std::uint8_t>(error_code >> 8U);
+        std::memset(busy_payload + kLimitsOffset, 0, kLimitsSize);
+        const std::size_t payload_written = sizeof(busy_payload);
+
+        // Frame it exactly like every other HELLO_RESULT this library sends
+        // today: cleartext (flags=0), Control/kHelloResult. Cleartext here
+        // matches btp::Node's own current behavior for HELLO_RESULT (see
+        // BtpTransport.h's BtpSealFn comment and
+        // TAREFAS_TCP_BLE_ANDROID.txt's T21/T22 notes) -- a known gap
+        // against fragmentation-and-transports.md section 9.5's TCP-mandatory-
+        // encryption rule that this responder does not attempt to fix on its
+        // own (that is a btp::Node/btp::Session library gap, not something a
+        // one-off rejection frame can close by itself).
+        btp::Header header{};
+        header.type = btp::MessageType::Control;
+        header.flags = 0U;
+        header.source_id = source_id;
+        header.boot_id = boot_id;
+        // Arbitrary and unobserved by anything else: this frame is a one-shot
+        // rejection with no session and no continuation, so it needs no real
+        // place in this identity's normal outgoing sequence.
+        header.sequence = 1U;
+        header.timestamp_us = now_ms * 1000ULL;
+        header.object_id = btp::object_id::kHelloResult;
+        header.fragment_index = 0U;
+        header.fragment_count = 1U;
+
+        const btp::Frame frame{header, {busy_payload, payload_written}};
+        std::uint8_t encoded[btp::kSessionMaxReplySize + 40U];
+        std::size_t encoded_written = 0U;
+        if (btp::encode(frame, btp::kTcpTransport, encoded, sizeof(encoded),
+                        &encoded_written) != btp::Error::Ok) {
+            continue;
+        }
+
+        // COBS-encode with the leading/trailing 0x00 delimiters
+        // (BTP/include/btp/stream.hpp: "0x00 || COBS(frame) || 0x00").
+        reply_frame_[0] = 0x00U;
+        std::size_t cobs_written = 0U;
+        if (btp::cobs_encode(encoded, encoded_written, reply_frame_ + 1U,
+                             sizeof(reply_frame_) - 2U,
+                             &cobs_written) != btp::CobsError::Ok) {
+            continue;
+        }
+        reply_frame_[1U + cobs_written] = 0x00U;
+
+        *frame_out = reply_frame_;
+        *frame_size = cobs_written + 2U;
+        return true;
+    }
+
+    return false;
 }
 
 namespace btp_command {

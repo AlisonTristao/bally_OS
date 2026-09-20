@@ -42,6 +42,30 @@ std::string all_sent() {
     return out;
 }
 
+// A second capture buffer/endpoint for the T22 (TAREFAS_TCP_BLE_ANDROID.txt)
+// multi-target test below -- a direct-TCP session's own send path, separate
+// from g_sent/g_endpoint's ESP-NOW one.
+std::vector<std::string> g_tcp_sent;
+
+bool capture_tcp_send(const std::uint8_t* data, std::size_t size) {
+    btp::DecodedFrame frame{};
+    if (btp::decode(data, size, btp::kEspNowTransport, &frame) != btp::Error::Ok) {
+        return false;
+    }
+    if (frame.header.type != btp::MessageType::Terminal ||
+        frame.header.object_id != TerminalResponder::kTerminalOutObjectId) {
+        return false;
+    }
+    g_tcp_sent.emplace_back(reinterpret_cast<const char*>(frame.payload.data), frame.payload.size);
+    return true;
+}
+
+std::string all_tcp_sent() {
+    std::string out;
+    for (const std::string& s : g_tcp_sent) out += s;
+    return out;
+}
+
 std::string strip_sgr(const std::string& text) {
     std::string out;
     for (std::size_t i = 0; i < text.size(); ++i) {
@@ -85,6 +109,7 @@ std::uint64_t g_now = 1000U;
 
 void reset_fixture() {
     g_sent.clear();
+    g_tcp_sent.clear();
     g_submit = SubmitLog{};
     g_now = 1000U;
 
@@ -118,10 +143,12 @@ btp::Header origin_header(std::uint32_t source_id, std::uint32_t boot_id) {
     return h;
 }
 
-void feed(std::uint32_t source_id, std::uint32_t boot_id, const std::string& bytes) {
+void feed(std::uint32_t source_id, std::uint32_t boot_id, const std::string& bytes,
+         TerminalResponder::LinkTarget target = TerminalResponder::LinkTarget::EspNow) {
     const btp::Header h = origin_header(source_id, boot_id);
-    g_responder->on_terminal_in(h, btp::ByteView{reinterpret_cast<const std::uint8_t*>(bytes.data()),
-                                                bytes.size()});
+    g_responder->on_terminal_in(target, h,
+                                btp::ByteView{reinterpret_cast<const std::uint8_t*>(bytes.data()),
+                                             bytes.size()});
 }
 
 void pump() {
@@ -313,6 +340,57 @@ void test_submit_busy_is_reported() {
     TEST_ASSERT_TRUE(all_sent().find("busy") != std::string::npos);
 }
 
+// T22 (TAREFAS_TCP_BLE_ANDROID.txt): a direct-TCP origin's echo/output must
+// reach ONLY bind_tcp_target()'s endpoint, an ESP-NOW origin's must reach
+// ONLY configure()'s -- crosstalk either way would mean one client reading
+// another's terminal. unbind_tcp_target() (onTcpDisconnect()) must also
+// actually reclaim the TCP-origin slot, not just stop routing to it, so a
+// churn of short-lived TCP sessions cannot slowly starve the shared
+// kMaxOrigins pool.
+void test_tcp_target_is_isolated_from_esp_now_and_evicted_on_unbind() {
+    BtpEndpoint tcp_endpoint;
+    TEST_ASSERT_TRUE(tcp_endpoint.configure(kRobotSourceId, kRobotBootId));
+    tcp_endpoint.set_send_callback(capture_tcp_send);
+    g_responder->bind_tcp_target(tcp_endpoint, /*seal=*/nullptr, /*seal_context=*/nullptr);
+
+    const std::uint32_t esp_src = 0xE0000001U;
+    const std::uint32_t esp_boot = 1U;
+    const std::uint32_t tcp_src = 0x7C000001U;
+    const std::uint32_t tcp_boot = 1U;
+
+    feed(esp_src, esp_boot, "espline\r");
+    feed(tcp_src, tcp_boot, "tcpline\r", TerminalResponder::LinkTarget::Tcp);
+    pump();
+
+    // Echo isolation: each origin's typed line shows up only on its own wire.
+    TEST_ASSERT_TRUE(all_sent().find("espline") != std::string::npos);
+    TEST_ASSERT_TRUE(all_sent().find("tcpline") == std::string::npos);
+    TEST_ASSERT_TRUE(all_tcp_sent().find("tcpline") != std::string::npos);
+    TEST_ASSERT_TRUE(all_tcp_sent().find("espline") == std::string::npos);
+
+    // Command-output isolation: deliver_command_output() finds the slot by
+    // (source_id, boot_id) alone, but pump() must still emit through the
+    // target that slot recorded.
+    g_responder->deliver_command_output(tcp_src, tcp_boot, "tcp result", 0U);
+    g_responder->deliver_command_output(esp_src, esp_boot, "esp result", 0U);
+    pump();
+    TEST_ASSERT_TRUE(all_tcp_sent().find("tcp result") != std::string::npos);
+    TEST_ASSERT_TRUE(all_tcp_sent().find("esp result") == std::string::npos);
+    TEST_ASSERT_TRUE(all_sent().find("esp result") != std::string::npos);
+    TEST_ASSERT_TRUE(all_sent().find("tcp result") == std::string::npos);
+
+    // Disconnect: unbind_tcp_target() must reclaim the TCP-origin slot, not
+    // merely stop routing to it. Proof: kMaxOrigins is 3, and 2 slots (esp_src
+    // + tcp_src) are already resident; if the TCP slot were NOT freed, two
+    // more distinct origins would overflow the pool and force one eviction.
+    g_responder->unbind_tcp_target();
+    TEST_ASSERT_EQUAL(0U, g_responder->stats().origins_evicted);
+    feed(0xF0000001U, 1U, "third\r");
+    feed(0xF0000002U, 1U, "fourth\r");
+    pump();
+    TEST_ASSERT_EQUAL(0U, g_responder->stats().origins_evicted);
+}
+
 int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_first_contact_paints_prompt_then_echoes);
@@ -326,5 +404,6 @@ int main(int, char**) {
     RUN_TEST(test_input_while_command_in_flight_is_echoed_and_then_runs);
     RUN_TEST(test_pool_evicts_lru_and_isolates_origins);
     RUN_TEST(test_submit_busy_is_reported);
+    RUN_TEST(test_tcp_target_is_isolated_from_esp_now_and_evicted_on_unbind);
     return UNITY_END();
 }

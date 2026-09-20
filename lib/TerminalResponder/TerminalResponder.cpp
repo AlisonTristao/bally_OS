@@ -5,12 +5,20 @@
 
 namespace {
 
-// One sealed TERMINAL_OUT chunk fits a single ESP-NOW frame: payload space
-// minus the AEAD tag. Each chunk is sent as its own logical message, the same
-// way Logger::send_log_direct() sends sealed LOG -- an AEAD tag cannot cover a
-// slice of a logical payload, so one frame == one seal.
-constexpr std::size_t kSealedChunk = btp::kEspNowMaxPayloadSize - kBtpAeadTagSize;
-constexpr std::size_t kCleartextChunk = btp::kEspNowMaxPayloadSize;
+// One sealed TERMINAL_OUT chunk fits a single frame on `target`'s own
+// transport: payload space minus the AEAD tag when sealed. Each chunk is
+// sent as its own logical message, the same way Logger::send_log_direct()
+// sends sealed LOG -- an AEAD tag cannot cover a slice of a logical payload,
+// so one frame == one seal. Sized off ESP-NOW's small frame or TCP's much
+// larger one (T22, TAREFAS_TCP_BLE_ANDROID.txt) so a TCP session is not
+// artificially chopped into dozens of ESP-NOW-sized seals.
+std::size_t terminal_out_stride(TerminalResponder::LinkTarget target,
+                                bool sealed) noexcept {
+    const std::size_t max_payload =
+        target == TerminalResponder::LinkTarget::Tcp ? btp::kTcpMaxPayloadSize
+                                                      : btp::kEspNowMaxPayloadSize;
+    return sealed ? (max_payload - kBtpAeadTagSize) : max_payload;
+}
 
 // Prefix each line of a command's captured output with "! " and CR+LF, so it
 // reads the same in the terminal as bally_dongle's ShellOutput::renderResponse
@@ -92,6 +100,31 @@ void TerminalResponder::configure(BtpEndpoint& endpoint, BtpSealFn seal, void* s
     prompt_ = (prompt != nullptr) ? prompt : "";
 }
 
+void TerminalResponder::bind_tcp_target(BtpEndpoint& endpoint, BtpSealFn seal,
+                                        void* seal_context) noexcept {
+    tcp_endpoint_ = &endpoint;
+    tcp_seal_ = seal;
+    tcp_seal_context_ = seal_context;
+}
+
+void TerminalResponder::unbind_tcp_target() noexcept {
+    tcp_endpoint_ = nullptr;
+    tcp_seal_ = nullptr;
+    tcp_seal_context_ = nullptr;
+
+    // Evict every TCP-origin slot -- bounded try, same as on_terminal_in()/
+    // pump() (this runs on TcpBtpServer's own task, contending for the same
+    // lock_). A miss here just leaves the slot to be reclaimed later by
+    // find_or_alloc()'s ordinary LRU eviction; not clean, but not unsafe.
+    if (!try_lock()) return;
+    for (Slot& s : slots_) {
+        if (s.used && s.target == LinkTarget::Tcp) {
+            s.used = false;
+        }
+    }
+    unlock();
+}
+
 TerminalResponder::Slot* TerminalResponder::find(std::uint32_t source_id,
                                                  std::uint32_t boot_id) noexcept {
     for (Slot& s : slots_) {
@@ -145,7 +178,8 @@ TerminalResponder::Slot* TerminalResponder::find_or_alloc(std::uint32_t source_i
     return victim;
 }
 
-void TerminalResponder::on_terminal_in(const btp::Header& header, btp::ByteView plaintext) noexcept {
+void TerminalResponder::on_terminal_in(LinkTarget target, const btp::Header& header,
+                                       btp::ByteView plaintext) noexcept {
     if (plaintext.data == nullptr || plaintext.size == 0U) {
         return;
     }
@@ -162,6 +196,10 @@ void TerminalResponder::on_terminal_in(const btp::Header& header, btp::ByteView 
     }
     Slot* s = find_or_alloc(header.source_id, header.boot_id, header.timestamp_us);
     if (s != nullptr) {
+        // Refreshed on every message, not just on allocation: this is what
+        // lets emit_terminal_out() (pump()) route this origin's output
+        // through the link it is actually still talking on.
+        s->target = target;
         const std::size_t room = (s->in.size() < kMaxPendingIn) ? (kMaxPendingIn - s->in.size()) : 0U;
         const std::size_t take = (plaintext.size < room) ? plaintext.size : room;
         if (take > 0U) {
@@ -251,6 +289,7 @@ void TerminalResponder::pump(std::uint64_t now_us) noexcept {
         bool have_result = false;
         std::uint32_t src = 0U;
         std::uint32_t boot = 0U;
+        LinkTarget target = LinkTarget::EspNow;
         std::string result;
         std::string input;
         std::string async_output;
@@ -268,6 +307,7 @@ void TerminalResponder::pump(std::uint64_t now_us) noexcept {
             s.last_used_us = now_us;
             src = s.source_id;
             boot = s.boot_id;
+            target = s.target;
             needs_reset = s.needs_editor_reset;
             s.needs_editor_reset = false;
             if (s.result_ready) {
@@ -352,7 +392,7 @@ void TerminalResponder::pump(std::uint64_t now_us) noexcept {
             s.async_prompt_dirty = false;
         }
 
-        emit_terminal_out(out, now_us);
+        emit_terminal_out(target, out, now_us);
     }
 }
 
@@ -370,16 +410,22 @@ void TerminalResponder::submit_line(Slot& s, std::uint32_t src, std::uint32_t bo
     s.editor.writeResponse("! busy, command dropped", out);
 }
 
-void TerminalResponder::emit_terminal_out(const std::string& bytes, std::uint64_t now_us) noexcept {
-    if (bytes.empty() || endpoint_ == nullptr) {
+void TerminalResponder::emit_terminal_out(LinkTarget target, const std::string& bytes,
+                                          std::uint64_t now_us) noexcept {
+    BtpEndpoint* const endpoint =
+        (target == LinkTarget::Tcp) ? tcp_endpoint_ : endpoint_;
+    if (bytes.empty() || endpoint == nullptr) {
         return;
     }
-    const std::size_t stride = (seal_ != nullptr) ? kSealedChunk : kCleartextChunk;
+    const BtpSealFn seal = (target == LinkTarget::Tcp) ? tcp_seal_ : seal_;
+    void* const seal_context =
+        (target == LinkTarget::Tcp) ? tcp_seal_context_ : seal_context_;
+    const std::size_t stride = terminal_out_stride(target, seal != nullptr);
     for (std::size_t offset = 0U; offset < bytes.size(); offset += stride) {
         const std::size_t chunk = (bytes.size() - offset < stride) ? (bytes.size() - offset) : stride;
-        if (endpoint_->send_logical(btp::MessageType::Terminal, kTerminalOutObjectId,
-                                    reinterpret_cast<const std::uint8_t*>(bytes.data()) + offset, chunk,
-                                    now_us, seal_, seal_context_)) {
+        if (endpoint->send_logical(btp::MessageType::Terminal, kTerminalOutObjectId,
+                                   reinterpret_cast<const std::uint8_t*>(bytes.data()) + offset, chunk,
+                                   now_us, seal, seal_context)) {
             frames_out_.fetch_add(1U, std::memory_order_relaxed);
         }
     }
