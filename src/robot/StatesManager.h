@@ -13,9 +13,6 @@ struct Transition {
 // This table defines the transitions between states based on the current state and the buttons pressed
 inline constexpr Transition transitionTable[] = {
 // CURRENT STATE | BUTTON (CONDITION) | NEXT STATE
-// ------------------ init ---------------------------
-{ SETUP,            (1 << BIT_0),         WAIT },      
-
 // --- wait square ---
 { WAIT,             (1 << BIT_0),         RUN },       
 { WAIT,             (1 << BIT_1),         CALIBRATE }, 
@@ -34,10 +31,22 @@ inline constexpr Transition transitionTable[] = {
 // --- fail-safe: any button dumps whatever telemetry is available before a reboot ---
 { ERROR,            (1 << BIT_0) | (1 << BIT_1) | (1 << BIT_2), TELEMETRY },
 };
-// note: CALIBRATE and TELEMETRY are not listed above — both self-transition
-// back to WAIT from inside their own action function (see
-// calibrate_function()/telemetry_function()), the same one-shot pattern as
-// SETUP.
+// note: SETUP, CALIBRATE and TELEMETRY are not listed above — all three
+// decide their own next state from inside their own action function (see
+// setup_function()/calibrate_function()/telemetry_function()), bypassing
+// this table entirely. SETUP used to have a { SETUP, BIT_0, WAIT } row here,
+// but it was removed (T25b): setup_function() now polls btn0's raw level for
+// up to ~1.5s to decide between WAIT and the new COMM_CONFIG state, and a
+// leftover button-driven row here would race that decision from the OTHER
+// task that drives this table (routine()'s checkStateMachine(), every
+// delay_flags ms) — the exact button press SETUP is waiting out would also
+// match this row and jump straight to WAIT out from under it.
+//
+// COMM_CONFIG is also not listed: it deliberately has no button-driven
+// transition out at all (see 09_CommConfig.cpp) — the only ways out are a
+// reboot (btn0 confirms and saves) or a reboot (30s inactivity, no save).
+// With no matching row, process_transition() below leaves COMM_CONFIG
+// unchanged, which is exactly what is wanted.
 inline constexpr int NUM_TRANSITIONS = sizeof(transitionTable) / sizeof(Transition);
 
 class States {
@@ -69,13 +78,15 @@ private:
         state5(RUN,        [](){ return instance_->run_function(); },       [](uint8_t buttons){ return instance_->process_transition(RUN, buttons); }),
         state6(FINISH,     [](){ return instance_->finish_function(); },    [](uint8_t buttons){ return instance_->process_transition(FINISH, buttons); }),
         state7(TELEMETRY,  [](){ return instance_->telemetry_function(); }, [](uint8_t buttons){ return instance_->process_transition(TELEMETRY, buttons); }),
-        state8(ERROR,      [](){ return instance_->error_function(); },     [](uint8_t buttons){ return instance_->process_transition(ERROR, buttons); }) 
+        state8(ERROR,      [](){ return instance_->error_function(); },     [](uint8_t buttons){ return instance_->process_transition(ERROR, buttons); }),
+        state9(COMM_CONFIG,[](){ return instance_->commconfig_function(); },[](uint8_t buttons){ return instance_->process_transition(COMM_CONFIG, buttons); })
         {
             instance_ = this;
         };
 
     // states
     stateName calibrate_function();
+    stateName commconfig_function();
     stateName debug_function();
     stateName error_function();
     stateName finish_function();
@@ -84,7 +95,7 @@ private:
     stateName telemetry_function();
     stateName wait_function();
 
-    // states 
+    // states
     StateMachine state1; // setup
     StateMachine state2; // wait
     StateMachine state3; // calibrate
@@ -93,6 +104,7 @@ private:
     StateMachine state6; // finish
     StateMachine state7; // telemetry
     StateMachine state8; // error
+    StateMachine state9; // comm_config (T25b)
 
     // this isntance 
     static States* instance_;

@@ -14,9 +14,12 @@ namespace {
 // artificially chopped into dozens of ESP-NOW-sized seals.
 std::size_t terminal_out_stride(TerminalResponder::LinkTarget target,
                                 bool sealed) noexcept {
-    const std::size_t max_payload =
-        target == TerminalResponder::LinkTarget::Tcp ? btp::kTcpMaxPayloadSize
-                                                      : btp::kEspNowMaxPayloadSize;
+    std::size_t max_payload = btp::kEspNowMaxPayloadSize;
+    if (target == TerminalResponder::LinkTarget::Tcp) {
+        max_payload = btp::kTcpMaxPayloadSize;
+    } else if (target == TerminalResponder::LinkTarget::Ble) {
+        max_payload = btp::kBleMaxPayloadSize;
+    }
     return sealed ? (max_payload - kBtpAeadTagSize) : max_payload;
 }
 
@@ -119,6 +122,29 @@ void TerminalResponder::unbind_tcp_target() noexcept {
     if (!try_lock()) return;
     for (Slot& s : slots_) {
         if (s.used && s.target == LinkTarget::Tcp) {
+            s.used = false;
+        }
+    }
+    unlock();
+}
+
+void TerminalResponder::bind_ble_target(BtpEndpoint& endpoint, BtpSealFn seal,
+                                        void* seal_context) noexcept {
+    ble_endpoint_ = &endpoint;
+    ble_seal_ = seal;
+    ble_seal_context_ = seal_context;
+}
+
+void TerminalResponder::unbind_ble_target() noexcept {
+    ble_endpoint_ = nullptr;
+    ble_seal_ = nullptr;
+    ble_seal_context_ = nullptr;
+
+    // Same bounded-try eviction as unbind_tcp_target() above, for every
+    // BLE-origin slot (runs on BleBtpServer's own NimBLE host task).
+    if (!try_lock()) return;
+    for (Slot& s : slots_) {
+        if (s.used && s.target == LinkTarget::Ble) {
             s.used = false;
         }
     }
@@ -412,14 +438,21 @@ void TerminalResponder::submit_line(Slot& s, std::uint32_t src, std::uint32_t bo
 
 void TerminalResponder::emit_terminal_out(LinkTarget target, const std::string& bytes,
                                           std::uint64_t now_us) noexcept {
-    BtpEndpoint* const endpoint =
-        (target == LinkTarget::Tcp) ? tcp_endpoint_ : endpoint_;
+    BtpEndpoint* endpoint = endpoint_;
+    BtpSealFn seal = seal_;
+    void* seal_context = seal_context_;
+    if (target == LinkTarget::Tcp) {
+        endpoint = tcp_endpoint_;
+        seal = tcp_seal_;
+        seal_context = tcp_seal_context_;
+    } else if (target == LinkTarget::Ble) {
+        endpoint = ble_endpoint_;
+        seal = ble_seal_;
+        seal_context = ble_seal_context_;
+    }
     if (bytes.empty() || endpoint == nullptr) {
         return;
     }
-    const BtpSealFn seal = (target == LinkTarget::Tcp) ? tcp_seal_ : seal_;
-    void* const seal_context =
-        (target == LinkTarget::Tcp) ? tcp_seal_context_ : seal_context_;
     const std::size_t stride = terminal_out_stride(target, seal != nullptr);
     for (std::size_t offset = 0U; offset < bytes.size(); offset += stride) {
         const std::size_t chunk = (bytes.size() - offset < stride) ? (bytes.size() - offset) : stride;

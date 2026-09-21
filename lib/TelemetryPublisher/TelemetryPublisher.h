@@ -232,6 +232,26 @@ public:
     // bind_tcp_target() was never called.
     void unbind_tcp_target() noexcept;
 
+    // A THIRD, independent send target for a live direct-BLE session (T33/
+    // T34, TAREFAS_TCP_BLE_ANDROID.txt) -- same shape and same reasoning as
+    // bind_tcp_target() above, kept as its own pair of methods/fields rather
+    // than reusing the TCP ones: comm_mode makes TCP and BLE mutually
+    // exclusive in practice (a robot boots into exactly one direct
+    // transport), but nothing in THIS class's own contract relies on that
+    // invariant staying true forever, and a shared slot silently reused for
+    // "whichever direct transport happens to be up" would be surprising to
+    // a future reader expecting bind_tcp_target() to mean TCP. Call once per
+    // accepted BLE connection, once ble_node_'s own SubscriptionTable exists
+    // (mirrors bind_subscriptions()'s own call site in onBleConnect()).
+    void bind_ble_target(BtpEndpoint& endpoint, BtpSealFn seal,
+                         void* seal_context,
+                         const btp::SubscriptionTable& subscriptions) noexcept;
+
+    // Reverses bind_ble_target() (onBleDisconnect()) -- same contract as
+    // unbind_tcp_target(). Idempotent, and safe even when bind_ble_target()
+    // was never called.
+    void unbind_ble_target() noexcept;
+
     static const TopicSchema* find_schema(std::uint16_t topic_id) noexcept;
 
     // True when topic_id currently has at least one live, unexpired
@@ -393,10 +413,14 @@ private:
         void* seal_context;
         const btp::SubscriptionTable* subscriptions;
     };
-    static constexpr std::size_t kMaxTargets = 2U;
+    static constexpr std::size_t kMaxTargets = 3U;
     // Writes up to kMaxTargets currently-configured targets into `out`
     // (index 0 ESP-NOW when endpoint_ is set, then TCP when tcp_endpoint_ is
-    // set) and returns how many were written.
+    // set, then BLE when ble_endpoint_ is set) and returns how many were
+    // written. In practice at most two of the three are ever set at once
+    // (comm_mode picks exactly one of ESP-NOW/TCP/BLE per boot -- see
+    // bind_ble_target()'s own comment for why this method does not rely on
+    // that itself).
     std::size_t collect_targets(TargetView out[kMaxTargets]) const noexcept;
 
     BtpEndpoint* endpoint_ = nullptr;
@@ -437,6 +461,14 @@ private:
     // unbind_tcp_target() on every TCP connect/disconnect), not just once at
     // boot.
     const btp::SubscriptionTable* tcp_subscriptions_ = nullptr;
+    // BLE target (bind_ble_target()/unbind_ble_target(), T33/T34) -- same
+    // plain-pointer, tolerated-cross-task-race posture as tcp_endpoint_
+    // above (written from BleBtpServer's NimBLE host task on connect/
+    // disconnect, read from the comms task's flush()).
+    BtpEndpoint* ble_endpoint_ = nullptr;
+    BtpSealFn ble_seal_ = nullptr;
+    void* ble_seal_context_ = nullptr;
+    const btp::SubscriptionTable* ble_subscriptions_ = nullptr;
     bool runtime_initialized_ = false;
     // Guards runtime_[] only. Independent of, and never held across, anything
     // touching BtpEndpoint/TxScheduler -- so it cannot introduce a wait on

@@ -32,3 +32,13 @@ CONFIG_TINYUSB_DESC_MSC_STRING="BallyRobot SD Card"
 
 # Automatic rollback if a newly OTA-flashed image never confirms itself healthy
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# T33 (TAREFAS_TCP_BLE_ANDROID.txt, ETAPA 4): NimBLE, not Bluedroid -- this
+# robot only ever needs a BLE peripheral role (rule for every task in the
+# plan: "BLE do ESP32-S3: não incluir Bluetooth clássico/SPP"), and NimBLE is
+# the smaller-footprint, BLE-only host stack ESP-IDF ships for exactly that
+# case (components/bt/Kconfig: "recommended for BLE only usecases to save on
+# memory"). The ESP32-S3 radio itself is BLE-only anyway (no classic BT
+# hardware), so this also can't regress into dual-mode by accident.
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y

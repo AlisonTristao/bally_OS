@@ -19,6 +19,7 @@ static const char* stateToString(stateName state) {
         case FINISH:        return "FINISH";
         case TELEMETRY:     return "TELEMETRY";
         case ERROR:         return "ERROR";
+        case COMM_CONFIG:   return "COMM_CONFIG";
         default:            return "UNKNOWN";
     }
 }
@@ -165,10 +166,11 @@ void States::register_shell_commands(TinyShell& shell, Logger& logger) {
                           StateMachine::stateToString(transitionTable[i].nextState));
             out += line;
         }
-        // CALIBRATE and TELEMETRY are absent on purpose (see the note next to
-        // transitionTable): both return to WAIT from inside their own action
-        // function, so no button ever moves them.
-        out += "note: CALIBRATE and TELEMETRY self-transition to WAIT from their action function";
+        // SETUP, CALIBRATE, TELEMETRY and COMM_CONFIG are absent on purpose
+        // (see the note next to transitionTable): the first three decide
+        // their own next state from inside their own action function, and
+        // COMM_CONFIG only ever leaves via a reboot.
+        out += "note: SETUP/CALIBRATE/TELEMETRY self-transition from their action function; COMM_CONFIG only leaves via reboot";
         logger.insert_log(logType::INFO, out.c_str());
         return RESULT_OK;
     }, "table", "List the button-driven transition table", "state");

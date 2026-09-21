@@ -128,6 +128,37 @@ public:
     bool start();
 
     /**
+     * @brief Start scanning for a known network and connect, exactly like
+     * start() (same candidates, same SCANNING/CONNECTING/retry state
+     * machine) -- with two differences, both gated internally by
+     * direct_mode_: reaching a connection does NOT start the HTTP OTA
+     * server (no firmware-upload endpoint), and a button press does NOT
+     * cancel it. For comm_mode==TCP (T25b, TAREFAS_TCP_BLE_ANDROID.txt):
+     * that connection is not something the operator "enters" the way an
+     * "ota start" upload session is, so normal WAIT/RUN button transitions
+     * elsewhere in the robot must not tear it down, and the upload endpoint
+     * must stay behind the existing DEBUG+"ota start" flow (security
+     * separation, not an oversight).
+     * @return false under the same preconditions as start() (SD card not
+     * mounted, or no networks stored in OTA_WIFI_LIST_FILE).
+     */
+    bool startDirect();
+
+    /**
+     * @brief True only while a real, shell-triggered "ota start" upload
+     * session is active -- is_active() (phase() != IDLE) that is NOT a
+     * startDirect() connection. This is what a caller that means "OTA is
+     * actively doing an upload, treat the SD card/radio as busy" should
+     * check instead of is_active(): comm_mode==TCP can keep phase() at
+     * SERVING indefinitely in the background, and that has nothing to do
+     * with the reasons an upload session excludes other things (see e.g.
+     * ROBOT::canScheduleDebugTest()).
+     */
+    bool is_upload_session() const {
+        return is_active() && !direct_mode_;
+    }
+
+    /**
      * @brief Scan for every visible network and retain the results (see
      * last_scan_count()/get_scan_result()), without attempting to connect to
      * any of them -- unlike start(), this needs neither a mounted SD card nor
@@ -238,6 +269,11 @@ private:
     std::atomic<Phase> phase_{Phase::IDLE};
     std::atomic<bool> flashing_{false};
 
+    // True for a startDirect() connection (T25b), false for a normal
+    // start(). See is_upload_session()/startDirect()'s own comments for what
+    // this changes inside process(). Reset to false in cancel().
+    bool direct_mode_ = false;
+
     // Wi-Fi scan/connect bookkeeping, updated from the esp_event loop task.
     std::atomic<bool> scan_done_{false};
     std::atomic<bool> got_ip_{false};
@@ -282,6 +318,11 @@ private:
     httpd_handle_t server_ = nullptr;
     esp_event_handler_instance_t wifi_event_instance_ = nullptr;
     esp_event_handler_instance_t ip_event_instance_ = nullptr;
+
+    // Shared body of start()/startDirect() -- see either one's own comment.
+    // log_verb is spliced into the "OTA: %s, scanning for..." log line
+    // ("started" vs "started (direct, no HTTP server)").
+    bool begin_scanning(bool direct_mode, const char* log_verb);
 
     uint16_t parse_file(Credential* out, uint16_t max_entries) const;
     bool load_candidates();

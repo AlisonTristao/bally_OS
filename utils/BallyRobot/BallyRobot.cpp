@@ -714,6 +714,39 @@ void RobotTcpLink::reply_seal(const btp::Header& /*request_header*/,
     *out_seal_ctx = nullptr;
 }
 
+// ---------------------------------------------------------------------------
+// RobotBleLink -- ble_node_'s NodeConfig (T33/T34). Verbatim mirror of
+// RobotTcpLink just above, only the send() destination differs -- see
+// RobotBleLink's class comment in BallyRobot.h.
+// ---------------------------------------------------------------------------
+
+bool RobotBleLink::send(const std::uint8_t* frame, std::size_t frame_size) {
+    return robot_.ble_server_.send(frame, frame_size);
+}
+
+bool RobotBleLink::seal(const btp::Header& header, std::uint16_t payload_size,
+                        const std::uint8_t* plaintext, std::uint8_t* out) {
+    return RadioSeal::seal_e(nullptr, header, payload_size, plaintext, out);
+}
+
+bool RobotBleLink::open(const btp::Header& header, std::uint16_t sealed_size,
+                        const std::uint8_t* sealed, std::uint8_t* out_plaintext) {
+    return RadioSeal::open_e(header, sealed_size, sealed, out_plaintext);
+}
+
+void RobotBleLink::terminal(btp::Node& /*node*/, const btp::Header& header,
+                            btp::ByteView payload, std::uint64_t /*now_ms*/) {
+    if (header.object_id != TerminalResponder::kTerminalInObjectId) return;
+    robot_.terminal_responder.on_terminal_in(TerminalResponder::LinkTarget::Ble,
+                                             header, payload);
+}
+
+void RobotBleLink::reply_seal(const btp::Header& /*request_header*/,
+                              btp::EndpointSealFn* out_seal, void** out_seal_ctx) {
+    *out_seal = nullptr;
+    *out_seal_ctx = nullptr;
+}
+
 bool ROBOT::bindProtocolTransport() {
     // protocol_link_ is a plain member (node_ holds it by reference): identity
     // is the only thing not known until configureProtocolIdentity() ran, so it
@@ -731,6 +764,11 @@ bool ROBOT::bindProtocolTransport() {
     protocol_link_tcp_.source_id = protocol_source_id_;
     protocol_link_tcp_.boot_id = protocol_boot_id_;
     protocol_link_tcp_.transport = btp::kTcpTransport;
+
+    // Same identity, BLE limits -- mirrors protocol_link_tcp_ just above.
+    protocol_link_ble_.source_id = protocol_source_id_;
+    protocol_link_ble_.boot_id = protocol_boot_id_;
+    protocol_link_ble_.transport = btp::kBleTransport;
 
     node_.emplace(protocol_link_, kNodeReassemblyTimeoutMs);
     populateCatalog(node_->catalog());
@@ -771,6 +809,41 @@ bool ROBOT::bindProtocolTransport() {
             .config_revision(ManifestCatalog::kConfigRevision)
             .build();
 
+    // Same HELLO advertisement, built the same way, for the direct-BLE
+    // responder role (T33/T34) -- reused on every accepted BLE connection
+    // (onBleConnect()).
+    ble_local_hello_ =
+        btp::HelloBuilder(btp::Role::Producer, protocol_uuid_)
+            .max_logical_payload(BtpEndpoint::kMaxLogicalPayloadSize)
+            .max_inflight_reassemblies(kNodeSlotCount)
+            .max_subscriptions(TelemetryPublisher::kMaxSubscriptions)
+            .max_dedup_entries(CommandProcessor::kCacheCapacity)
+            .config_revision(ManifestCatalog::kConfigRevision)
+            .build();
+
+    // T33/T34: comm_mode==2 starts advertising the BTP GATT service HERE,
+    // not from init()'s own comm_mode dispatch -- protocol_link_ble_'s
+    // identity and ble_local_hello_ just above are what a connecting
+    // central's onBleConnect() actually needs, and both are only ready as
+    // of this point (see init()'s own comment for the race starting any
+    // earlier would create). Unlike comm_mode==1's Wi-Fi scan/connect, BLE
+    // advertising starts immediately, so there is no natural delay to hide
+    // behind the way TCP's own updateTcpServerLifecycle() has.
+    if (effective_comm_mode_ == 2U) {
+        BleBtpServer::Callbacks callbacks{};
+        callbacks.on_receive = &ROBOT::onBleReceiveStatic;
+        callbacks.on_connect = &ROBOT::onBleConnectStatic;
+        callbacks.on_disconnect = &ROBOT::onBleDisconnectStatic;
+        callbacks.context = this;
+        if (ble_server_.start(callbacks)) {
+            logger.insert_log(logType::INFO,
+                              "comm_mode=BLE: advertising the BTP GATT service");
+        } else {
+            logger.insert_log(logType::ERRO,
+                              "comm_mode=BLE: failed to start the BLE peripheral");
+        }
+    }
+
     return true;
 }
 
@@ -808,25 +881,27 @@ bool ROBOT::tcpTelemetrySendStatic(void* context, const std::uint8_t* frame,
 }
 
 void ROBOT::updateTcpServerLifecycle() {
-    // DECISION (revisit if a real always-on Wi-Fi mode ever lands): direct
-    // TCP piggybacks on OTAUpdater's own Wi-Fi lifecycle instead of adding a
-    // second, independent trigger for bringing the radio up in STA mode.
-    // Today Wi-Fi only ever comes up for OTA (DEBUG state, "ota_start" or a
-    // boot-time sub-mode -- see OTAUpdater's own class comment) and this
-    // robot has exactly one physical radio shared with ESP-NOW
-    // (ROBOT::configureCommunication()'s own comment: OTA and ESP-NOW are
-    // mutually exclusive in time, not concurrent). Reusing that cycle means:
-    // (1) no new code path ever calls esp_wifi_connect()/associates this
-    // robot with an access point -- OTAUpdater already owns that entirely;
-    // (2) TCP is only ever reachable while ESP-NOW is already off the air
-    // for OTA anyway, so there is no NEW coexistence case to reason about;
-    // (3) leaving OTA (button press, upload finished, cancel()) also takes
-    // TCP down, symmetrically, with no separate timeout/policy to invent.
-    // The real cost: a robot that is not currently doing OTA is simply not
-    // reachable over direct TCP at all, which is a real, deliberate scope
-    // limit -- not a bug -- until a future topico defines an always-on Wi-Fi
-    // mode (out of scope here; T02's own notes already flagged this as an
-    // open decision the original plan did not cover).
+    // DECISION, updated by T25b (was: "revisit if a real always-on Wi-Fi
+    // mode ever lands" -- comm_mode==TCP is that mode now): this still keys
+    // off ota.phase()==SERVING rather than a second, independent "is Wi-Fi
+    // up" signal, but SERVING no longer means only "an 'ota start' upload
+    // session is connected" -- OTAUpdater::startDirect() (comm_mode==TCP,
+    // called once at boot from ROBOT::init()) reaches the exact same phase
+    // without ever starting the HTTP server (OTAUpdater::direct_mode_).
+    // Reusing OTAUpdater's own scan/connect/retry state machine for both
+    // means: (1) no second code path calls esp_wifi_connect() -- OTAUpdater
+    // still owns that entirely, whichever caller asked; (2) TCP and ESP-NOW
+    // still share the one physical radio the same way they always did (this
+    // robot has exactly one -- ROBOT::configureCommunication()'s own
+    // comment), so associating with an AP for either reason equally takes
+    // ESP-NOW off the air, which routine()/runComms() already account for
+    // via ota.is_active(); (3) a real "ota start" session arriving while
+    // comm_mode's own connection is already up upgrades it in place
+    // (OTAUpdater::begin_scanning()) instead of needing a second listener.
+    // What's NEW since the comment this replaces: a comm_mode==TCP robot IS
+    // now reachable over direct TCP continuously, not just during an
+    // explicit OTA upload -- see ROBOT::init()'s comm_mode dispatch and
+    // routine()'s unconditional ota.process() tick.
     const bool wifi_serving = ota.phase() == OTAUpdater::Phase::SERVING;
     if (wifi_serving && !tcp_server_.running()) {
         TcpBtpServer::Callbacks callbacks{};
@@ -1056,6 +1131,147 @@ void ROBOT::onTcpDisconnect() {
     // -- session-and-terminal.md section 3.4, "does not resume or inherit
     // any state from a previous TCP connection."
     tcp_node_.reset();
+}
+
+// ---------------------------------------------------------------------------
+// Direct BLE BTP session (T33/T34, TAREFAS_TCP_BLE_ANDROID.txt)
+//
+// Verbatim mirror of the direct-TCP block above -- see its own comments for
+// the reasoning shared by both (a SEPARATE btp::Node per T21/T22, why an
+// independent BtpEndpoint pair exists for telemetry admission tagging per
+// T23). Only genuine difference: no pending-connection/TcpBusyResponder
+// equivalent, because BleBtpServer itself already refuses a second central
+// at the GAP level (see that class's own comment) -- there is no second
+// connection ever reaching this robot's BTP layer to reject.
+// ---------------------------------------------------------------------------
+
+bool ROBOT::bleEndpointSendStatic(void* context, const std::uint8_t* frame,
+                                  std::size_t size) noexcept {
+    ROBOT* self = static_cast<ROBOT*>(context);
+    return self != nullptr && self->ble_server_.send(frame, size);
+}
+
+bool ROBOT::bleTelemetrySendStatic(void* context, const std::uint8_t* frame,
+                                   std::size_t size) noexcept {
+    ROBOT* self = static_cast<ROBOT*>(context);
+    return self != nullptr &&
+          self->ble_server_.send(frame, size, BleBtpServer::FramePriority::Telemetry);
+}
+
+void ROBOT::onBleConnectStatic(void* context) noexcept {
+    if (context != nullptr) static_cast<ROBOT*>(context)->onBleConnect();
+}
+
+void ROBOT::onBleConnect() {
+    ble_session_generation_.fetch_add(1U, std::memory_order_relaxed);
+
+    ble_node_.emplace(protocol_link_ble_, kBleNodeReassemblyTimeoutMs);
+    populateCatalog(ble_node_->catalog());
+    if (!ble_node_->begin()) {
+        logger.insert_log(logType::ERRO,
+                          "BLE BTP: ble_node_->begin() failed, dropping connection");
+        ble_node_.reset();
+        ble_server_.close_active_client();
+        return;
+    }
+
+    ble_node_->serve_catalog(ManifestCatalog::kSourceRoleRobot, protocol_uuid_,
+                             "bally_software");
+
+    protocol_ble_.bind(ble_node_->endpoint());
+    protocol_ble_.set_transport(btp::kBleTransport);
+    protocol_ble_.set_send_callback(&ROBOT::bleEndpointSendStatic, this);
+
+    protocol_ble_telemetry_.bind(ble_node_->endpoint());
+    protocol_ble_telemetry_.set_transport(btp::kBleTransport);
+    protocol_ble_telemetry_.set_send_callback(&ROBOT::bleTelemetrySendStatic, this);
+
+    telemetry.bind_ble_target(protocol_ble_telemetry_, RadioSeal::seal_e, nullptr,
+                              *ble_node_->subscriptions());
+    terminal_responder.bind_ble_target(protocol_ble_, RadioSeal::seal_e, nullptr);
+
+    ble_node_->enable_session(ble_local_hello_, kBleHelloDeadlineMs);
+    ble_node_->arm_session(static_cast<uint64_t>(esp_timer_get_time() / 1000ULL));
+}
+
+void ROBOT::onBleReceiveStatic(void* context, const std::uint8_t* data,
+                               std::size_t size) noexcept {
+    if (context != nullptr) {
+        static_cast<ROBOT*>(context)->onBleReceive(data, size);
+    }
+}
+
+void ROBOT::onBleReceive(const std::uint8_t* data, std::size_t size) {
+    // Defensive only: BleBtpServer always calls on_connect() (which
+    // emplaces ble_node_) strictly before any on_receive() for the same
+    // connection.
+    if (!ble_node_) return;
+
+    btp::ReceivedMessage msg{};
+    const btp::NodeRx outcome = ble_node_->receive(
+        data, size, static_cast<uint64_t>(esp_timer_get_time() / 1000ULL), &msg);
+    switch (outcome) {
+        case btp::NodeRx::Complete:
+            break;
+        default:
+            return;
+    }
+
+    const btp::Header& header = msg.header;
+    switch (header.type) {
+        case btp::MessageType::Command:
+            if (header.object_id != btp_command::kCommandRequestObjectId) {
+                command_processor.note_drop();
+                return;
+            }
+            break;
+        case btp::MessageType::Control:
+        case btp::MessageType::Terminal:
+        case btp::MessageType::Telemetry:
+        case btp::MessageType::Log:
+        case btp::MessageType::Invalid:
+            command_processor.note_drop();
+            return;
+    }
+
+    processBleCommandRequest(header, msg.payload);
+}
+
+void ROBOT::processBleCommandRequest(const btp::Header& header,
+                                     btp::ByteView payload) {
+    const uint64_t now_us = static_cast<uint64_t>(esp_timer_get_time());
+    const CommandProcessor::Intake intake = command_processor.intake(
+        header, payload, now_us, bally::Channel::B_Endpoint);
+    if (intake.kind == CommandProcessor::IntakeKind::ResultReady) {
+        command_processor.send_result(intake.result, protocol_ble_);
+        return;
+    }
+    if (intake.kind != CommandProcessor::IntakeKind::Ready) return;
+
+    QueuedCommand command{};
+    command.cache_slot = intake.work.cache_slot;
+    std::memcpy(command.text, intake.work.command, sizeof(command.text));
+    command.from_ble = true;
+    command.ble_generation = ble_session_generation_.load(std::memory_order_relaxed);
+    if (xQueueSend(receivedDataQueue, &command, 0) != pdTRUE) {
+        CommandProcessor::ResultView result{};
+        if (command_processor.reject_busy(command.cache_slot, now_us, &result)) {
+            command_processor.send_result(result, protocol_ble_);
+        }
+    }
+}
+
+void ROBOT::onBleDisconnectStatic(void* context) noexcept {
+    if (context != nullptr) static_cast<ROBOT*>(context)->onBleDisconnect();
+}
+
+void ROBOT::onBleDisconnect() {
+    ble_session_generation_.fetch_add(1U, std::memory_order_relaxed);
+
+    telemetry.unbind_ble_target();
+    terminal_responder.unbind_ble_target();
+
+    ble_node_.reset();
 }
 
 bool ROBOT::configureCommunication() {
@@ -1314,15 +1530,20 @@ void ROBOT::processDebug() {
     usb_storage.process(buttons.getFlags());
     if (usb_storage.is_active()) return;
 
-    ota.process(buttons.getFlags());
-
-    // Direct TCP BTP piggybacks on OTA's own Wi-Fi lifecycle (T21/T22) --
-    // must run every pass regardless of the early return right below, or a
-    // robot mid-OTA (SCANNING/CONNECTING/SERVING all count as is_active())
-    // would never notice it reached SERVING and start the TCP listener; see
-    // updateTcpServerLifecycle()'s own comment for the full reasoning.
-    updateTcpServerLifecycle();
-    if (ota.is_active()) return;
+    // T25b: ota.process()/updateTcpServerLifecycle() moved to routine(),
+    // ticked every pass regardless of the current state -- comm_mode==TCP's
+    // background connection (started once at boot, see ROBOT::init()) is
+    // not something the operator "enters" from DEBUG, so DEBUG-only ticking
+    // would leave it stalled for any robot that never opens DEBUG at all.
+    // See routine()'s own comment for the rest of this reasoning.
+    //
+    // Only the gate stays here, and it changed from is_active() to
+    // is_upload_session(): a real "ota start" upload session still blocks
+    // DEBUG's own sensor tests below exactly as before (SD-card exclusivity,
+    // no test running mid-upload), but comm_mode==TCP's background
+    // connection -- which can sit at phase()==SERVING indefinitely -- no
+    // longer permanently blocks them just by existing.
+    if (ota.is_upload_session()) return;
 
     // Add one `if (test.poll()) { ... }` block per ScheduledDebugTest member
     // (H-bridge current, ...). Terminal-only, deliberately: these are live
@@ -1417,6 +1638,154 @@ void ROBOT::flushLogsOnShutdown() {
     char filename[SDFileInfo::MAX_NAME_LENGTH] = {};
     instance_->logger.flush_to_sd(instance_->sd_card, false, filename,
                                   sizeof(filename));
+}
+
+// ==============================================================================
+// COMM_CONFIG menu (T25b, TAREFAS_TCP_BLE_ANDROID.txt: ETAPA 3B)
+// ==============================================================================
+
+namespace {
+
+// Deliberately simpler than the interrupts task's own ANYEDGE ISR debounce
+// (button_press_accepted() above, with its own timer array and reasoning
+// comment): that one exists to keep a mechanical release from being
+// misread as a fresh press system-wide, including while a button is
+// driving the state machine's normal transitionTable. Here, a human is
+// deliberately clicking through a menu one option at a time -- a single
+// "already processed this edge" latch (was_low) plus a short minimum gap
+// between ACCEPTED edges is enough to reject contact chatter without
+// needing a second, release-side edge to re-arm anything.
+constexpr uint32_t kCommConfigDebounceMs = 200U;
+// ~30s with no button press exits COMM_CONFIG (without saving) and reboots,
+// so the robot is never stuck in this menu if the operator walks away —
+// same safety-net reasoning as OTA's own button-cancels-scan behaviour.
+constexpr uint32_t kCommConfigInactivityTimeoutMs = 30000U;
+// Refreshed every commConfigTick() call (see blinkErrorLeds()'s own "call
+// every pass" pattern for LEDs driven this way) -- comfortably longer than
+// one state-machine task pass so the selected LED reads as solid on, short
+// enough that the un-refreshed other three visibly turn off within a
+// fraction of a second of the selection changing.
+constexpr uint32_t kCommConfigLedHoldMs = 200U;
+
+// LED index for each comm_mode option, in the same 0..3 = ESP-NOW/TCP/BLE/
+// none order RobotSettings.h documents. Chosen to read intuitively (not
+// specified by T25b beyond "one of the 4 LEDs per option"): blue/green for
+// the two working transports, yellow ("caution") for BLE which is not
+// implemented yet, red for fully offline.
+constexpr uint8_t kCommConfigLedForOption[4] = {LED_BLUE, LED_GREEN,
+                                                LED_YELLOW, LED_RED};
+
+bool commConfigDebouncedPress(gpio_num_t pin, bool& was_low,
+                              uint32_t& last_edge_ms, uint32_t now_ms) {
+    const bool low = gpio_get_level(pin) == 0; // pull-up wiring: LOW = pressed
+    bool accepted = false;
+    if (low && !was_low && (now_ms - last_edge_ms) >= kCommConfigDebounceMs) {
+        accepted = true;
+        last_edge_ms = now_ms;
+    }
+    was_low = low;
+    return accepted;
+}
+
+// Deferred restart, 500ms one-shot -- same shape as BallyRobotShell.cpp's
+// own scheduleRestart() and OTAUpdater::finish_update()'s reboot timer,
+// deliberately duplicated rather than shared: those two already document
+// why (OTAUpdater must not depend on the ROBOT composition root, and a new
+// library for twelve lines of esp_timer boilerplate costs more than it
+// saves). Same reasoning applies here -- this one lives in BallyRobot.cpp
+// because commConfigTick() does. If one of the three changes, change all.
+void scheduleCommConfigRestart() {
+    esp_timer_handle_t reboot_timer = nullptr;
+    const esp_timer_create_args_t timer_args = {
+        .callback = [](void*) { esp_restart(); },
+        .arg = nullptr,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "comm_config_reboot",
+        .skip_unhandled_events = false,
+    };
+    esp_timer_create(&timer_args, &reboot_timer);
+    esp_timer_start_once(reboot_timer, 500000);
+}
+
+} // namespace
+
+stateName ROBOT::commConfigTick() {
+    const SettingsData& cfg = settings.data();
+    const gpio_num_t btn0 = static_cast<gpio_num_t>(cfg.btn0);
+    const gpio_num_t btn1 = static_cast<gpio_num_t>(cfg.btn1);
+    const gpio_num_t btn2 = static_cast<gpio_num_t>(cfg.btn2);
+    const uint32_t now_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
+
+    if (!comm_config_active_) {
+        comm_config_active_ = true;
+        comm_config_restart_scheduled_ = false;
+        comm_config_selected_ = (cfg.comm_mode <= 3) ? cfg.comm_mode : 0U;
+        comm_config_last_activity_ms_ = now_ms;
+        // Prime the edge trackers to the CURRENT level -- see the field
+        // comments in BallyRobot.h for why.
+        comm_config_btn0_was_low_ = gpio_get_level(btn0) == 0;
+        comm_config_btn1_was_low_ = gpio_get_level(btn1) == 0;
+        comm_config_btn2_was_low_ = gpio_get_level(btn2) == 0;
+        logger.insert_logf(
+            logType::INFO,
+            "COMM_CONFIG: entered (btn1=next btn2=prev btn0=confirm), "
+            "current comm_mode=%u",
+            static_cast<unsigned>(comm_config_selected_));
+    }
+
+    // Keep the selected LED solid on; the other three are simply never
+    // refreshed here and expire on their own (Flags_out::
+    // checkFlagsDuration(), driven by resetFlags() every routine() pass).
+    leds.setFlag(kCommConfigLedForOption[comm_config_selected_], kCommConfigLedHoldMs);
+
+    // A reboot is already scheduled (confirm or timeout, below) -- nothing
+    // left to do but keep the LED refreshed above until esp_restart() fires.
+    if (comm_config_restart_scheduled_) return COMM_CONFIG;
+
+    bool activity = false;
+
+    if (commConfigDebouncedPress(btn1, comm_config_btn1_was_low_,
+                                 comm_config_last_btn1_edge_ms_, now_ms)) {
+        comm_config_selected_ = static_cast<uint8_t>((comm_config_selected_ + 1) % 4U);
+        activity = true;
+        logger.insert_logf(logType::INFO, "COMM_CONFIG: next -> %u",
+                           static_cast<unsigned>(comm_config_selected_));
+    }
+    if (commConfigDebouncedPress(btn2, comm_config_btn2_was_low_,
+                                 comm_config_last_btn2_edge_ms_, now_ms)) {
+        comm_config_selected_ = static_cast<uint8_t>((comm_config_selected_ + 3U) % 4U);
+        activity = true;
+        logger.insert_logf(logType::INFO, "COMM_CONFIG: prev -> %u",
+                           static_cast<unsigned>(comm_config_selected_));
+    }
+    if (commConfigDebouncedPress(btn0, comm_config_btn0_was_low_,
+                                 comm_config_last_btn0_edge_ms_, now_ms)) {
+        char value[4];
+        std::snprintf(value, sizeof(value), "%u",
+                      static_cast<unsigned>(comm_config_selected_));
+        const bool set_ok = settings.set("comm", "comm_mode", value);
+        const bool saved = set_ok && settings.save(sd_card);
+        logger.insert_logf(
+            logType::INFO,
+            "COMM_CONFIG: confirmed comm_mode=%u set=%d saved=%d, rebooting to apply",
+            static_cast<unsigned>(comm_config_selected_), set_ok ? 1 : 0,
+            saved ? 1 : 0);
+        comm_config_restart_scheduled_ = true;
+        scheduleCommConfigRestart();
+        return COMM_CONFIG;
+    }
+
+    if (activity) {
+        comm_config_last_activity_ms_ = now_ms;
+    } else if (now_ms - comm_config_last_activity_ms_ >= kCommConfigInactivityTimeoutMs) {
+        logger.insert_log(
+            logType::WARN,
+            "COMM_CONFIG: inactivity timeout, rebooting without saving");
+        comm_config_restart_scheduled_ = true;
+        scheduleCommConfigRestart();
+    }
+
+    return COMM_CONFIG;
 }
 
 void ROBOT::checkStateMachine() {
@@ -2418,6 +2787,16 @@ void ROBOT::runShell(void *param) {
                         instance_->command_processor.send_result(
                             result, instance_->protocol_tcp_);
                     }
+                } else if (received_command.from_ble) {
+                    // Same generation-guard reasoning as from_tcp above,
+                    // against onBleDisconnect() (on BleBtpServer's own
+                    // NimBLE host task) instead of onTcpDisconnect().
+                    if (received_command.ble_generation ==
+                        instance_->ble_session_generation_.load(
+                            std::memory_order_relaxed)) {
+                        instance_->command_processor.send_result(
+                            result, instance_->protocol_ble_);
+                    }
                 } else {
                     instance_->command_processor.send_result(result);
                 }
@@ -2484,6 +2863,25 @@ void ROBOT::routine(void *param){
 
     // excute the loop to menage the robot
     while(true) {
+        // T25b: drive OTA's scan/connect state machine (and, through it,
+        // updateTcpServerLifecycle(), which actually starts TcpBtpServer once
+        // phase() reaches SERVING) every pass, regardless of the current
+        // state -- not just while DEBUG is polling it (see processDebug()'s
+        // own comment). comm_mode==TCP's connection is started once at boot
+        // (ROBOT::init()) and is not something the operator "enters" the way
+        // an "ota start" upload session is, so nothing else would ever tick
+        // it forward for a robot that spends its life in WAIT/RUN.
+        //
+        // Real button-driven cancellation of a genuine "ota start" session is
+        // preserved (buttons.getFlags() still reaches process()); a
+        // comm_mode-driven direct connection (OTAUpdater::direct_mode_)
+        // ignores button flags internally, so the WAIT/RUN button presses
+        // that fire constantly during normal operation never tear it down.
+        if (!instance_->usb_storage.is_active()) {
+            instance_->ota.process(instance_->buttons.getFlags());
+            instance_->updateTcpServerLifecycle();
+        }
+
         // OTA holds the radio on the target Wi-Fi's channel, so ESP-NOW
         // frames sent while it's active never reach the peer; skip the
         // flush and let logs pile up in PSRAM instead of retrying/losing
@@ -3118,12 +3516,57 @@ bool ROBOT::init() {
     // itself, the same "programming error, checked once at boot" role
     // rx_router_.valid() used to have.
 
+    // T25b (TAREFAS_TCP_BLE_ANDROID.txt, ETAPA 3B): comm_mode picks which
+    // communication channel this robot brings up at boot, persisted by
+    // COMM_CONFIG (commConfigTick() above). Resolved here, once, into
+    // effective_comm_mode: anything out of the 0..3 range (a hand-edited or
+    // corrupted settings.conf) falls back to 0, the safest default. 2 (BLE)
+    // is real now (T33/T34) -- see the BLE dispatch a few lines below.
+    uint8_t effective_comm_mode = cfg.comm_mode;
+    if (effective_comm_mode > 3) {
+        logger.insert_logf(
+            logType::WARN,
+            "comm_mode=%u is not a valid value, falling back to ESP-NOW",
+            static_cast<unsigned>(effective_comm_mode));
+        effective_comm_mode = 0U;
+    }
+
     // Must run before ota.begin(): it creates the default event loop and
     // the Wi-Fi STA netif (needed for the DHCP client — see the comment on
     // esp_netif_create_default_wifi_sta() inside configureCommunication())
     // that ota.begin()'s own event handler registration builds on top of.
-    if (!configureCommunication())
+    //
+    // comm_mode==3 (none) and comm_mode==2 (BLE) both skip this: neither
+    // needs Wi-Fi STA or ESP-NOW -- BLE is a physically separate radio path
+    // (NimBLE, no esp_wifi_*/esp_now_* calls at all) with its own dispatch
+    // below. radio_enabled_ gates main.cpp's two esp_now_send() call sites
+    // (the only ones in this codebase -- see its own comment in
+    // BallyRobot.h for why one flag is enough here instead of auditing
+    // every TxScheduler/BtpTransport call site).
+    //
+    // KNOWN, DELIBERATE SIDE EFFECT (flagged for human review): the
+    // boot-time OTA/USB-storage sub-mode select above already read
+    // boot_enter_ota/boot_enter_storage, but boot_enter_ota's ota.start()
+    // needs the Wi-Fi STA netif + event loop configureCommunication() sets
+    // up -- skip it here and "hold btn2 at boot to force OTA" silently stops
+    // working on a robot configured comm_mode==none OR comm_mode==BLE. This
+    // follows directly from T25b's "não suba... Wi-Fi" taken literally for
+    // these modes; a robot painted into that corner still has a way out
+    // (COMM_CONFIG: hold btn0 ~1.5s after boot, switch back to ESP-NOW/TCP,
+    // reboot), just not the one-button escape the other two sub-modes have.
+    if (effective_comm_mode == 3U) {
+        radio_enabled_ = false;
+        logger.insert_log(
+            logType::INFO,
+            "comm_mode=none: radio (Wi-Fi/ESP-NOW) not initialized");
+    } else if (effective_comm_mode == 2U) {
+        radio_enabled_ = false;
+        logger.insert_log(
+            logType::INFO,
+            "comm_mode=BLE: radio (Wi-Fi/ESP-NOW) not initialized, BLE only");
+    } else if (!configureCommunication()) {
         return false;
+    }
 
     ota.configure(OtaTuning{
         .led_step_ms        = cfg.ota_led_step_ms,
@@ -3165,6 +3608,58 @@ bool ROBOT::init() {
                               "Boot: button 2 held but USB storage could not be exposed");
         }
     }
+
+    // T25b: comm_mode==1 brings Wi-Fi STA up and connects to a stored
+    // network the same way "ota start" does -- OTAUpdater::startDirect()
+    // reuses its exact scan/connect state machine (same candidate list, same
+    // retry-on-failure loop) -- but WITHOUT the HTTP upload endpoint and
+    // WITHOUT requiring DEBUG state or a manual "ota start" first. This is
+    // what closes the gap that motivated T25b: TcpBtpServer/tcp_node_
+    // (T21/T22) become reachable as soon as Wi-Fi connects, independent of
+    // ota.phase()==SERVING via an explicit upload session.
+    //
+    // Skipped when boot_enter_ota already won above -- same "the OTA button
+    // wins if both are held" precedent boot_enter_ota already applies over
+    // boot_enter_storage a few lines up. Letting both paths call into
+    // OTAUpdater's phase machine here would race startDirect() against
+    // start(): whichever loses just finds phase() already non-IDLE and
+    // no-ops, and if startDirect() won that race, the HTTP server the
+    // operator explicitly asked for (holding btn2 at boot) would silently
+    // never start.
+    //
+    // Also skipped when boot_enter_storage won: USB MSC now owns the SD
+    // card (see usb_storage.expose() above), and startDirect() needs to read
+    // OTA_WIFI_LIST_FILE off it just like start() does -- same reasoning,
+    // simple exclusion rather than teaching OTAUpdater to contend with USB
+    // for the card.
+    //
+    // ota.process()/updateTcpServerLifecycle() (which starts TcpBtpServer
+    // once phase() reaches SERVING) are ticked from routine() every pass
+    // regardless of state now -- see its own comment there.
+    if (effective_comm_mode == 1U && !boot_enter_ota && !boot_enter_storage) {
+        if (ota.startDirect()) {
+            logger.insert_log(
+                logType::INFO,
+                "comm_mode=TCP: connecting to Wi-Fi for direct TCP BTP");
+        } else {
+            logger.insert_log(
+                logType::ERRO,
+                "comm_mode=TCP: failed to start Wi-Fi connect (SD card "
+                "unmounted or no networks stored -- use 'ota wifi_add' from "
+                "DEBUG, then reboot)");
+        }
+    }
+
+    // T33/T34: comm_mode==2 (BLE) is NOT started here, unlike TCP just
+    // above -- see effective_comm_mode_'s own comment for why: BLE starts
+    // advertising immediately (no scan/connect delay TCP gets for free), so
+    // starting it this early would race bindProtocolTransport() (called
+    // later, from main.cpp's setup_system_callbacks()), which is what
+    // actually builds ble_local_hello_ and this robot's protocol identity --
+    // a central connecting inside that window would hit onBleConnect() with
+    // both still default-constructed. See bindProtocolTransport()'s own
+    // dispatch at the very end of that function instead.
+    effective_comm_mode_ = effective_comm_mode;
 
     if (motor_left->init() != ESP_OK) {
         ROBOT::logger.insert_log(logType::ERRO, "Failed to initialize left motor");

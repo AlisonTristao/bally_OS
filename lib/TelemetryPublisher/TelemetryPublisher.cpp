@@ -177,6 +177,22 @@ void TelemetryPublisher::unbind_tcp_target() noexcept {
     tcp_subscriptions_ = nullptr;
 }
 
+void TelemetryPublisher::bind_ble_target(
+    BtpEndpoint& endpoint, BtpSealFn seal, void* seal_context,
+    const btp::SubscriptionTable& subscriptions) noexcept {
+    ble_endpoint_ = &endpoint;
+    ble_seal_ = seal;
+    ble_seal_context_ = seal_context;
+    ble_subscriptions_ = &subscriptions;
+}
+
+void TelemetryPublisher::unbind_ble_target() noexcept {
+    ble_endpoint_ = nullptr;
+    ble_seal_ = nullptr;
+    ble_seal_context_ = nullptr;
+    ble_subscriptions_ = nullptr;
+}
+
 std::size_t TelemetryPublisher::collect_targets(
     TargetView out[kMaxTargets]) const noexcept {
     std::size_t n = 0U;
@@ -186,6 +202,10 @@ std::size_t TelemetryPublisher::collect_targets(
     if (tcp_endpoint_ != nullptr) {
         out[n++] = TargetView{tcp_endpoint_, tcp_seal_, tcp_seal_context_,
                               tcp_subscriptions_};
+    }
+    if (ble_endpoint_ != nullptr) {
+        out[n++] = TargetView{ble_endpoint_, ble_seal_, ble_seal_context_,
+                              ble_subscriptions_};
     }
     return n;
 }

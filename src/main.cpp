@@ -95,6 +95,13 @@ static void setup_system_callbacks() {
     // watch stats() (delivered/timeouts/dropped) on the bench to confirm this
     // is still giving honest numbers at 5 ms.
     robot.tx_scheduler.configure([](void*, const uint8_t *data, size_t len) {
+        // T25b: comm_mode==3 (none) never calls esp_now_init() at all (see
+        // ROBOT::init()'s comm_mode dispatch and radio_enabled_'s own
+        // comment in BallyRobot.h) -- fail soft here instead of assuming the
+        // radio is up. ESP-IDF's own esp_now_send() already returns
+        // ESP_ERR_ESPNOW_NOT_INIT rather than crash in that case, but this
+        // is the explicit, self-documenting guard the task asked for.
+        if (!robot.radioEnabled()) return false;
         static const uint8_t peer_mac[6] = {MAC_ADDR};
         return (esp_now_send(peer_mac, data, len)) == ESP_OK;
     }, nullptr, 5U);
@@ -108,6 +115,8 @@ static void setup_system_callbacks() {
     // driver's own TX queue is full for this pass); nothing here waits on
     // on_delivery().
     robot.tx_scheduler.configure_telemetry([](void*, const uint8_t *data, size_t len) {
+        // Same radioEnabled() guard as the unicast callback above.
+        if (!robot.radioEnabled()) return false;
         static const uint8_t broadcast_mac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
         return (esp_now_send(broadcast_mac, data, len)) == ESP_OK;
     }, nullptr);

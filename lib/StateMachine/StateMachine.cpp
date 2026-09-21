@@ -40,6 +40,7 @@ const char* StateMachine::stateToString(uint8_t state) {
         case FINISH: return "FINISH";
         case TELEMETRY: return "TELEMETRY";
         case ERROR: return "ERROR";
+        case COMM_CONFIG: return "COMM_CONFIG";
         default: return "UNKNOWN";
     }
 }

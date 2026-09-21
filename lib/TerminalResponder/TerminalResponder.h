@@ -84,7 +84,7 @@ public:
     // through different BtpEndpoint objects with different send queues, and
     // a slot's whole point is to keep one origin's line editing/output
     // isolated from another's (see this class's own comment above).
-    enum class LinkTarget : std::uint8_t { EspNow = 0U, Tcp = 1U };
+    enum class LinkTarget : std::uint8_t { EspNow = 0U, Tcp = 1U, Ble = 2U };
 
     // One reassembled, already-opened TERMINAL_IN payload from `header`'s
     // origin, arriving on `target`. Runs on the Wi-Fi RX task: it only
@@ -112,6 +112,21 @@ public:
     // exists. Idempotent, and safe even if bind_tcp_target() was never
     // called.
     void unbind_tcp_target() noexcept;
+
+    // Binds a THIRD send target for a live direct-BLE session (T33/T34) --
+    // same shape as bind_tcp_target() above, kept separate rather than
+    // reused for the same reason TelemetryPublisher's bind_ble_target() is
+    // (see its own comment): comm_mode makes TCP and BLE mutually exclusive
+    // in practice, but nothing here relies on that. Every origin whose
+    // on_terminal_in() arrives tagged LinkTarget::Ble has its echo/prompt/
+    // output emitted through THIS endpoint. Call once per accepted BLE
+    // connection.
+    void bind_ble_target(BtpEndpoint& endpoint, BtpSealFn seal,
+                         void* seal_context) noexcept;
+
+    // Reverses bind_ble_target() (onBleDisconnect()) AND evicts every
+    // BLE-origin slot -- same contract as unbind_tcp_target().
+    void unbind_ble_target() noexcept;
 
     // Advances every active origin: drains its buffered input through the
     // editor, emits whatever it echoed as TERMINAL_OUT frame(s), submits any
@@ -233,6 +248,11 @@ private:
     BtpEndpoint* tcp_endpoint_ = nullptr;
     BtpSealFn tcp_seal_ = nullptr;
     void* tcp_seal_context_ = nullptr;
+    // BLE target (bind_ble_target()/unbind_ble_target(), T33/T34) -- same
+    // tolerated-cross-task-race posture as tcp_endpoint_ above.
+    BtpEndpoint* ble_endpoint_ = nullptr;
+    BtpSealFn ble_seal_ = nullptr;
+    void* ble_seal_context_ = nullptr;
     ShellLineEditor::CompletionProvider completion_;
     SubmitFn submit_ = nullptr;
     void* submit_context_ = nullptr;

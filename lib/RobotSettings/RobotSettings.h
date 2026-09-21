@@ -126,6 +126,18 @@ struct SettingsData {
     char ota_instance_name[OTA_MDNS_NAME_MAX_LEN] = "BallyRobot OTA";
     char ota_password[OTA_PASSWORD_MAX_LEN]       = "657585";
 
+    // -------- comm (T25b, TAREFAS_TCP_BLE_ANDROID.txt: boot-time
+    // communication mode selector, COMM_CONFIG state) --------
+    // 0=ESP-NOW (default -- a settings.conf written before this field
+    // existed has no "comm.comm_mode" line, load() leaves this at its
+    // compiled-in default, so an existing robot's behaviour is unchanged),
+    // 1=TCP, 2=BLE (reserved, not implemented yet -- ROBOT::init() falls
+    // back to 0 and logs a warning), 3=none (fully offline: no ESP-NOW, no
+    // Wi-Fi). Applied at boot only (ROBOT::init()'s comm_mode dispatch) --
+    // changing it live via "settings -set comm comm_mode N" takes effect on
+    // the next reboot, same as COMM_CONFIG's own btn0-confirm.
+    uint8_t comm_mode = 0;
+
     // -------- error (ERROR state LED indication) --------
     // Half-period of the synchronized all-LEDs blink shown in ERROR (see
     // ROBOT::blinkErrorLeds()); 250ms -> 2Hz full on/off cycle.

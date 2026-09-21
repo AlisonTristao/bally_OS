@@ -298,8 +298,40 @@ uint16_t OTAUpdater::network_count() const {
 // Scan / connect / serve state machine
 // ==============================================================================
 
-bool OTAUpdater::start() {
-    if (phase_.load(std::memory_order_acquire) != Phase::IDLE) return true;
+bool OTAUpdater::begin_scanning(bool direct_mode, const char* log_verb) {
+    if (phase_.load(std::memory_order_acquire) != Phase::IDLE) {
+        // T25b: a real "ota start" (direct_mode=false) arriving while
+        // comm_mode's own background connection (direct_mode_==true,
+        // startDirect()) is already up must not silently no-op -- the
+        // operator explicitly asked for the upload endpoint by entering
+        // DEBUG and running it. Upgrade in place instead of the plain
+        // "already active" early return this used to be unconditionally:
+        // if already connected, start the HTTP server right now; if still
+        // connecting, just stop suppressing it so process()'s CONNECTING
+        // branch takes the normal (HTTP-serving) path once it lands.
+        // Never the other direction -- startDirect() arriving while a real
+        // upload session is already active leaves it alone.
+        if (!direct_mode && direct_mode_) {
+            direct_mode_ = false;
+            if (phase_.load(std::memory_order_acquire) == Phase::SERVING) {
+                if (start_http_server()) {
+                    log(logType::INFO,
+                        "OTA: upgraded the existing direct connection to '%s' at "
+                        "%s, now serving updates",
+                        connected_ssid_, connected_ip_);
+                } else {
+                    log(logType::ERRO,
+                        "OTA: connected to '%s' but the HTTP server failed to start",
+                        connected_ssid_);
+                    fail_candidate();
+                }
+            } else {
+                log(logType::INFO,
+                    "OTA: will serve updates once the existing connection lands");
+            }
+        }
+        return true;
+    }
 
     if (card_ == nullptr || !card_->is_mounted()) {
         log(logType::ERRO, "OTA: cannot start, SD card is not mounted for the robot");
@@ -312,6 +344,7 @@ bool OTAUpdater::start() {
         return false;
     }
 
+    direct_mode_ = direct_mode;
     scan_done_.store(false, std::memory_order_relaxed);
     got_ip_.store(false, std::memory_order_relaxed);
     disconnected_.store(false, std::memory_order_relaxed);
@@ -333,11 +366,19 @@ bool OTAUpdater::start() {
     // scheduled", regardless of whether it landed on the first try.
     phase_.store(Phase::SCANNING, std::memory_order_release);
 
-    log(logType::INFO, "OTA: started, scanning for %u known network(s)%s",
+    log(logType::INFO, "OTA: %s, scanning for %u known network(s)%s", log_verb,
         static_cast<unsigned>(candidate_count_),
         scan_in_flight_ ? "" : " (initial scan failed to start, retrying)");
 
     return true;
+}
+
+bool OTAUpdater::start() {
+    return begin_scanning(/*direct_mode=*/false, "started");
+}
+
+bool OTAUpdater::startDirect() {
+    return begin_scanning(/*direct_mode=*/true, "started (direct, no HTTP server)");
 }
 
 bool OTAUpdater::survey() {
@@ -509,7 +550,12 @@ void OTAUpdater::process(uint8_t button_flags) {
     const Phase phase = phase_.load(std::memory_order_acquire);
     if (phase == Phase::IDLE) return;
 
-    if (button_flags != 0 && !flashing_.load(std::memory_order_acquire)) {
+    // direct_mode_ (T25b, startDirect()) never cancels on a button: this
+    // connection is comm_mode's own background link, not an "ota start"
+    // session the operator explicitly entered, and normal WAIT/RUN button
+    // transitions elsewhere in the robot fire constantly.
+    if (button_flags != 0 && !flashing_.load(std::memory_order_acquire) &&
+        !direct_mode_) {
         cancel();
         return;
     }
@@ -532,7 +578,16 @@ void OTAUpdater::process(uint8_t button_flags) {
 
         case Phase::CONNECTING:
             if (got_ip_.exchange(false, std::memory_order_acq_rel)) {
-                if (start_http_server()) {
+                if (direct_mode_) {
+                    // T25b: comm_mode==TCP wants the Wi-Fi link, not the
+                    // firmware-upload endpoint -- see startDirect()'s own
+                    // comment for why that stays gated behind DEBUG+"ota
+                    // start".
+                    log(logType::INFO,
+                        "OTA: connected to '%s' at %s (direct mode, no HTTP server)",
+                        connected_ssid_, connected_ip_);
+                    phase_.store(Phase::SERVING, std::memory_order_release);
+                } else if (start_http_server()) {
                     log(logType::INFO, "OTA: connected to '%s' at %s, serving updates",
                         connected_ssid_, connected_ip_);
                     phase_.store(Phase::SERVING, std::memory_order_release);
@@ -586,6 +641,7 @@ void OTAUpdater::cancel() {
     candidate_index_ = 0;
     scan_in_flight_ = false;
     survey_only_ = false;
+    direct_mode_ = false;
 
     phase_.store(Phase::IDLE, std::memory_order_release);
 }

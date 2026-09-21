@@ -29,6 +29,7 @@
 #include <Logger.h>
 #include <BtpTransport.h>
 #include <TcpBtpServer.h>
+#include <BleBtpServer.h>
 #include <CommandProcessor.h>
 #include <ManifestCatalog.h>
 #include <TerminalResponder.h>
@@ -189,6 +190,40 @@ private:
     ROBOT& robot_;
 };
 
+// The btp::NodeConfig for ble_node_ (T33/T34, TAREFAS_TCP_BLE_ANDROID.txt) --
+// a direct-BLE control session's counterpart to RobotTcpLink above. Same
+// reasoning, verbatim: every message on this transport is channel B/key E,
+// with no MANIFEST_REQUEST-is-always-C special case (there is no dongle on
+// the other end of a BLE central either). Kept as its own class rather than
+// a flag on RobotTcpLink for the same load-bearing reason RobotTcpLink is
+// its own class and not a flag on RobotLink -- see that class's comment.
+class RobotBleLink : public btp::NodeConfig {
+public:
+    explicit RobotBleLink(ROBOT& robot) noexcept : robot_(robot) {}
+
+    // Routes to BleBtpServer::send() (the connected central), never
+    // tx_scheduler -- see BleBtpServer's own queueing/non-blocking contract.
+    bool send(const std::uint8_t* frame, std::size_t frame_size) override;
+
+    bool has_seal() const noexcept override { return true; }
+    bool seal(const btp::Header& header, std::uint16_t payload_size,
+              const std::uint8_t* plaintext, std::uint8_t* out) override;
+
+    bool has_open() const noexcept override { return true; }
+    bool open(const btp::Header& header, std::uint16_t sealed_size,
+              const std::uint8_t* sealed, std::uint8_t* out_plaintext) override;
+
+    bool has_terminal() const noexcept override { return true; }
+    void terminal(btp::Node& node, const btp::Header& header, btp::ByteView payload,
+                 std::uint64_t now_ms) override;
+
+    void reply_seal(const btp::Header& request_header, btp::EndpointSealFn* out_seal,
+                    void** out_seal_ctx) override;
+
+private:
+    ROBOT& robot_;
+};
+
 /**
  * @brief Non-blocking, periodic sample scheduler. Originally built for the
  * "debug" shell module's per-sensor tests (test_arr_sensor, test_encoder,
@@ -296,6 +331,9 @@ class ROBOT {
     // tcp_server_ (send()) and terminal_responder the same way RobotLink
     // reaches this class's private members.
     friend class RobotTcpLink;
+    // protocol_link_ble_ (ble_node_'s btp::NodeConfig, T33/T34) -- same
+    // reasoning as RobotTcpLink, for ble_server_ instead of tcp_server_.
+    friend class RobotBleLink;
 
 public:
     // singleton pattern
@@ -444,9 +482,34 @@ public:
     // which are unaffected and still work the normal way.
     stateName bootState() const { return boot_state_; }
 
+    // False only for comm_mode==3 (none) -- see radio_enabled_'s own
+    // comment. Guards main.cpp's two esp_now_send() call sites.
+    bool radioEnabled() const { return radio_enabled_; }
+
     // Keep selected shell responses out of the retained PSRAM log.
     void sendNextShellOutputDirect();
     bool consumeDirectShellOutputRequest();
+
+    // ---- COMM_CONFIG (T25b, TAREFAS_TCP_BLE_ANDROID.txt, ETAPA 3B) ----
+    //
+    // Action function for the COMM_CONFIG state (src/robot/09_CommConfig.cpp
+    // just forwards to this). Lives here, not in src/robot/, for the same
+    // reason blinkErrorLeds()/processDebug() do: it needs leds/buttons/
+    // settings/sd_card, all private/ROBOT-owned. Called once per
+    // state-machine task pass while current_state == COMM_CONFIG (i.e. quite
+    // often -- see StateMachine::run()), so button edge-detection here uses
+    // its own lightweight debounce rather than anything that assumes a slow
+    // cadence.
+    //
+    // Menu: btn1 advances the selection (0->1->2->3->0 = ESP-NOW/TCP/BLE/
+    // none), btn2 goes back, btn0 confirms (persists RobotSettings'
+    // "comm.comm_mode" and reboots), ~30s with no button press exits without
+    // saving and reboots anyway (never leaves the robot stuck in this menu).
+    // Always returns COMM_CONFIG -- the only ways out are the two reboots
+    // above, never a live state transition (see the note next to
+    // transitionTable in StatesManager.h for why a button-driven row here
+    // would be actively wrong, not just redundant).
+    stateName commConfigTick();
 
     // Bound to esp_register_shutdown_handler() in init(): esp_restart()'s
     // shutdown_handler_t is a plain void(*)(void), no context parameter, so
@@ -507,6 +570,29 @@ private:
     uint8_t   previous_side_sensors_ = 0; // sideSensors.getFlags() as of the last call
     stateName previous_state_ = NONE;     // StateMachine::current_state as of the last call
 
+    // ---- COMM_CONFIG menu state (T25b), owned by commConfigTick() ----
+    // comm_config_active_ latches true on the first commConfigTick() call
+    // after entering COMM_CONFIG (one-time setup: seed comm_config_selected_
+    // from the persisted comm_mode, prime the edge trackers below to the
+    // CURRENT button levels so a button already held the instant the state
+    // is entered -- e.g. btn0, still down from the SETUP hold that got here
+    // -- is not misread as a fresh press). Never reset back to false during
+    // a boot: COMM_CONFIG is only ever entered once per boot (every exit is
+    // a reboot), so there is nothing to re-arm.
+    bool     comm_config_active_ = false;
+    bool     comm_config_restart_scheduled_ = false; // guards scheduling the reboot timer twice
+    uint8_t  comm_config_selected_ = 0;              // 0..3, currently displayed option
+    uint32_t comm_config_last_activity_ms_ = 0;
+    // Simple "already processed this edge" debounce per button -- see
+    // commConfigTick()'s own comment for why this is deliberately simpler
+    // than the interrupts task's ANYEDGE ISR debounce.
+    bool     comm_config_btn0_was_low_ = false;
+    bool     comm_config_btn1_was_low_ = false;
+    bool     comm_config_btn2_was_low_ = false;
+    uint32_t comm_config_last_btn0_edge_ms_ = 0;
+    uint32_t comm_config_last_btn1_edge_ms_ = 0;
+    uint32_t comm_config_last_btn2_edge_ms_ = 0;
+
     // save a instance of the ROBOT class to be used in the static functions
     static ROBOT* instance_;
     bool initialized = false;
@@ -520,6 +606,34 @@ private:
     // and wifi/esp-now bring-up is not safe to redo (esp_wifi_init(),
     // esp_now_init(), esp_now_add_peer()... all error/warn on a second call).
     bool communication_configured_ = false;
+
+    // False only when comm_mode (RobotSettings, module "comm") is 3 (none)
+    // -- set once in init(), never toggled at runtime (comm_mode is
+    // apply-on-reboot only, see its own comment in RobotSettings.h). Set
+    // BEFORE configureCommunication() is skipped for that mode, so main.cpp's
+    // two esp_now_send() call sites (the only ones in this codebase -- grep-
+    // confirmed) can fail soft via radioEnabled() instead of assuming
+    // esp_now_init() ran. Chosen over auditing every TxScheduler/BtpTransport
+    // call site individually: everything upstream of those two lambdas
+    // (RobotLink::send() -> TxScheduler::enqueue(), TxScheduler::pump()'s
+    // send callback) is either pure queuing (never touches the radio) or
+    // ESP-IDF's own esp_now_send()/esp_wifi_* APIs, which already return
+    // ESP_ERR_*_NOT_INIT rather than crash when called before their driver
+    // is initialized (documented ESP-IDF behaviour, not assumed) -- this
+    // flag is a cheap, explicit, self-documenting belt on top of that, not
+    // the only thing standing between comm_mode==3 and a crash.
+    bool radio_enabled_ = true;
+
+    // The comm_mode (RobotSettings, "comm.comm_mode") this boot actually
+    // resolved to, set once at the end of init()'s dispatch block (T25b/
+    // T33/T34) -- 0..3 always, out-of-range/unimplemented values already
+    // resolved to their fallback by then. Exists so
+    // bindProtocolTransport() (called later, from main.cpp's
+    // setup_system_callbacks(), once TxScheduler/ble_local_hello_/this
+    // robot's protocol identity are ready) can start ble_server_ at the
+    // right time -- see init()'s own comment on why starting it any earlier
+    // would race that identity.
+    std::uint8_t effective_comm_mode_ = 0U;
 
     // 16-byte opaque identity handed to node_->serve_catalog() (topico 16),
     // derived from base_mac in configureProtocolIdentity() -- this robot has
@@ -799,6 +913,14 @@ private:
         // DIFFERENT connection's tcp_node_ (wrong recipient) or, worse, is
         // still bound to the just-destroyed one (use-after-free).
         uint32_t tcp_generation = 0U;
+        // Same shape as from_tcp/tcp_generation above, for a COMMAND_REQUEST
+        // that arrived over the direct BLE session (T33/T34) instead --
+        // mutually exclusive with from_tcp in practice (comm_mode selects
+        // exactly one direct transport per boot), but kept as its own pair
+        // rather than reusing from_tcp/tcp_generation: a future comm_mode
+        // that allows both at once must not have to re-plumb this struct.
+        bool from_ble = false;
+        uint32_t ble_generation = 0U;
     };
 
     // cache_slot for a command that did not come from the radio: a job firing
@@ -1071,8 +1193,10 @@ private:
 
     // Starts/stops tcp_server_ to match OTAUpdater's own Wi-Fi lifecycle --
     // see this method's definition (BallyRobot.cpp) for the reasoning this
-    // is deliberately NOT a new, independent trigger. Called once per DEBUG
-    // pass from processDebug(), after ota.process().
+    // is deliberately NOT a new, independent trigger. Called from routine()
+    // every pass, regardless of state (T25b: moved out of processDebug(),
+    // which only ran while DEBUG was active -- see routine()'s own comment),
+    // right after ota.process().
     void updateTcpServerLifecycle();
 
     // TcpBtpServer::ConnectCallback: a new active TCP client was just
@@ -1134,6 +1258,74 @@ private:
     // whatever this one negotiated -- see tcp_node_'s own comment.
     static void onTcpDisconnectStatic(void* context) noexcept;
     void onTcpDisconnect();
+
+    // ---- Direct BLE BTP session (T33/T34, TAREFAS_TCP_BLE_ANDROID.txt) ----
+    //
+    // Mirrors the direct-TCP block above field-for-field, method-for-method
+    // -- same reasoning throughout (a SEPARATE btp::Node so enabling a
+    // session cannot gate ESP-NOW's own HELLO-less traffic, connection-
+    // scoped so a new central never inherits state from a previous one),
+    // except there is no TcpBusyResponder/pending-connection equivalent:
+    // BLE's second-session rejection happens at the GAP level, inside
+    // BleBtpServer itself (T04's decision -- see that class's own comment),
+    // so a second central is never even able to reach GATT, let alone send
+    // a HELLO this robot would have to decode and reject.
+    static constexpr std::uint64_t kBleNodeReassemblyTimeoutMs = 5000U;
+    static constexpr std::uint64_t kBleHelloDeadlineMs = 2000U;
+
+    BleBtpServer ble_server_;
+    RobotBleLink protocol_link_ble_{*this};
+    std::optional<ProtocolNode> ble_node_;
+    std::atomic<std::uint32_t> ble_session_generation_{0U};
+    BtpEndpoint protocol_ble_;
+    // T23's same split as protocol_tcp_/protocol_tcp_telemetry_, for the
+    // same reason: a distinct send callback (bleTelemetrySendStatic) lets
+    // BleBtpServer::send() tell a TELEMETRY frame apart from COMMAND_RESULT/
+    // TERMINAL_OUT/catalog replies at admission time, without decoding BTP
+    // inside BleBtpServer (which stays BTP-unaware, like TcpBtpServer).
+    BtpEndpoint protocol_ble_telemetry_;
+    // This robot's HELLO advertisement for the direct-BLE responder role --
+    // built once in bindProtocolTransport(), reused on every accepted
+    // connection (onBleConnect()). No busy-responder equivalent needs it a
+    // second way, unlike tcp_local_hello_.
+    btp::Hello ble_local_hello_{};
+
+    // BleBtpServer::ConnectCallback: a central just connected (never a
+    // second, concurrent one -- see the class comment). Emplaces ble_node_
+    // fresh, populates its catalogue, binds protocol_ble_/
+    // protocol_ble_telemetry_, enable_session()s + arm_session()s it.
+    static void onBleConnectStatic(void* context) noexcept;
+    void onBleConnect();
+
+    // protocol_ble_'s send callback (btp::EndpointSendFn) -- forwards to
+    // ble_server_.send(), FramePriority::Normal (BleBtpServer::send()'s
+    // default).
+    static bool bleEndpointSendStatic(void* context, const std::uint8_t* frame,
+                                      std::size_t size) noexcept;
+    // protocol_ble_telemetry_'s send callback (mirrors tcpTelemetrySendStatic).
+    static bool bleTelemetrySendStatic(void* context, const std::uint8_t* frame,
+                                       std::size_t size) noexcept;
+
+    // BleBtpServer::ReceiveCallback for the connected central: feeds bytes
+    // into ble_node_->receive(), same shape as onTcpReceive()'s body (a
+    // COMMAND_REQUEST is the one message type btp::Node does not answer by
+    // itself, dispatched by hand into the SAME command_processor instance
+    // every other transport uses).
+    static void onBleReceiveStatic(void* context, const std::uint8_t* data,
+                                   std::size_t size) noexcept;
+    void onBleReceive(const std::uint8_t* data, std::size_t size);
+
+    // Mirrors processTcpCommandRequest()'s body for a COMMAND_REQUEST
+    // decoded off the BLE session -- channel is always B_Endpoint (no
+    // C_Link case on this transport either), tagged from_ble/ble_generation
+    // so runShell() answers through protocol_ble_ instead of ESP-NOW/TCP.
+    void processBleCommandRequest(const btp::Header& header, btp::ByteView payload);
+
+    // BleBtpServer::DisconnectCallback: the connected central is gone.
+    // Tears ble_node_ down (std::optional::reset()) so the next connection
+    // starts from Idle.
+    static void onBleDisconnectStatic(void* context) noexcept;
+    void onBleDisconnect();
 
     // Two tasks touch node_ once it exists, and it holds no lock: receive()
     // from the ESP-NOW receive callback, tick()'s reassembly sweep once a
