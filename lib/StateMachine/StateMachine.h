@@ -21,8 +21,8 @@ enum stateName {
     TELEMETRY   = 7,
     ERROR       = 8,
     // T25b (TAREFAS_TCP_BLE_ANDROID.txt, ETAPA 3B): boot-time communication
-    // mode selector menu, entered from SETUP by holding btn0 (BOOT/GPIO0)
-    // for ~1.5s right after boot. See src/robot/09_CommConfig.cpp.
+    // mode selector menu, entered straight from boot by holding btn1+btn2
+    // through reset (ROBOT::init()). See src/robot/09_CommConfig.cpp.
     COMM_CONFIG = 9,
 
     NUMBER_OF_STATES // put the states before this line

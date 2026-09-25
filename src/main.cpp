@@ -172,9 +172,8 @@ static void setup_system_callbacks() {
     // composition root never has to include application state policy.
     states.register_shell_commands(robot.shell, robot.logger);
 
-    // Start the state machine in SETUP, unless robot.init() already jumped
-    // straight into DEBUG because button 1/2 was held at boot (see
-    // ROBOT::bootState()).
+    // Start the state machine in SETUP, unless a boot-time button chord
+    // picked OTA/USB storage (DEBUG) or COMM_CONFIG (see ROBOT::bootState()).
     robot.machine.current_state.store(robot.bootState(), std::memory_order_release);
 
     // verify that all the callbacks for the state machine are properly configured before starting the tasks

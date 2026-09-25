@@ -364,6 +364,19 @@ O robô é controlado por uma máquina de estados robusta, com funcionamento def
 - Caso ocorra qualquer problema na gestão dos estados (ex: função não definida, erro de transição), a máquina de estados automaticamente coloca o sistema no estado ERROR e notifica o erro no logger, garantindo segurança e rastreabilidade.
 - Tanto as funções principais quanto as de transição podem ser customizadas conforme a aplicação.
 
+#### Modos de boot (botões segurados no reset)
+
+Segure o(s) botão(ões) **antes** de resetar/ligar e só solte quando os LEDs mostrarem o modo. Tudo é decidido num único ponto, em `ROBOT::init()`:
+
+| Botões no reset | Modo | Saída |
+|---|---|---|
+| btn1 + btn2 | `COMM_CONFIG` — escolher `comm_mode` (LED azul=ESP-NOW, verde=TCP, amarelo=BLE, vermelho=nenhum) | btn1 próximo, btn2 anterior, **BOOT (btn0) confirma**, salva e reinicia; 30 s parado reinicia sem salvar |
+| só btn2 | OTA (`DEBUG` + `ota start`) | reboot após upload ou botão |
+| só btn1 | USB storage (`DEBUG` + `storage expose`) | btn2 devolve o cartão |
+| nenhum | `SETUP` → `WAIT` | — |
+
+O BOOT (btn0/GPIO0) nunca entra nessa escolha: segurá-lo no reset põe o chip no bootloader da ROM. Com `comm_mode` BLE ou nenhum o Wi-Fi não sobe, então o OTA por botão não funciona — use `COMM_CONFIG` para voltar a ESP-NOW/TCP.
+
 ## Dependências externas
 
 - **TinyShell** (adicionada via `lib_deps` no platformio.ini):

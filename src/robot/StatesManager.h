@@ -34,13 +34,9 @@ inline constexpr Transition transitionTable[] = {
 // note: SETUP, CALIBRATE and TELEMETRY are not listed above — all three
 // decide their own next state from inside their own action function (see
 // setup_function()/calibrate_function()/telemetry_function()), bypassing
-// this table entirely. SETUP used to have a { SETUP, BIT_0, WAIT } row here,
-// but it was removed (T25b): setup_function() now polls btn0's raw level for
-// up to ~1.5s to decide between WAIT and the new COMM_CONFIG state, and a
-// leftover button-driven row here would race that decision from the OTHER
-// task that drives this table (routine()'s checkStateMachine(), every
-// delay_flags ms) — the exact button press SETUP is waiting out would also
-// match this row and jump straight to WAIT out from under it.
+// this table entirely. SETUP goes straight to WAIT; the boot-time modes
+// (OTA, USB storage, COMM_CONFIG) are chosen before SETUP ever runs, by the
+// buttons held through reset (ROBOT::init()).
 //
 // COMM_CONFIG is also not listed: it deliberately has no button-driven
 // transition out at all (see 09_CommConfig.cpp) — the only ways out are a

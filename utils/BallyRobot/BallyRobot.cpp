@@ -3458,22 +3458,31 @@ bool ROBOT::init() {
 
     const SettingsData& cfg = settings.data();
 
-    // Boot-time sub-mode select, in addition to the DEBUG-state shell
-    // commands ("ota start" / "storage expose") which still work the normal
-    // way. Read right after configurePinsFromSettings() configured the
-    // button pins with a pull-up (pressed reads LOW) and before anything
-    // else can move; actually acted on further down, once OTA/USB storage
-    // themselves are ready (see ota.begin()/usb_storage.begin() below).
+    // Boot-time sub-mode select -- the ONE place every "hold a button at
+    // power-up" mode is decided. Hold the button(s) BEFORE resetting and
+    // keep them down until the LEDs show the mode:
+    //
+    //   btn1 + btn2 -> COMM_CONFIG (comm_mode menu, see commConfigTick())
+    //   btn2 only   -> OTA          (same as "ota start" in DEBUG)
+    //   btn1 only   -> USB storage  (same as "storage expose" in DEBUG)
+    //   nothing     -> SETUP -> WAIT, normal boot
+    //
+    // Read right after configurePinsFromSettings() configured the button
+    // pins with a pull-up (pressed reads LOW); acted on further down, once
+    // OTA/USB storage themselves are ready (see ota.begin() below).
     //
     // cfg.btn0 is deliberately NOT used here: it defaults to GPIO0, the
     // ESP32-S3 boot strapping pin (see RobotSettings.h). Holding it while
     // the chip comes out of reset selects Joint Download Boot in ROM, so
-    // the application never runs at all and this code is never reached --
-    // the boot-time sub-mode select only works on non-strapping buttons.
-    // OTA (cfg.btn2) wins if both are held.
-    const bool boot_enter_ota = gpio_get_level(static_cast<gpio_num_t>(cfg.btn2)) == 0;
-    const bool boot_enter_storage = !boot_enter_ota &&
-        gpio_get_level(static_cast<gpio_num_t>(cfg.btn1)) == 0;
+    // the application never runs at all. COMM_CONFIG used to be entered by
+    // pressing btn0 inside a short window after SETUP started, but init()
+    // takes a variable, invisible amount of time, so in practice nobody
+    // could hit that window -- hence the btn1+btn2 chord instead.
+    const bool boot_btn1 = gpio_get_level(static_cast<gpio_num_t>(cfg.btn1)) == 0;
+    const bool boot_btn2 = gpio_get_level(static_cast<gpio_num_t>(cfg.btn2)) == 0;
+    const bool boot_enter_comm_config = boot_btn1 && boot_btn2;
+    const bool boot_enter_ota = boot_btn2 && !boot_btn1;
+    const bool boot_enter_storage = boot_btn1 && !boot_btn2;
 
     array_sensor.emplace(cfg.s0, cfg.s1, cfg.s2, cfg.sig, cfg.len_sensor);
     // After array_sensor above: if cfg.current_a shares a physical ADC unit
@@ -3552,8 +3561,9 @@ bool ROBOT::init() {
     // working on a robot configured comm_mode==none OR comm_mode==BLE. This
     // follows directly from T25b's "não suba... Wi-Fi" taken literally for
     // these modes; a robot painted into that corner still has a way out
-    // (COMM_CONFIG: hold btn0 ~1.5s after boot, switch back to ESP-NOW/TCP,
+    // (COMM_CONFIG: hold btn1+btn2 at boot, switch back to ESP-NOW/TCP,
     // reboot), just not the one-button escape the other two sub-modes have.
+    // (COMM_CONFIG itself needs no radio, so it works in every comm_mode.)
     if (effective_comm_mode == 3U) {
         radio_enabled_ = false;
         logger.insert_log(
@@ -3589,7 +3599,13 @@ bool ROBOT::init() {
     // once the corresponding sub-mode actually starts, so a stray held
     // button with no stored Wi-Fi network (OTA) or no SD card (storage)
     // just boots normally instead of stranding the robot in DEBUG.
-    if (boot_enter_ota) {
+    if (boot_enter_comm_config) {
+        // Needs nothing to "start" -- the state itself is the menu -- so,
+        // unlike OTA/storage below, it can never fail back to SETUP.
+        boot_state_ = COMM_CONFIG;
+        logger.insert_log(logType::INFO,
+                          "Boot: buttons 2+3 held, entering COMM_CONFIG");
+    } else if (boot_enter_ota) {
         if (ota.start()) {
             boot_state_ = DEBUG;
             logger.insert_log(logType::INFO,
@@ -3627,6 +3643,9 @@ bool ROBOT::init() {
     // operator explicitly asked for (holding btn2 at boot) would silently
     // never start.
     //
+    // Also skipped for COMM_CONFIG: that boot only ever ends in a reboot,
+    // so bringing Wi-Fi up for it would be wasted work.
+    //
     // Also skipped when boot_enter_storage won: USB MSC now owns the SD
     // card (see usb_storage.expose() above), and startDirect() needs to read
     // OTA_WIFI_LIST_FILE off it just like start() does -- same reasoning,
@@ -3636,7 +3655,8 @@ bool ROBOT::init() {
     // ota.process()/updateTcpServerLifecycle() (which starts TcpBtpServer
     // once phase() reaches SERVING) are ticked from routine() every pass
     // regardless of state now -- see its own comment there.
-    if (effective_comm_mode == 1U && !boot_enter_ota && !boot_enter_storage) {
+    if (effective_comm_mode == 1U && !boot_enter_ota && !boot_enter_storage &&
+        !boot_enter_comm_config) {
         if (ota.startDirect()) {
             logger.insert_log(
                 logType::INFO,
@@ -3708,7 +3728,13 @@ bool ROBOT::init() {
                                   kImuInitAttempts, imu_begin_ret);
         ESP_LOGE("ROBOT_INIT", "Failed to initialize IMU after %d attempt(s) (begin()=%d)",
                 kImuInitAttempts, imu_begin_ret);
-        return false;
+        // Not fatal, same as the buzzer below: everything that reads the
+        // IMU already checks imu_ready_ (sampleEKF(), the DEBUG shell
+        // commands). Returning false here made app_main retry init()
+        // forever -- init() is not re-entrant (GPIO ISR service, ADC unit
+        // and OTA event handlers are already claimed on the second pass),
+        // so a missing/flaky IMU left the robot dead in that loop and
+        // unreachable even through OTA, USB storage or COMM_CONFIG.
     }
 
     // Not fatal: a buzzer that fails to configure just means no music, not

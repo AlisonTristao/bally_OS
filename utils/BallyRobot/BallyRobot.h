@@ -471,9 +471,10 @@ public:
     // Call once per pass; non-blocking.
     void blinkErrorLeds();
 
-    // DEBUG when init() found button 3 / cfg.btn2 (OTA) or button 2 /
-    // cfg.btn1 (USB storage) held at boot and actually managed to start that
-    // sub-mode; SETUP otherwise. cfg.btn0 can't be used for this: it is
+    // COMM_CONFIG when init() found both cfg.btn1 and cfg.btn2 held at
+    // boot; DEBUG when only button 3 / cfg.btn2 (OTA) or only button 2 /
+    // cfg.btn1 (USB storage) was held and that sub-mode actually started;
+    // SETUP otherwise. cfg.btn0 can't be used for this: it is
     // GPIO0, the boot strapping pin -- holding it at reset drops the chip
     // into ROM download mode instead of running the firmware.
     // Read once by main.cpp, right after init() returns, to pick the state
@@ -575,8 +576,8 @@ private:
     // after entering COMM_CONFIG (one-time setup: seed comm_config_selected_
     // from the persisted comm_mode, prime the edge trackers below to the
     // CURRENT button levels so a button already held the instant the state
-    // is entered -- e.g. btn0, still down from the SETUP hold that got here
-    // -- is not misread as a fresh press). Never reset back to false during
+    // is entered -- e.g. btn1/btn2, still down from the boot-time chord that
+    // got here (ROBOT::init()) -- is not misread as a fresh press). Never reset back to false during
     // a boot: COMM_CONFIG is only ever entered once per boot (every exit is
     // a reboot), so there is nothing to re-arm.
     bool     comm_config_active_ = false;
