@@ -1326,6 +1326,60 @@ void test_telemetry_multi_target_isolates_esp_now_and_tcp_subscribers() {
     TEST_ASSERT_EQUAL_UINT32(2U, tcp_sent_count);  // TCP no longer a target
 }
 
+void test_ble_subscription_drives_periodic_production_and_unbind() {
+    sent_count = 0U;
+    tcp_sent_count = 0U;
+    BtpEndpoint base_endpoint;
+    BtpEndpoint ble_endpoint;
+    TEST_ASSERT_TRUE(base_endpoint.configure(kLocalSource, kLocalBoot));
+    TEST_ASSERT_TRUE(ble_endpoint.configure(kLocalSource, kLocalBoot));
+    base_endpoint.set_send_callback(capture_send);
+    ble_endpoint.set_send_callback(capture_tcp_send);
+    SubscriptionFixture<4> base_subs;
+    SubscriptionFixture<4> ble_subs;
+    const auto catalog = make_telemetry_catalog();
+    TelemetryPublisher publisher;
+    publisher.configure(base_endpoint);
+    publisher.bind_subscriptions(base_subs.table);
+    publisher.bind_ble_target(ble_endpoint, nullptr, nullptr, ble_subs.table);
+    constexpr auto topic = TelemetryPublisher::kProtocolTestTopicId;
+    btp::SubscribeResult result{};
+    ble_subs.table.handle_subscribe(catalog, subscribe_header(0xBBBBU, 1U, 1U),
+        make_subscribe(topic, 50000U, 5000U), 0U, &result);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(btp::ResultStatus::Success), result.status);
+
+    // Production uses the same period gate as ROBOT::sampleTelemetry().
+    const auto period = publisher.topic_period_us(topic);
+    TEST_ASSERT_EQUAL_UINT64(20000U, period);
+    TEST_ASSERT_TRUE(publisher.topic_active(topic));
+    TEST_ASSERT_EQUAL_UINT16(1U, publisher.topic_subscriber_count(topic));
+    TEST_ASSERT_EQUAL_UINT32(1U, publisher.active_subscription_count());
+    if (period != 0U) publisher.publish_protocol_test(1U, 1.0f, period);
+    TEST_ASSERT_EQUAL_UINT32(1U, publisher.flush(1U));
+    TEST_ASSERT_EQUAL_UINT32(0U, sent_count);
+    TEST_ASSERT_EQUAL_UINT32(1U, tcp_sent_count);
+
+    base_subs.table.handle_subscribe(catalog, subscribe_header(0xAAAAU, 1U, 1U),
+        make_subscribe(topic, 10000U, 5000U), 0U, &result);
+    TEST_ASSERT_EQUAL_UINT16(2U, publisher.topic_subscriber_count(topic));
+    TEST_ASSERT_EQUAL_UINT32(50000U, publisher.topic_effective_rate_millihz(topic));
+    publisher.publish_protocol_test(2U, 2.0f, 40000U);
+    publisher.flush(1U);
+    TEST_ASSERT_EQUAL_UINT32(1U, sent_count);
+    TEST_ASSERT_EQUAL_UINT32(2U, tcp_sent_count);
+
+    publisher.unbind_ble_target();
+    TEST_ASSERT_EQUAL_UINT16(1U, publisher.topic_subscriber_count(topic));
+    TEST_ASSERT_EQUAL_UINT64(100000U, publisher.topic_period_us(topic));
+    publisher.publish_protocol_test(3U, 3.0f, 140000U);
+    publisher.flush(1U);
+    TEST_ASSERT_EQUAL_UINT32(2U, sent_count);
+    TEST_ASSERT_EQUAL_UINT32(2U, tcp_sent_count);
+    base_subs.table.expire(5001U);
+    TEST_ASSERT_FALSE(publisher.topic_active(topic));
+    TEST_ASSERT_EQUAL_UINT64(0U, publisher.topic_period_us(topic));
+}
+
 // PASSO 8/9: bytes and drops are measured per topic and reach the wire as the
 // 28-octet topic_status records of commands.md section 5.1.
 void test_topic_status_is_measured_and_serialized() {
@@ -1772,6 +1826,7 @@ int main(int, char**) {
     RUN_TEST(test_topic_keeps_publishing_until_the_last_consumer_leaves);
     RUN_TEST(test_lease_expiry_and_new_boot_id_end_a_session);
     RUN_TEST(test_telemetry_multi_target_isolates_esp_now_and_tcp_subscribers);
+    RUN_TEST(test_ble_subscription_drives_periodic_production_and_unbind);
     RUN_TEST(test_topic_status_is_measured_and_serialized);
     RUN_TEST(test_status_is_published_as_a_control_message);
     RUN_TEST(test_rate_control_changes_neither_timestamp_nor_schema);

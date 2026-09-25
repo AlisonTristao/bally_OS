@@ -196,7 +196,7 @@ void TelemetryPublisher::unbind_ble_target() noexcept {
 std::size_t TelemetryPublisher::collect_targets(
     TargetView out[kMaxTargets]) const noexcept {
     std::size_t n = 0U;
-    if (endpoint_ != nullptr) {
+    if (endpoint_ != nullptr || subscriptions_ != nullptr) {
         out[n++] = TargetView{endpoint_, seal_, seal_context_, subscriptions_};
     }
     if (tcp_endpoint_ != nullptr) {
@@ -328,6 +328,7 @@ std::size_t TelemetryPublisher::flush(std::size_t max_samples) noexcept {
         monitor_stage_.pending.load(std::memory_order_acquire)) {
         for (std::size_t i = 0U; i < target_count; ++i) {
             const TargetView& target = targets[i];
+            if (target.endpoint == nullptr) continue;
             if (target.subscriptions != nullptr &&
                 target.subscriptions->subscriber_count(kSystemMonitorTopicId) ==
                     0U) {
@@ -372,6 +373,7 @@ std::size_t TelemetryPublisher::flush(std::size_t max_samples) noexcept {
         // how many targets it reached.
         for (std::size_t i = 0U; i < target_count; ++i) {
             const TargetView& target = targets[i];
+            if (target.endpoint == nullptr) continue;
             if (target.subscriptions != nullptr &&
                 target.subscriptions->subscriber_count(sample.topic_id) ==
                     0U) {
@@ -612,15 +614,14 @@ bool TelemetryPublisher::topic_active(std::uint16_t topic_id) const noexcept {
 std::uint16_t TelemetryPublisher::topic_subscriber_count(
     std::uint16_t topic_id) const noexcept {
     if (topic_id == 0U) return 0U;
-    // Aggregate over BOTH tables (T22): the ESP-NOW peer and a direct TCP
-    // client are two independent audiences for the same topic (see
-    // bind_tcp_target()'s comment) -- either one bound is enough to count.
+    // Use the same target inventory as delivery, including BLE.
+    TargetView targets[kMaxTargets];
+    const auto target_count = collect_targets(targets);
     std::uint32_t count = 0U;
-    if (subscriptions_ != nullptr) {
-        count += subscriptions_->subscriber_count(topic_id);
-    }
-    if (tcp_subscriptions_ != nullptr) {
-        count += tcp_subscriptions_->subscriber_count(topic_id);
+    for (std::size_t i = 0U; i < target_count; ++i) {
+        if (targets[i].subscriptions != nullptr) {
+            count += targets[i].subscriptions->subscriber_count(topic_id);
+        }
     }
     return static_cast<std::uint16_t>(count);
 }
@@ -628,18 +629,15 @@ std::uint16_t TelemetryPublisher::topic_subscriber_count(
 std::uint32_t TelemetryPublisher::topic_effective_rate_millihz(
     std::uint16_t topic_id) const noexcept {
     if (topic_id == 0U) return 0U;
-    // Same aggregation rule flush()'s single-target predecessor already had
-    // for several ESP-NOW sessions behind the dongle: the fastest subscriber
-    // across EITHER table wins, so a slow one never throttles a fast one --
-    // now extended across the ESP-NOW/TCP table boundary too.
+    // The fastest subscribed destination determines the production period.
+    TargetView targets[kMaxTargets];
+    const auto target_count = collect_targets(targets);
     std::uint32_t rate = 0U;
-    if (subscriptions_ != nullptr) {
-        rate = subscriptions_->aggregate_rate_millihz(topic_id);
-    }
-    if (tcp_subscriptions_ != nullptr) {
-        const std::uint32_t tcp_rate =
-            tcp_subscriptions_->aggregate_rate_millihz(topic_id);
-        if (tcp_rate > rate) rate = tcp_rate;
+    for (std::size_t i = 0U; i < target_count; ++i) {
+        if (targets[i].subscriptions != nullptr) {
+            const auto target_rate = targets[i].subscriptions->aggregate_rate_millihz(topic_id);
+            if (target_rate > rate) rate = target_rate;
+        }
     }
     return rate;
 }
@@ -649,7 +647,7 @@ std::size_t TelemetryPublisher::active_subscription_count() const noexcept {
     const TopicSchema* schema_list = schemas(&schema_count);
     std::size_t count = 0U;
     for (std::size_t i = 0U; i < schema_count; ++i) {
-        // topic_subscriber_count() already aggregates both tables.
+        // topic_subscriber_count() already aggregates all destinations.
         count += topic_subscriber_count(schema_list[i].topic_id);
     }
     return count;

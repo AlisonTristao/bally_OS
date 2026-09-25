@@ -414,8 +414,10 @@ private:
         const btp::SubscriptionTable* subscriptions;
     };
     static constexpr std::size_t kMaxTargets = 3U;
-    // Writes up to kMaxTargets currently-configured targets into `out`
-    // (index 0 ESP-NOW when endpoint_ is set, then TCP when tcp_endpoint_ is
+    // Writes up to kMaxTargets currently-configured targets into `out`.
+    // A base subscription table may be bound before its endpoint: include
+    // it for rate/count queries; delivery skips a null endpoint.
+    // (index 0 ESP-NOW when endpoint_ or subscriptions_ is set, then TCP when tcp_endpoint_ is
     // set, then BLE when ble_endpoint_ is set) and returns how many were
     // written. In practice at most two of the three are ever set at once
     // (comm_mode picks exactly one of ESP-NOW/TCP/BLE per boot -- see
