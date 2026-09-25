@@ -129,7 +129,7 @@ Links fixos: `0 = ESP-NOW`, `1 = TCP`, `2 = BLE`.
 (69,5% → 64,2%). A economia vem de 2 × catálogo, 2 × scratch de manifest, 2 × seal scratch e 2 × caches de
 comando. A flash fica praticamente igual.
 
-**Achado fora do escopo:** o caminho principal de TCP/BLE do robô entrega os bytes crus ao `receive()` e
+**Achado fora do escopo (corrigido no commit seguinte, StreamFraming):** o caminho principal de TCP/BLE do robô entrega os bytes crus ao `receive()` e
 envia frames crus, mas a spec (fragmentation-and-transports §8/§9) e o TraceView usam stream enquadrado com
 COBS. Isso já existia antes deste item, e só o `TcpBusyResponder` faz COBS. Precisa ser confirmado em
 hardware e corrigido à parte, de preferência com um enquadramento de stream por link no próprio BTP.

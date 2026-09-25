@@ -24,8 +24,9 @@
 // <= (negotiated MTU - 3) chunks -- the exact mirror of what TraceView's own
 // BleTransport does for its writes (see that class's own comment for why
 // this is symmetric and correct: both ends just forward a raw byte stream,
-// and btp::Node's own COBS-stream decode on each side reassembles the frame
-// out of it, the same way it already does for TCP's raw socket bytes).
+// and each side's COBS stream decoder reassembles the frame out of it --
+// on the robot, ROBOT's StreamDeframer (lib/BtpTransport/StreamFraming.h),
+// the same one TCP's raw socket bytes go through).
 //
 // Exclusivity is enforced at the GAP level (T04's decision), NOT by
 // accepting-then-rejecting the way TcpBtpServer's pending-connection dance

@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <esp_timer.h>
 #include <esp_now.h>
@@ -29,6 +30,7 @@
 #include <Flags.h>
 #include <Logger.h>
 #include <BtpTransport.h>
+#include <StreamFraming.h>
 #include <TcpBtpServer.h>
 #include <BleBtpServer.h>
 #include <CommandProcessor.h>
@@ -1139,11 +1141,37 @@ private:
     // or the server stopping): resets the link (see the block comment above)
     // and evicts its terminal origins.
     void onDirectDisconnect(ProtocolLinkId link);
-    // Bytes from a direct client: node_->receive_on(link) does decode /
-    // reassembly / session / open and answers every CONTROL / TERMINAL
-    // message by itself; a COMMAND_REQUEST is routed by routeMessage().
+    // Bytes from a direct client -- a COBS-framed stream, NOT one frame per
+    // read (fragmentation-and-transports.md sections 8.2 / 9; TraceView
+    // frames both TCP and BLE this way): direct_rx_[link] cuts it into
+    // frames, and each one goes to onDirectFrame().
     void onDirectReceive(ProtocolLinkId link, const std::uint8_t* data,
                          std::size_t size);
+    // One frame off a direct link: node_->receive_on(link) does reassembly /
+    // session / open and answers every CONTROL / TERMINAL message by itself;
+    // a COMMAND_REQUEST is routed by routeMessage().
+    struct DirectFrameSink {
+        ROBOT* robot;
+        ProtocolLinkId link;
+    };
+    static void onDirectFrameStatic(void* context, const btp::DecodedFrame& frame) noexcept;
+    void onDirectFrame(ProtocolLinkId link, const btp::DecodedFrame& frame);
+
+    // The one way a frame leaves on a direct link, whoever built it (node_
+    // through RobotDirectLink::send(), or a BtpEndpoint wrapper through the
+    // *SendStatic callbacks): wrapped as 0x00 || COBS(frame) || 0x00 and
+    // handed to the server as one unit, so a queue refusal never splits it.
+    bool sendDirect(ProtocolLinkId link, const std::uint8_t* frame, std::size_t size,
+                    tcp_btp_server::FramePriority priority);
+
+    // Stream deframer per direct link (index = ProtocolLinkId; [kLinkEspNow]
+    // unused). ~8.2 KB each (btp::SerialDecoder's serial-sized buffers), so
+    // allocated on the heap at the link's FIRST connection instead of static
+    // RAM, then kept and reset() on every later connect. Never freed on
+    // disconnect: TcpBtpServer::stop() fires on_disconnect from the caller's
+    // task while btp_tcp may still be inside onDirectReceive(). Touched only
+    // from the link's own task (connect and receive both run there).
+    std::unique_ptr<StreamDeframer> direct_rx_[kProtocolLinkCount];
 
     // The BtpEndpoint a COMMAND_RESULT for `link` leaves through: nullptr for
     // kLinkEspNow (command_processor's own default endpoint, `protocol`).

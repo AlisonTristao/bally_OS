@@ -3,6 +3,7 @@
 
 // ESP-IDF Includes
 #include <cstring>
+#include <new>
 #include <cstdlib>
 #include <ctime>
 #include <string>
@@ -699,8 +700,8 @@ void RobotLink::reply_seal(const btp::Header& request_header,
 // ---------------------------------------------------------------------------
 
 bool RobotDirectLink::send(const std::uint8_t* frame, std::size_t frame_size) {
-    return link_ == kLinkTcp ? robot_.tcp_server_.send(frame, frame_size)
-                             : robot_.ble_server_.send(frame, frame_size);
+    return robot_.sendDirect(link_, frame, frame_size,
+                             tcp_btp_server::FramePriority::Normal);
 }
 
 bool RobotDirectLink::seal(const btp::Header& header, std::uint16_t payload_size,
@@ -843,14 +844,16 @@ void ROBOT::populateCatalog(btp::Catalog& catalog) {
 bool ROBOT::tcpEndpointSendStatic(void* context, const std::uint8_t* frame,
                                   std::size_t size) noexcept {
     ROBOT* self = static_cast<ROBOT*>(context);
-    return self != nullptr && self->tcp_server_.send(frame, size);
+    return self != nullptr &&
+           self->sendDirect(kLinkTcp, frame, size, tcp_btp_server::FramePriority::Normal);
 }
 
 bool ROBOT::tcpTelemetrySendStatic(void* context, const std::uint8_t* frame,
                                    std::size_t size) noexcept {
     ROBOT* self = static_cast<ROBOT*>(context);
     return self != nullptr &&
-          self->tcp_server_.send(frame, size, TcpBtpServer::FramePriority::Telemetry);
+           self->sendDirect(kLinkTcp, frame, size,
+                            tcp_btp_server::FramePriority::Telemetry);
 }
 
 void ROBOT::updateTcpServerLifecycle() {
@@ -952,14 +955,16 @@ void ROBOT::onTcpPendingReceive(const std::uint8_t* data, std::size_t size) {
 bool ROBOT::bleEndpointSendStatic(void* context, const std::uint8_t* frame,
                                   std::size_t size) noexcept {
     ROBOT* self = static_cast<ROBOT*>(context);
-    return self != nullptr && self->ble_server_.send(frame, size);
+    return self != nullptr &&
+           self->sendDirect(kLinkBle, frame, size, tcp_btp_server::FramePriority::Normal);
 }
 
 bool ROBOT::bleTelemetrySendStatic(void* context, const std::uint8_t* frame,
                                    std::size_t size) noexcept {
     ROBOT* self = static_cast<ROBOT*>(context);
     return self != nullptr &&
-          self->ble_server_.send(frame, size, BleBtpServer::FramePriority::Telemetry);
+           self->sendDirect(kLinkBle, frame, size,
+                            tcp_btp_server::FramePriority::Telemetry);
 }
 
 void ROBOT::onBleConnectStatic(void* context) noexcept {
@@ -989,6 +994,22 @@ void ROBOT::onDirectConnect(ProtocolLinkId link) {
         else ble_server_.close_active_client();
         return;
     }
+    // The stream deframer: allocated at the link's first connection, reset on
+    // every later one -- a new connection starts unsynchronized (section 6.3).
+    if (!direct_rx_[link]) {
+        direct_rx_[link].reset(new (std::nothrow) StreamDeframer());
+        if (!direct_rx_[link]) {
+            logger.insert_log(logType::ERRO,
+                              "BTP: no heap for a direct-link stream decoder, "
+                              "dropping the connection");
+            if (link == kLinkTcp) tcp_server_.close_active_client();
+            else ble_server_.close_active_client();
+            return;
+        }
+    } else {
+        direct_rx_[link]->reset();
+    }
+
     // A clean slate even if the previous disconnect's teardown never landed:
     // reset_link() is idempotent and bumps the epoch either way.
     node_->reset_link(link);
@@ -1020,12 +1041,22 @@ void ROBOT::onDirectDisconnect(ProtocolLinkId link) {
 
 void ROBOT::onDirectReceive(ProtocolLinkId link, const std::uint8_t* data,
                             std::size_t size) {
-    if (!node_) return;
+    // Defensive: the servers always call on_connect() (which sets up both)
+    // before any on_receive() for the same connection.
+    if (!node_ || !direct_rx_[link]) return;
+    DirectFrameSink sink{this, link};
+    direct_rx_[link]->feed(data, size, &ROBOT::onDirectFrameStatic, &sink);
+}
 
+void ROBOT::onDirectFrameStatic(void* context, const btp::DecodedFrame& frame) noexcept {
+    const DirectFrameSink* sink = static_cast<const DirectFrameSink*>(context);
+    if (sink != nullptr) sink->robot->onDirectFrame(sink->link, frame);
+}
+
+void ROBOT::onDirectFrame(ProtocolLinkId link, const btp::DecodedFrame& frame) {
     btp::ReceivedMessage msg{};
     const btp::NodeRx outcome = node_->receive_on(
-        link, data, size, static_cast<uint64_t>(esp_timer_get_time() / 1000ULL),
-        &msg);
+        link, frame, static_cast<uint64_t>(esp_timer_get_time() / 1000ULL), &msg);
     // Pending (fragment stored), SessionHandled (HELLO/SESSION_CLOSE, already
     // replied), RequestServed/SubscriptionServed (MANIFEST_REQUEST/SUBSCRIBE/
     // UNSUBSCRIBE, already replied), TerminalDelivered (TERMINAL_IN, already
@@ -1036,6 +1067,18 @@ void ROBOT::onDirectReceive(ProtocolLinkId link, const std::uint8_t* data,
     // There is no C_Link case on a direct link (see RobotDirectLink's class
     // comment): every COMMAND_RESULT is channel B / key E.
     routeMessage(link, msg.header, msg.payload, bally::Channel::B_Endpoint);
+}
+
+bool ROBOT::sendDirect(ProtocolLinkId link, const std::uint8_t* frame,
+                       std::size_t size, tcp_btp_server::FramePriority priority) {
+    std::uint8_t wire[stream_framing::kMaxWireSize];
+    std::size_t wire_size = 0U;
+    if (!stream_framing::encode_stream_frame(frame, size, wire, sizeof(wire),
+                                             &wire_size)) {
+        return false;  // nothing sent: a partial frame would desync the peer
+    }
+    return link == kLinkTcp ? tcp_server_.send(wire, wire_size, priority)
+                            : ble_server_.send(wire, wire_size, priority);
 }
 
 BtpEndpoint* ROBOT::commandEndpoint(ProtocolLinkId link) noexcept {
