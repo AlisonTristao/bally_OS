@@ -1,6 +1,6 @@
 .pio
 .vscode
-.log
+*.log
 .claude
 /build/
 /managed_components/
