@@ -3,6 +3,7 @@
 #include <btp/messages.hpp>
 
 #include <cstring>
+#include <new>
 
 bool BtpEndpoint::default_send(void*, const std::uint8_t*, std::size_t) noexcept {
     return false;
@@ -429,3 +430,50 @@ const char* parse_error_string(ParseError error) noexcept {
 }
 
 }  // namespace btp_command
+
+CobsStreamDecoder::~CobsStreamDecoder() {
+    if (decoder_ != nullptr) decoder_->~SerialDecoder();
+    delete[] storage_;
+}
+
+bool CobsStreamDecoder::reset() noexcept {
+    if (decoder_ == nullptr) {
+        storage_ = new (std::nothrow) std::uint8_t[kStorageSize + sizeof(btp::SerialDecoder) +
+                                                   alignof(btp::SerialDecoder)];
+        if (storage_ == nullptr) return false;
+        // The decoder object itself lives at the tail of the same block, so
+        // the whole link-framing state is one allocation.
+        std::uintptr_t tail = reinterpret_cast<std::uintptr_t>(storage_ + kStorageSize);
+        tail = (tail + alignof(btp::SerialDecoder) - 1U) &
+               ~static_cast<std::uintptr_t>(alignof(btp::SerialDecoder) - 1U);
+        decoder_ = new (reinterpret_cast<void*>(tail))
+            btp::SerialDecoder(storage_, btp::kSerialMaxCobsBlockSize,
+                               storage_ + btp::kSerialMaxCobsBlockSize,
+                               btp::kSerialMaxFrameSize);
+    }
+    decoder_->reset();
+    return true;
+}
+
+std::size_t cobs_stream_capacity(std::size_t frame_size) noexcept {
+    std::size_t encoded = 0U;
+    if (btp::cobs_max_encoded_size(frame_size, &encoded) != btp::CobsError::Ok) return 0U;
+    return encoded + 2U;  // leading and trailing 0x00
+}
+
+bool cobs_stream_encode(const std::uint8_t* frame, std::size_t frame_size,
+                        std::uint8_t* out, std::size_t capacity,
+                        std::size_t* written) noexcept {
+    if (frame == nullptr || out == nullptr || written == nullptr || capacity < 2U) {
+        return false;
+    }
+    std::size_t encoded = 0U;
+    if (btp::cobs_encode(frame, frame_size, out + 1U, capacity - 2U, &encoded) !=
+        btp::CobsError::Ok) {
+        return false;
+    }
+    out[0] = 0U;
+    out[encoded + 1U] = 0U;
+    *written = encoded + 2U;
+    return true;
+}

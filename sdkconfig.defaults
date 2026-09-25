@@ -42,3 +42,12 @@ CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 # hardware), so this also can't regress into dual-mode by accident.
 CONFIG_BT_ENABLED=y
 CONFIG_BT_NIMBLE_ENABLED=y
+# The whole direct-BLE receive path runs ON the nimble_host task: the GATT
+# write handler feeds the COBS decoder, btp::Node answers HELLO inline
+# (session + endpoint framing + COBS encode) and notifies from there. The
+# 4096 default overflowed on the very first HELLO_RESULT.
+CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=8192
+# INFO logs two lines per notification ("GATT procedure initiated: notify")
+# to the UART, from the nimble_host task itself -- at telemetry rates that
+# is real time stolen from the BLE link.
+CONFIG_BT_NIMBLE_LOG_LEVEL_WARNING=y

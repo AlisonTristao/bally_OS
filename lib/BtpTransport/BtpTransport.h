@@ -266,6 +266,66 @@ private:
     std::uint8_t reply_frame_[kReplyFrameCapacity];
 };
 
+// Link framing for the two DIRECT stream transports (TCP and BLE): both
+// carry 0x00 || COBS(frame) || 0x00 over a boundary-less byte pipe
+// (BTP/docs/fragmentation-and-transports.md section 8.2 for BLE, the same
+// serial-style framing TraceView's BtpSession uses for TCP). btp::Node does
+// NOT do this itself -- its receive() wants one whole frame (see node.hpp's
+// "LINK framing" note) -- so the composition layer owns it, exactly like
+// TcpBusyResponder above already does for the pending-connection path.
+//
+// Decoder side: one instance per link, single consumer (the task that owns
+// that link's receive callback). Buffers are allocated on the first
+// reset(), never in the constructor: ROBOT is a static singleton, and a
+// ~8 KB allocation that size lands in PSRAM (CONFIG_SPIRAM_USE_MALLOC) only
+// once the heap is up -- and keeping it out of .bss keeps it off internal
+// RAM that NimBLE/Wi-Fi need.
+class CobsStreamDecoder {
+public:
+    CobsStreamDecoder() noexcept = default;
+    ~CobsStreamDecoder();
+
+    // decoder_ points into storage_ -- copying would alias it.
+    CobsStreamDecoder(const CobsStreamDecoder&) = delete;
+    CobsStreamDecoder& operator=(const CobsStreamDecoder&) = delete;
+
+    // Allocates the buffers if needed and drops any partial frame. Call once
+    // per new connection, before the first feed(). False only when the
+    // allocation failed; feed() is then a no-op.
+    bool reset() noexcept;
+
+    // Feeds raw link bytes; calls on_frame(const btp::DecodedFrame&) for each
+    // complete, CRC-valid frame, in order. The frame view is only valid for
+    // the duration of that call. Corrupt/oversized blocks are skipped (the
+    // decoder resynchronizes on the next 0x00 by itself).
+    template <typename OnFrame>
+    void feed(const std::uint8_t* data, std::size_t size, OnFrame&& on_frame) noexcept {
+        if (decoder_ == nullptr || data == nullptr) return;
+        for (std::size_t i = 0U; i < size; ++i) {
+            btp::DecodedFrame decoded{};
+            if (decoder_->push(data[i], &decoded).event == btp::SerialDecodeEvent::Frame) {
+                on_frame(decoded);
+            }
+        }
+    }
+
+private:
+    // Same kSerialTransport sizing (and the same reason) as
+    // TcpBusyResponder's own buffers: btp::SerialDecoder is hardcoded to it.
+    static constexpr std::size_t kStorageSize =
+        btp::kSerialMaxCobsBlockSize + btp::kSerialMaxFrameSize;
+    std::uint8_t* storage_ = nullptr;
+    btp::SerialDecoder* decoder_ = nullptr;
+};
+
+// Encoder side: the worst-case size of 0x00 || COBS(frame) || 0x00 for a
+// frame of `frame_size` octets, and the encoding itself. False on a null
+// argument or when `capacity` is too small.
+std::size_t cobs_stream_capacity(std::size_t frame_size) noexcept;
+bool cobs_stream_encode(const std::uint8_t* frame, std::size_t frame_size,
+                        std::uint8_t* out, std::size_t capacity,
+                        std::size_t* written) noexcept;
+
 namespace btp_command {
 
 constexpr std::uint16_t kCommandRequestObjectId = 0x0001U;

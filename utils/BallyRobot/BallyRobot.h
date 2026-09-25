@@ -1149,6 +1149,9 @@ private:
     TcpBtpServer tcp_server_;
     RobotTcpLink protocol_link_tcp_{*this};
     std::optional<ProtocolNode> tcp_node_;
+    // Link framing for tcp_node_: raw socket bytes -> whole frames. Reset
+    // (and allocated, the first time) in onTcpConnect().
+    CobsStreamDecoder tcp_rx_stream_;
     // Bumped once per onTcpConnect(), read by runShell() via
     // QueuedCommand::tcp_generation -- see that field's own comment for the
     // use-after-free/misdirection this guards against.
@@ -1207,6 +1210,10 @@ private:
     // reusing node_.
     static void onTcpConnectStatic(void* context) noexcept;
     void onTcpConnect();
+    // Everything per-SESSION of onTcpConnect() (fresh btp::Node, bindings,
+    // armed HELLO deadline) without touching the link framing -- also used
+    // to restart the session when a new HELLO arrives on a live link.
+    void startTcpSession();
 
     // protocol_tcp_'s send callback (btp::EndpointSendFn) -- forwards to
     // tcp_server_.send(), the same destination tcp_node_'s own automatic
@@ -1235,6 +1242,8 @@ private:
     static void onTcpReceiveStatic(void* context, const std::uint8_t* data,
                                    std::size_t size) noexcept;
     void onTcpReceive(const std::uint8_t* data, std::size_t size);
+    // One whole frame out of tcp_rx_stream_ (COBS-decoded, CRC-checked).
+    void onTcpFrame(const btp::DecodedFrame& frame);
 
     // Mirrors processCommandRequest()'s ESP-NOW body (same command_processor
     // instance, same receivedDataQueue) for a COMMAND_REQUEST decoded off
@@ -1277,6 +1286,8 @@ private:
     BleBtpServer ble_server_;
     RobotBleLink protocol_link_ble_{*this};
     std::optional<ProtocolNode> ble_node_;
+    // Same as tcp_rx_stream_, for the GATT RX characteristic's writes.
+    CobsStreamDecoder ble_rx_stream_;
     std::atomic<std::uint32_t> ble_session_generation_{0U};
     BtpEndpoint protocol_ble_;
     // T23's same split as protocol_tcp_/protocol_tcp_telemetry_, for the
@@ -1297,6 +1308,8 @@ private:
     // protocol_ble_telemetry_, enable_session()s + arm_session()s it.
     static void onBleConnectStatic(void* context) noexcept;
     void onBleConnect();
+    // BLE twin of startTcpSession().
+    void startBleSession();
 
     // protocol_ble_'s send callback (btp::EndpointSendFn) -- forwards to
     // ble_server_.send(), FramePriority::Normal (BleBtpServer::send()'s
@@ -1315,6 +1328,8 @@ private:
     static void onBleReceiveStatic(void* context, const std::uint8_t* data,
                                    std::size_t size) noexcept;
     void onBleReceive(const std::uint8_t* data, std::size_t size);
+    // One whole frame out of ble_rx_stream_ (COBS-decoded, CRC-checked).
+    void onBleFrame(const btp::DecodedFrame& frame);
 
     // Mirrors processTcpCommandRequest()'s body for a COMMAND_REQUEST
     // decoded off the BLE session -- channel is always B_Endpoint (no

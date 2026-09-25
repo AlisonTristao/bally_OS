@@ -205,18 +205,42 @@ void BleBtpServer::on_reset(int reason) noexcept {
 }
 
 void BleBtpServer::start_advertising() noexcept {
+    // A legacy advertising PDU carries at most 31 bytes: flags (3) + the
+    // 128-bit service UUID (18) + "BallyRobot" (12) is 33, and
+    // ble_gap_adv_set_fields() refused the whole packet with
+    // BLE_HS_EMSGSIZE -- the robot never advertised at all. The UUID stays
+    // in the advertisement itself (TraceView's BleDiscoveryService filters
+    // on it); the name moves to the scan response, which every active
+    // scanner (phones, Qt on Windows/Android) requests anyway.
+    //
+    // The UUID is repeated in the scan response (name 12 + UUID 18 = 30
+    // bytes, fits): Qt's Windows backend builds a device from whichever PDU
+    // it sees FIRST and emits deviceDiscovered() once; later PDUs only come
+    // through deviceUpdated(). If the name-only scan response won that race,
+    // TraceView's UUID filter dropped the robot for the whole scan.
     struct ble_hs_adv_fields fields{};
     fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
     fields.uuids128 = &kServiceUuid;
     fields.num_uuids128 = 1;
     fields.uuids128_is_complete = 1;
-    fields.name = reinterpret_cast<const std::uint8_t*>(kDeviceName);
-    fields.name_len = static_cast<std::uint8_t>(std::strlen(kDeviceName));
-    fields.name_is_complete = 1;
 
     int rc = ble_gap_adv_set_fields(&fields);
     if (rc != 0) {
         ESP_LOGE(kTag, "ble_gap_adv_set_fields() failed: %d", rc);
+        return;
+    }
+
+    struct ble_hs_adv_fields rsp_fields{};
+    rsp_fields.uuids128 = &kServiceUuid;
+    rsp_fields.num_uuids128 = 1;
+    rsp_fields.uuids128_is_complete = 1;
+    rsp_fields.name = reinterpret_cast<const std::uint8_t*>(kDeviceName);
+    rsp_fields.name_len = static_cast<std::uint8_t>(std::strlen(kDeviceName));
+    rsp_fields.name_is_complete = 1;
+
+    rc = ble_gap_adv_rsp_set_fields(&rsp_fields);
+    if (rc != 0) {
+        ESP_LOGE(kTag, "ble_gap_adv_rsp_set_fields() failed: %d", rc);
         return;
     }
 
@@ -258,6 +282,20 @@ int BleBtpServer::gap_event_handler(struct ble_gap_event* event, void* /*arg*/) 
                 self->conn_handle_.store(event->connect.conn_handle);
                 self->notifications_enabled_.store(false);
                 self->reset_send_queue();
+                // Ask for a short connection interval: every notification
+                // and every write-with-response from the central waits for
+                // a connection event, and centrals (Windows especially)
+                // default to 30-50 ms. 7.5-15 ms is what makes the terminal
+                // and telemetry feel live. A request only -- the central
+                // may pick anything or refuse, which is harmless.
+                {
+                    struct ble_gap_upd_params params{};
+                    params.itvl_min = 6U;    // 6 * 1.25 ms = 7.5 ms
+                    params.itvl_max = 12U;   // 15 ms
+                    params.latency = 0U;
+                    params.supervision_timeout = 400U;  // 400 * 10 ms = 4 s
+                    ble_gap_update_params(event->connect.conn_handle, &params);
+                }
                 if (self->callbacks_.on_connect != nullptr) {
                     self->callbacks_.on_connect(self->callbacks_.context);
                 }
@@ -329,7 +367,12 @@ int BleBtpServer::gatt_access_handler(std::uint16_t conn_handle,
         return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
     }
 
-    std::uint8_t buffer[kMaxChunkSize];
+    // Static, not on the stack: this handler only ever runs on the single
+    // nimble_host task, and everything on_receive() does below (COBS
+    // decode, btp::Node, the inline HELLO_RESULT and its notify) already
+    // runs on that same task's stack -- 512 bytes here was part of what
+    // overflowed it on the first HELLO.
+    static std::uint8_t buffer[kMaxChunkSize];
     std::uint16_t copied_len = 0U;
     if (ble_hs_mbuf_to_flat(ctxt->om, buffer, sizeof(buffer), &copied_len) != 0) {
         return BLE_ATT_ERR_UNLIKELY;
@@ -389,29 +432,40 @@ void BleBtpServer::drain_send_queue() noexcept {
         return;
     }
 
-    QueuedFrame& frame = send_queue_[send_queue_head_];
     const std::uint16_t mtu = att_mtu_.load();
     // ATT_MTU minus the 3-octet notification header -- same floor as
     // TraceView's own BleTransport::mtuPayloadSize() for the same reason:
     // 23 is BLE's own default/minimum ATT_MTU before negotiation, not a
     // BTP-specific number.
-    const std::size_t chunk_capacity =
+    std::size_t chunk_capacity =
         static_cast<std::size_t>(mtu > 3U ? mtu - 3U : 20U);
-    const std::size_t remaining = frame.size - frame.offset;
-    const std::size_t chunk_size =
-        remaining < chunk_capacity ? remaining : chunk_capacity;
-    const std::uint8_t* chunk_data = frame.data + frame.offset;
+    if (chunk_capacity > sizeof(notify_scratch_)) chunk_capacity = sizeof(notify_scratch_);
 
-    struct os_mbuf* om = ble_hs_mbuf_from_flat(chunk_data, chunk_size);
-    const bool frame_complete = (frame.offset + chunk_size) >= frame.size;
-    if (frame_complete) {
-        delete[] frame.data;
-        frame.data = nullptr;
-        send_queue_head_ = (send_queue_head_ + 1U) % kSendQueueDepth;
-        --send_queue_count_;
-    } else {
-        frame.offset += chunk_size;
+    // TX is a byte stream (fragmentation-and-transports.md section 8.2):
+    // fill the notification from as many queued frames as fit instead of
+    // sending one frame (or one slice of it) per notification. Telemetry is
+    // many small frames, and one notification per frame -- each waiting for
+    // BLE_GAP_EVENT_NOTIFY_TX -- was what let the queue back up and
+    // TelemetryPublisher's frames get refused.
+    std::size_t chunk_size = 0U;
+    while (chunk_size < chunk_capacity && send_queue_count_ > 0U) {
+        QueuedFrame& frame = send_queue_[send_queue_head_];
+        const std::size_t remaining = frame.size - frame.offset;
+        const std::size_t room = chunk_capacity - chunk_size;
+        const std::size_t take = remaining < room ? remaining : room;
+        std::memcpy(notify_scratch_ + chunk_size, frame.data + frame.offset, take);
+        chunk_size += take;
+        if (take == remaining) {
+            delete[] frame.data;
+            frame = QueuedFrame{};
+            send_queue_head_ = (send_queue_head_ + 1U) % kSendQueueDepth;
+            --send_queue_count_;
+        } else {
+            frame.offset += take;
+        }
     }
+
+    struct os_mbuf* om = ble_hs_mbuf_from_flat(notify_scratch_, chunk_size);
     xSemaphoreGive(send_mutex_);
 
     if (om == nullptr) {

@@ -23,9 +23,9 @@
 // one ATT write/notification can carry, so send() fragments it into
 // <= (negotiated MTU - 3) chunks -- the exact mirror of what TraceView's own
 // BleTransport does for its writes (see that class's own comment for why
-// this is symmetric and correct: both ends just forward a raw byte stream,
-// and btp::Node's own COBS-stream decode on each side reassembles the frame
-// out of it, the same way it already does for TCP's raw socket bytes).
+// this is symmetric and correct: both ends just forward a raw byte stream).
+// The COBS layer itself is NOT btp::Node's -- ROBOT owns it on both links
+// (CobsStreamDecoder on receive, sendCobsFramed() on send; BtpTransport.h).
 //
 // Exclusivity is enforced at the GAP level (T04's decision), NOT by
 // accepting-then-rejecting the way TcpBtpServer's pending-connection dance
@@ -52,14 +52,18 @@ public:
     // on the bally_OS side, at most kBleMaxFrameSize (512 octets, once
     // btp::kBleTransport exists -- see BallyRobot.h's own note on the
     // kSerialTransport stand-in used meanwhile) each.
-    static constexpr std::size_t kSendQueueDepth = 8U;
+    //
+    // Raised to 16: drain_send_queue() now packs several queued frames into
+    // each notification, so the queue drains faster, but a telemetry burst
+    // right as a command reply is produced still needs the headroom.
+    static constexpr std::size_t kSendQueueDepth = 16U;
 
     using FramePriority = tcp_btp_server::FramePriority;
 
     // T23's same reservation, reused verbatim for BLE's queue: the top
     // quarter reserved for Normal-priority frames (COMMAND_RESULT,
     // TERMINAL_OUT, catalog/session replies), so a telemetry burst can never
-    // crowd out a reply that has to leave right after it. 6 == 75% of 8.
+    // crowd out a reply that has to leave right after it. 12 == 75% of 16.
     static constexpr std::size_t kTelemetryQueueCeiling =
         (kSendQueueDepth * 3U) / 4U;
 
@@ -173,6 +177,10 @@ private:
     // after the previous one is acknowledged" backpressure TraceView's own
     // BleTransport applies on its side.
     std::atomic<bool> notify_in_flight_{false};
+    // One notification's worth of bytes, assembled from as many queued
+    // frames as fit (see drain_send_queue()). Only touched by whoever won
+    // notify_in_flight_, and copied into an mbuf before that is released.
+    std::uint8_t notify_scratch_[512];
 };
 
 #endif  // BLE_BTP_SERVER_H

@@ -4,6 +4,8 @@
 // ESP-IDF Includes
 #include <cstring>
 #include <cstdlib>
+#include <memory>
+#include <new>
 #include <ctime>
 #include <string>
 #include "freertos/FreeRTOS.h"
@@ -684,8 +686,29 @@ void RobotLink::reply_seal(const btp::Header& request_header,
 // special case (there is no dongle on the other end of a TCP socket).
 // ---------------------------------------------------------------------------
 
+namespace {
+// TCP and BLE are byte streams: every BTP frame leaves as
+// 0x00 || COBS(frame) || 0x00 (BTP/docs/fragmentation-and-transports.md
+// section 8.2; TraceView's BtpSession decodes both with CobsStream). The two
+// servers are plain byte pipes and btp::Node hands over bare frames, so the
+// framing happens here, on every send path of both links. The servers copy
+// what they are given, so the encoded block only has to outlive the call.
+template <typename Server>
+bool sendCobsFramed(Server& server, const std::uint8_t* frame, std::size_t size,
+                    typename Server::FramePriority priority) {
+    const std::size_t capacity = cobs_stream_capacity(size);
+    if (frame == nullptr || size == 0U || capacity == 0U) return false;
+    std::unique_ptr<std::uint8_t[]> block(new (std::nothrow) std::uint8_t[capacity]);
+    if (!block) return false;
+    std::size_t written = 0U;
+    if (!cobs_stream_encode(frame, size, block.get(), capacity, &written)) return false;
+    return server.send(block.get(), written, priority);
+}
+}  // namespace
+
 bool RobotTcpLink::send(const std::uint8_t* frame, std::size_t frame_size) {
-    return robot_.tcp_server_.send(frame, frame_size);
+    return sendCobsFramed(robot_.tcp_server_, frame, frame_size,
+                          TcpBtpServer::FramePriority::Normal);
 }
 
 bool RobotTcpLink::seal(const btp::Header& header, std::uint16_t payload_size,
@@ -721,7 +744,8 @@ void RobotTcpLink::reply_seal(const btp::Header& /*request_header*/,
 // ---------------------------------------------------------------------------
 
 bool RobotBleLink::send(const std::uint8_t* frame, std::size_t frame_size) {
-    return robot_.ble_server_.send(frame, frame_size);
+    return sendCobsFramed(robot_.ble_server_, frame, frame_size,
+                          BleBtpServer::FramePriority::Normal);
 }
 
 bool RobotBleLink::seal(const btp::Header& header, std::uint16_t payload_size,
@@ -870,14 +894,17 @@ void ROBOT::populateCatalog(btp::Catalog& catalog) {
 bool ROBOT::tcpEndpointSendStatic(void* context, const std::uint8_t* frame,
                                   std::size_t size) noexcept {
     ROBOT* self = static_cast<ROBOT*>(context);
-    return self != nullptr && self->tcp_server_.send(frame, size);
+    return self != nullptr &&
+           sendCobsFramed(self->tcp_server_, frame, size,
+                          TcpBtpServer::FramePriority::Normal);
 }
 
 bool ROBOT::tcpTelemetrySendStatic(void* context, const std::uint8_t* frame,
                                    std::size_t size) noexcept {
     ROBOT* self = static_cast<ROBOT*>(context);
     return self != nullptr &&
-          self->tcp_server_.send(frame, size, TcpBtpServer::FramePriority::Telemetry);
+          sendCobsFramed(self->tcp_server_, frame, size,
+                         TcpBtpServer::FramePriority::Telemetry);
 }
 
 void ROBOT::updateTcpServerLifecycle() {
@@ -937,6 +964,16 @@ void ROBOT::onTcpConnect() {
     // (onTcpDisconnect() resets it) -- cheap, and correct even if a future
     // change ever lets a new connection start before the previous one's
     // teardown fully lands.
+    if (!tcp_rx_stream_.reset()) {
+        logger.insert_log(logType::ERRO,
+                          "TCP BTP: no memory for the COBS decoder, dropping connection");
+        tcp_server_.close_active_client();
+        return;
+    }
+    startTcpSession();
+}
+
+void ROBOT::startTcpSession() {
     tcp_session_generation_.fetch_add(1U, std::memory_order_relaxed);
 
     tcp_node_.emplace(protocol_link_tcp_, kTcpNodeReassemblyTimeoutMs);
@@ -1003,9 +1040,46 @@ void ROBOT::onTcpReceive(const std::uint8_t* data, std::size_t size) {
     // connection.
     if (!tcp_node_) return;
 
+    // Raw socket bytes -> whole frames (COBS, see sendCobsFramed()): a read
+    // can hold half a frame or several, never assume one read == one frame.
+    tcp_rx_stream_.feed(data, size, [this](const btp::DecodedFrame& frame) {
+        onTcpFrame(frame);
+    });
+}
+
+
+namespace {
+// A HELLO that finds the link's session NOT waiting for one (already Active,
+// or back to Idle after a session timeout). btp::Session answers neither:
+// mid-session it is routed as an ordinary frame, in Idle it is ignored.
+// That is correct for a link that tears down with its client, but a BLE
+// link does not: Windows keeps the GATT connection up for a while after
+// TraceView closes, so the reopened app reuses a link whose session the
+// robot still considers live -- and its HELLO was never answered. A fresh
+// HELLO means a fresh client, so the caller rebuilds the session first.
+template <typename Node>
+bool isStaleHello(const std::optional<Node>& node, const btp::DecodedFrame& frame) {
+    if (frame.header.type != btp::MessageType::Control ||
+        frame.header.object_id != btp::object_id::kHello) {
+        return false;
+    }
+    if (!node) return true;
+    const btp::Session* session = node->link_session(0U);
+    return session == nullptr || session->state() != btp::SessionState::AwaitingHello;
+}
+}  // namespace
+
+void ROBOT::onTcpFrame(const btp::DecodedFrame& frame) {
+    if (isStaleHello(tcp_node_, frame)) {
+        logger.insert_log(logType::INFO, "TCP BTP: new HELLO on a live link, restarting the session");
+        onTcpDisconnect();
+        startTcpSession();
+    }
+    if (!tcp_node_) return;
+
     btp::ReceivedMessage msg{};
     const btp::NodeRx outcome = tcp_node_->receive(
-        data, size, static_cast<uint64_t>(esp_timer_get_time() / 1000ULL), &msg);
+        frame, static_cast<uint64_t>(esp_timer_get_time() / 1000ULL), &msg);
     switch (outcome) {
         case btp::NodeRx::Complete:
             break;
@@ -1148,14 +1222,17 @@ void ROBOT::onTcpDisconnect() {
 bool ROBOT::bleEndpointSendStatic(void* context, const std::uint8_t* frame,
                                   std::size_t size) noexcept {
     ROBOT* self = static_cast<ROBOT*>(context);
-    return self != nullptr && self->ble_server_.send(frame, size);
+    return self != nullptr &&
+           sendCobsFramed(self->ble_server_, frame, size,
+                          BleBtpServer::FramePriority::Normal);
 }
 
 bool ROBOT::bleTelemetrySendStatic(void* context, const std::uint8_t* frame,
                                    std::size_t size) noexcept {
     ROBOT* self = static_cast<ROBOT*>(context);
     return self != nullptr &&
-          self->ble_server_.send(frame, size, BleBtpServer::FramePriority::Telemetry);
+          sendCobsFramed(self->ble_server_, frame, size,
+                         BleBtpServer::FramePriority::Telemetry);
 }
 
 void ROBOT::onBleConnectStatic(void* context) noexcept {
@@ -1163,6 +1240,16 @@ void ROBOT::onBleConnectStatic(void* context) noexcept {
 }
 
 void ROBOT::onBleConnect() {
+    if (!ble_rx_stream_.reset()) {
+        logger.insert_log(logType::ERRO,
+                          "BLE BTP: no memory for the COBS decoder, dropping connection");
+        ble_server_.close_active_client();
+        return;
+    }
+    startBleSession();
+}
+
+void ROBOT::startBleSession() {
     ble_session_generation_.fetch_add(1U, std::memory_order_relaxed);
 
     ble_node_.emplace(protocol_link_ble_, kBleNodeReassemblyTimeoutMs);
@@ -1207,9 +1294,24 @@ void ROBOT::onBleReceive(const std::uint8_t* data, std::size_t size) {
     // connection.
     if (!ble_node_) return;
 
+    // One GATT write is NOT one frame (fragmentation-and-transports.md
+    // section 8.2): writes are MTU-sized slices of a COBS stream.
+    ble_rx_stream_.feed(data, size, [this](const btp::DecodedFrame& frame) {
+        onBleFrame(frame);
+    });
+}
+
+void ROBOT::onBleFrame(const btp::DecodedFrame& frame) {
+    if (isStaleHello(ble_node_, frame)) {
+        logger.insert_log(logType::INFO, "BLE BTP: new HELLO on a live link, restarting the session");
+        onBleDisconnect();
+        startBleSession();
+    }
+    if (!ble_node_) return;
+
     btp::ReceivedMessage msg{};
     const btp::NodeRx outcome = ble_node_->receive(
-        data, size, static_cast<uint64_t>(esp_timer_get_time() / 1000ULL), &msg);
+        frame, static_cast<uint64_t>(esp_timer_get_time() / 1000ULL), &msg);
     switch (outcome) {
         case btp::NodeRx::Complete:
             break;
