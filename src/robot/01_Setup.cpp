@@ -20,9 +20,9 @@ stateName States::setup_function() {
         robot_.logger.insert_log(logType::INFO, "Setup function called");
     #endif
 
-    // T25b (TAREFAS_TCP_BLE_ANDROID.txt, ETAPA 3B): hold btn0 (BOOT/GPIO0)
-    // for ~1.5s right after normal boot to enter COMM_CONFIG instead of
-    // falling straight through to WAIT. Deliberately NOT during reset --
+    // T25b (TAREFAS_TCP_BLE_ANDROID.txt, ETAPA 3B): press btn0 (BOOT/GPIO0)
+    // within kPressWindowMs of SETUP starting and hold it ~1.5s to enter
+    // COMM_CONFIG instead of falling straight through to WAIT. Deliberately NOT during reset --
     // holding btn0 through reset drops the chip into the Espressif ROM
     // bootloader instead of running this firmware at all (see
     // ROBOT::init()'s own comment on cfg.btn0), so this check only ever
@@ -39,17 +39,28 @@ stateName States::setup_function() {
     // the same reasoning ROBOT::init() already uses to check btn1/btn2 held
     // at boot (boot_enter_ota/boot_enter_storage in BallyRobot.cpp).
     //
-    // This blocks the state-machine task for up to ~1.5s. Acceptable here:
+    // This blocks the state-machine task for up to ~3s (press window) plus
+    // the ~1.5s hold. Acceptable here:
     // SETUP runs exactly once, before anything (WAIT/RUN/telemetry
     // subscribers) depends on this task being responsive.
     const SettingsData& cfg = robot_.settings.data();
     const gpio_num_t btn0 = static_cast<gpio_num_t>(cfg.btn0);
 
+    #if defined(LOG_ALL) || defined(LOG_INFO)
+        robot_.logger.insert_logf(
+            logType::INFO,
+            "Setup: hold BOOT (btn0) within %ums for %ums to enter COMM_CONFIG",
+            static_cast<unsigned>(setup_comm_trigger::kPressWindowMs),
+            static_cast<unsigned>(setup_comm_trigger::kHoldThresholdMs));
+    #endif
+
     uint32_t elapsed_ms = 0;
+    uint32_t held_ms = 0;
+    bool was_held = false;
     while (true) {
         const bool held = gpio_get_level(btn0) == 0;  // pull-up: LOW = pressed
         const setup_comm_trigger::Decision decision =
-            setup_comm_trigger::decide(held, elapsed_ms);
+            setup_comm_trigger::decide(held, held_ms, elapsed_ms, was_held);
 
         if (decision == setup_comm_trigger::Decision::GoToWait) {
             return go_to(SETUP, WAIT);
@@ -63,8 +74,12 @@ stateName States::setup_function() {
             return go_to(SETUP, COMM_CONFIG);
         }
 
-        // KeepWaiting: still held, threshold not reached -- poll again.
+        // KeepWaiting: inside the press window, or held below the threshold.
         vTaskDelay(pdMS_TO_TICKS(kPollMs));
         elapsed_ms += kPollMs;
+        if (held) {
+            held_ms += kPollMs;
+            was_held = true;
+        }
     }
 }
