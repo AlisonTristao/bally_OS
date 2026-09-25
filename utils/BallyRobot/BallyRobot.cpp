@@ -2988,7 +2988,13 @@ void ROBOT::routine(void *param){
         // frames sent while it's active never reach the peer; skip the
         // flush and let logs pile up in PSRAM instead of retrying/losing
         // them, then drain everything once cancel() gives the channel back.
-        if (!instance_->ota.is_active()) {
+        //
+        // is_upload_session(), NOT is_active(): comm_mode==TCP's Wi-Fi link is
+        // OTAUpdater's direct mode (startDirect()), which keeps is_active()
+        // true for the robot's whole life. Gating on it meant a TCP robot
+        // never flushed telemetry or logs at all -- the TCP client's
+        // subscriptions were granted and then nothing ever arrived.
+        if (!instance_->ota.is_upload_session()) {
             // Producers only enqueue encoded frames; the "comms" task drains
             // the scheduler and re-publishes STATUS (see runComms() below), so
             // a stall here never silences the link. This task still feeds the
@@ -3028,8 +3034,10 @@ void ROBOT::runComms(void *param) {
 
     while (true) {
         // Same OTA guard routine() uses: while OTA holds the radio on the
-        // target Wi-Fi channel, ESP-NOW frames never reach the peer.
-        if (!instance_->ota.is_active()) {
+        // target Wi-Fi channel, ESP-NOW frames never reach the peer. Upload
+        // session only -- see routine()'s comment: in comm_mode==TCP this is
+        // also what pumps the terminal for the TCP client.
+        if (!instance_->ota.is_upload_session()) {
             // Drive the terminal editors before pumping the scheduler so a
             // keystroke echo / command output queued now leaves on this pass.
             instance_->terminal_responder.pump(

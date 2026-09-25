@@ -15,7 +15,12 @@ namespace {
 
 constexpr char kTag[] = "TCP_BTP";
 constexpr int kListenBacklog = 2;
-constexpr int kPollTimeoutMs = 200;
+// Also the worst-case wait for a frame queued by ANOTHER task (telemetry,
+// terminal output, command results): select() only watches for writability
+// when the queue was already non-empty as it went to sleep, so anything
+// enqueued meanwhile waits for this timeout. At 200 ms that turned 50 Hz
+// telemetry into 5 Hz bursts and the terminal visibly laggy.
+constexpr int kPollTimeoutMs = 10;
 
 std::uint32_t now_ms() {
     return static_cast<std::uint32_t>(esp_timer_get_time() / 1000LL);
@@ -242,6 +247,9 @@ void TcpBtpServer::run() noexcept {
         if (active_fd >= 0 && FD_ISSET(active_fd, &read_set)) {
             const int received = ::recv(active_fd, receive_buffer_, sizeof(receive_buffer_), 0);
             if (received <= 0) {
+                if (received < 0) {
+                    ESP_LOGW(kTag, "recv() failed (errno %d), closing the client", errno);
+                }
                 close_client();
             } else if (callbacks_.on_receive != nullptr) {
                 callbacks_.on_receive(callbacks_.context, receive_buffer_,
@@ -310,9 +318,15 @@ void TcpBtpServer::drain_send_queue() noexcept {
             --send_queue_count_;
             continue;
         }
-        if (written < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-            break;  // Try again next pass once writable.
+        if (written < 0 && (errno == EAGAIN || errno == EWOULDBLOCK ||
+                            errno == ENOMEM || errno == ENOBUFS)) {
+            // Try again next pass. ENOMEM/ENOBUFS is lwIP out of pbufs /
+            // send-buffer space -- transient under a telemetry burst, and
+            // treating it as fatal was closing a perfectly good session
+            // ("remote host closed the connection" on the client).
+            break;
         }
+        ESP_LOGW(kTag, "send() failed (errno %d), closing the client", errno);
         // A real write error: the connection is gone. Note it and stop --
         // close_client() (which also empties the queue) runs after this
         // mutex is released below; it takes the same mutex internally and
