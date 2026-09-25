@@ -47,6 +47,13 @@
 # +16 bytes/field, which alone ate nearly all of this robot's fixed 1900-byte
 # manifest scratch buffer; v2.45.0 made it per-field opt-in (flags bit
 # kFieldHasRange, derived from whether a range is actually set).
+# Since then the minimum is v2.46.0: RobotLink / RobotTcpLink / RobotBleLink
+# all have has_open() true, so node_ / tcp_node_ / ble_node_ now DROP any
+# unsealed message past the handshake (NodeConfig::accept_cleartext(),
+# default false) -- the robot needs TraceView >= 4.6.4 on a direct TCP/BLE
+# session, which seals everything it sends. 2.46.0 also fragments every
+# send to <= 250-octet frames, which is what lets tcp_node_ / ble_node_ send
+# the ~1.7 KB MANIFEST_DATA at all (it used to fail as one oversized frame).
 # Keep this in step with [env:native]'s symlink; this can become a submodule
 # pinned to the tag.
 #
