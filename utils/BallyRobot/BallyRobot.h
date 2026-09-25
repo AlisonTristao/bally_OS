@@ -11,6 +11,7 @@
 #include "esp_adc/adc_oneshot.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include <stdio.h>
 #include "esp_attr.h"
 
@@ -72,28 +73,34 @@ const char* resetReasonName(esp_reset_reason_t reason);
 
 class ROBOT;
 
-// The btp::NodeConfig this robot's node_ is built on. btp::NodeConfig became
-// an abstract class (BTP library 2.34.0): the identity is plain data, every
-// external dependency a virtual method Node calls through. Held BY REFERENCE
-// by node_, so it lives as a ROBOT member (protocol_link_), constructed once
-// and never moved.
+// node_'s links (BTP 2.47.0, one btp::Node with several links -- see
+// docs/btp-multi-link-node.md). Link 0 is ESP-NOW (the dongle, always up);
+// links 1 and 2 are the direct TCP and BLE control sessions, attached once
+// at boot and reset on every connect / disconnect.
+enum ProtocolLinkId : std::uint8_t {
+    kLinkEspNow = 0U,
+    kLinkTcp = 1U,
+    kLinkBle = 2U,
+    kProtocolLinkCount = 3U,
+};
+
+// The btp::NodeConfig node_ is built on: link 0 (ESP-NOW) plus the parts of
+// the node every link shares. Held BY REFERENCE by node_, so it lives as a
+// ROBOT member (protocol_link_), constructed once and never moved.
 //
 // send() enqueues through the same TxScheduler every other producer already
 // uses (bindProtocolTransport() wires tx_scheduler.configure() before this
 // is ever called -- see main.cpp's setup_system_callbacks()); node_'s own
-// sends (today: MANIFEST_DATA replies, via serve_catalog() -- see
-// bindProtocolTransport()) go out through the exact same radio path as
-// `protocol`'s. seal() seals with RadioSeal::seal (key L, channel C):
-// MANIFEST_REQUEST/DATA is channel C always (only the dongle's own
-// aggregation cache legitimately asks a robot for its manifest -- bally_
-// channels.h), the same single key StatusReporter's STATUS already seals
-// with, so no reply_seal() override is needed. open() is the AEAD-open path
-// that used to be handleReceiveStatic's stage two (RadioSeal::open / open_e,
-// fail-closed, classified by channel). terminal() / has_command() land here
-// if the btp::Node adoption widens further (on_terminal, ...).
+// ESP-NOW sends (MANIFEST_DATA, SUBSCRIBE_RESULT...) go out through the
+// exact same radio path as `protocol`'s. seal() seals with RadioSeal::seal
+// (key L, channel C): MANIFEST_REQUEST/DATA is channel C always on this link
+// (only the dongle's own aggregation cache asks a robot for its manifest --
+// bally_channels.h), the same single key StatusReporter's STATUS seals with.
+// open() is the AEAD-open path that used to be handleReceiveStatic's stage
+// two (RadioSeal::open / open_e, fail-closed, classified by channel).
 class RobotLink : public btp::NodeConfig {
 public:
-    explicit RobotLink(ROBOT& robot) noexcept : robot_(robot) {}
+    explicit RobotLink(ROBOT& robot) noexcept;
 
     bool send(const std::uint8_t* frame, std::size_t frame_size) override;
 
@@ -105,104 +112,57 @@ public:
     bool open(const btp::Header& header, std::uint16_t sealed_size,
               const std::uint8_t* sealed, std::uint8_t* out_plaintext) override;
 
-    // TERMINAL_IN ingestion moves here (library 2.16+'s Node::terminal_thunk,
-    // wired automatically by the Node constructor once has_terminal() is
-    // true) -- this is the SAME cheap, RX-task-only buffering
-    // TerminalResponder::on_terminal_in() already documents itself as
-    // ("only buffers bytes, never runs the editor"), just reached through
-    // node_->receive() (NodeRx::TerminalDelivered) instead of the object_id
-    // switch in handleReceiveStatic()/dispatchDecoded(). TERMINAL_OUT is
-    // never received here (this robot only ever SENDS it), but a check on
-    // header.object_id guards it anyway, same as NodeTerminalFn's own
-    // "check header.object_id if this node only expects one" comment.
+    // TERMINAL_IN from ANY link lands here, tagged with the link it arrived
+    // on so TerminalResponder answers on the same one. Same cheap, RX-task-
+    // only buffering TerminalResponder::on_terminal_in() documents ("only
+    // buffers bytes, never runs the editor"). TERMINAL_OUT is never received
+    // (this robot only SENDS it); the object_id check guards it anyway.
     bool has_terminal() const noexcept override { return true; }
-    void terminal(btp::Node& node, const btp::Header& header, btp::ByteView payload,
-                  std::uint64_t now_ms) override;
+    void terminal_on(btp::Node& node, const btp::LinkRef& from,
+                     const btp::Header& header, btp::ByteView payload,
+                     std::uint64_t now_ms) override;
 
-    // Picks the key for node_'s own automatic replies (MANIFEST_DATA,
-    // SUBSCRIBE_RESULT, UNSUBSCRIBE_RESULT -- has_command() stays false, so
-    // COMMAND_RESULT never reaches this). MANIFEST_REQUEST always classifies
-    // C_Link (ROBOT::classifyChannel()'s own rule -- only the dongle's
-    // aggregation cache asks for a manifest), so leaving *out_seal null there
-    // falls through to has_seal()/seal() above, the channel-C key, unchanged.
-    // SUBSCRIBE/UNSUBSCRIBE (topico 31.2) are classified BY PEER like COMMAND
-    // and TERMINAL_IN: a TraceView-originated request (channel B) needs its
-    // *_RESULT sealed with key E, not the channel-C key seal() always uses --
-    // this is the one automatic reply that needs the hub-shaped per-reply key
-    // reply_seal() exists for.
+    // Picks the key for node_'s own automatic ESP-NOW replies (MANIFEST_DATA,
+    // SUBSCRIBE_RESULT, UNSUBSCRIBE_RESULT). MANIFEST_REQUEST always
+    // classifies C_Link (ROBOT::classifyChannel()), so leaving *out_seal null
+    // falls through to seal() above, the channel-C key. SUBSCRIBE/UNSUBSCRIBE
+    // (topico 31.2) are classified BY PEER like COMMAND and TERMINAL_IN: a
+    // TraceView-originated request (channel B) needs its *_RESULT sealed
+    // with key E.
     void reply_seal(const btp::Header& request_header, btp::EndpointSealFn* out_seal,
                     void** out_seal_ctx) override;
 
+    // node_'s shared state (catalogue scratch, seal scratch) is reached from
+    // three tasks: the Wi-Fi task (ESP-NOW receive), btp_tcp and the NimBLE
+    // host. A recursive mutex, as btp::NodeConfig::lock() requires; only a
+    // MANIFEST_DATA / SUBSCRIBE_RESULT / HELLO_RESULT build ever holds it.
+    void lock() override;
+    void unlock() override;
+
 private:
     ROBOT& robot_;
+    StaticSemaphore_t lock_storage_{};
+    SemaphoreHandle_t lock_ = nullptr;
 };
 
-// The btp::NodeConfig for tcp_node_ (T21/T22, TAREFAS_TCP_BLE_ANDROID.txt) --
-// a direct-TCP control session's counterpart to RobotLink above, kept as a
-// SEPARATE class rather than a flag on RobotLink for one load-bearing
-// reason: RobotLink's classification (ROBOT::classifyChannel(), used by
-// open()/reply_seal()) forces CONTROL/MANIFEST_REQUEST to channel C
-// unconditionally, "only the dongle's own aggregation cache legitimately
-// asks a robot for its manifest" -- true on ESP-NOW, where the dongle is the
-// only possible sender, but FALSE on TCP, where the peer is always a direct
-// TraceView connection and never the dongle. Reusing RobotLink verbatim
-// would seal a TCP-originated MANIFEST_DATA reply with key L (the dongle's
-// channel-C key), which TraceView does not hold -- an undecryptable catalog
-// for every direct-TCP client. There is no such ambiguity to resolve here:
-// on this connection, EVERY message is channel B/key E, full stop.
-class RobotTcpLink : public btp::NodeConfig {
+// Links 1 (TCP) and 2 (BLE): a direct control session with TraceView. One
+// class for both -- they only differ in which server a frame leaves through.
+// Kept apart from RobotLink for one load-bearing reason: RobotLink's
+// classification forces CONTROL/MANIFEST_REQUEST to channel C ("only the
+// dongle asks for a manifest") -- true on ESP-NOW, FALSE on a direct link,
+// where the peer is always TraceView. On a direct link EVERY message is
+// channel B / key E (RadioSeal::seal_e / open_e), so there is nothing to
+// classify and no reply_seal() override: every automatic reply falls
+// through to seal() below.
+class RobotDirectLink : public btp::NodeLink {
 public:
-    explicit RobotTcpLink(ROBOT& robot) noexcept : robot_(robot) {}
+    RobotDirectLink(ROBOT& robot, ProtocolLinkId link) noexcept
+        : robot_(robot), link_(link) {}
 
-    // Routes to TcpBtpServer::send() (the active TCP client), never
-    // tx_scheduler -- see TcpBtpServer's own queueing/non-blocking
-    // contract. Bytes offered while there is no active client (a stale
-    // send racing a just-closed connection) are simply rejected, same
-    // "fail closed, no fallback transport" posture RobotLink's ESP-NOW send
-    // has.
-    bool send(const std::uint8_t* frame, std::size_t frame_size) override;
-
-    // Always channel B (key E, RadioSeal::seal_e/open_e) -- see this class's
-    // own comment above for why, unlike RobotLink, this never classifies.
-    bool has_seal() const noexcept override { return true; }
-    bool seal(const btp::Header& header, std::uint16_t payload_size,
-              const std::uint8_t* plaintext, std::uint8_t* out) override;
-
-    bool has_open() const noexcept override { return true; }
-    bool open(const btp::Header& header, std::uint16_t sealed_size,
-              const std::uint8_t* sealed, std::uint8_t* out_plaintext) override;
-
-    // Same RX-task-only buffering as RobotLink::terminal() -- see its
-    // comment; duplicated rather than shared because the two are one call
-    // each and belong to otherwise-independent classes.
-    bool has_terminal() const noexcept override { return true; }
-    void terminal(btp::Node& node, const btp::Header& header, btp::ByteView payload,
-                 std::uint64_t now_ms) override;
-
-    // Never classifies (see class comment): always key E, so this can just
-    // return null/null and let has_seal()/seal() above answer for every
-    // object_id, including MANIFEST_REQUEST -- the one case RobotLink's own
-    // reply_seal() cannot leave to its seal() this way.
-    void reply_seal(const btp::Header& request_header, btp::EndpointSealFn* out_seal,
-                    void** out_seal_ctx) override;
-
-private:
-    ROBOT& robot_;
-};
-
-// The btp::NodeConfig for ble_node_ (T33/T34, TAREFAS_TCP_BLE_ANDROID.txt) --
-// a direct-BLE control session's counterpart to RobotTcpLink above. Same
-// reasoning, verbatim: every message on this transport is channel B/key E,
-// with no MANIFEST_REQUEST-is-always-C special case (there is no dongle on
-// the other end of a BLE central either). Kept as its own class rather than
-// a flag on RobotTcpLink for the same load-bearing reason RobotTcpLink is
-// its own class and not a flag on RobotLink -- see that class's comment.
-class RobotBleLink : public btp::NodeConfig {
-public:
-    explicit RobotBleLink(ROBOT& robot) noexcept : robot_(robot) {}
-
-    // Routes to BleBtpServer::send() (the connected central), never
-    // tx_scheduler -- see BleBtpServer's own queueing/non-blocking contract.
+    // TcpBtpServer::send() / BleBtpServer::send() for the connected client,
+    // never tx_scheduler. Bytes offered while nobody is connected are
+    // rejected, same "fail closed, no fallback transport" posture as
+    // RobotLink's ESP-NOW send.
     bool send(const std::uint8_t* frame, std::size_t frame_size) override;
 
     bool has_seal() const noexcept override { return true; }
@@ -213,15 +173,9 @@ public:
     bool open(const btp::Header& header, std::uint16_t sealed_size,
               const std::uint8_t* sealed, std::uint8_t* out_plaintext) override;
 
-    bool has_terminal() const noexcept override { return true; }
-    void terminal(btp::Node& node, const btp::Header& header, btp::ByteView payload,
-                 std::uint64_t now_ms) override;
-
-    void reply_seal(const btp::Header& request_header, btp::EndpointSealFn* out_seal,
-                    void** out_seal_ctx) override;
-
 private:
     ROBOT& robot_;
+    ProtocolLinkId link_;
 };
 
 /**
@@ -325,15 +279,12 @@ static_assert(TelemetryPublisher::kArraySensorChannels == ArraySensor::MAX_LEN,
 
 class ROBOT {
     // protocol_link_ (node_'s btp::NodeConfig) forwards open() into
-    // ROBOT::protocolOpen -- the one copy of the classify-then-RadioSeal logic.
+    // ROBOT::protocolOpen -- the one copy of the classify-then-RadioSeal logic
+    // -- and TERMINAL_IN into terminal_responder.
     friend class RobotLink;
-    // protocol_link_tcp_ (tcp_node_'s btp::NodeConfig, T21/T22) reaches
-    // tcp_server_ (send()) and terminal_responder the same way RobotLink
-    // reaches this class's private members.
-    friend class RobotTcpLink;
-    // protocol_link_ble_ (ble_node_'s btp::NodeConfig, T33/T34) -- same
-    // reasoning as RobotTcpLink, for ble_server_ instead of tcp_server_.
-    friend class RobotBleLink;
+    // protocol_link_tcp_ / protocol_link_ble_ reach tcp_server_ / ble_server_
+    // (send()) the same way.
+    friend class RobotDirectLink;
 
 public:
     // singleton pattern
@@ -629,7 +580,7 @@ private:
     // T33/T34) -- 0..3 always, out-of-range/unimplemented values already
     // resolved to their fallback by then. Exists so
     // bindProtocolTransport() (called later, from main.cpp's
-    // setup_system_callbacks(), once TxScheduler/ble_local_hello_/this
+    // setup_system_callbacks(), once TxScheduler/direct_local_hello_/this
     // robot's protocol identity are ready) can start ble_server_ at the
     // right time -- see init()'s own comment on why starting it any earlier
     // would race that identity.
@@ -796,10 +747,16 @@ private:
     // configure the wifi and the esp-now settings for the robot
     bool configureCommunication();
     bool configureProtocolIdentity();
-    void processCommandRequest(const btp::Header& header,
+    // Stage three of every link's receive path: a complete message node_
+    // handed back as NodeRx::Complete. Every CONTROL / TERMINAL object_id
+    // this robot answers is answered inside node_ already, so this is the
+    // explicit type filter plus the one type node_ does not answer by itself,
+    // COMMAND_REQUEST. `channel` picks the key its COMMAND_RESULT is sealed
+    // with; `link` is where that result goes.
+    void routeMessage(ProtocolLinkId link, const btp::Header& header,
+                      btp::ByteView payload, bally::Channel channel);
+    void processCommandRequest(ProtocolLinkId link, const btp::Header& header,
                                btp::ByteView payload, bally::Channel channel);
-    void dispatchDecoded(const btp::Header& header, btp::ByteView payload,
-                        bally::Channel channel);
     void sampleTelemetry();
 
     // Register every shell module. Most modules are owned by the subsystem
@@ -897,30 +854,13 @@ private:
         uint32_t terminal_source_id = 0U;
         uint32_t terminal_boot_id = 0U;
         // Only meaningful for a "from_remote" command (cache_slot neither
-        // kLocalCommandSlot nor kTerminalCommandSlot): true when this
-        // COMMAND_REQUEST arrived over the direct TCP session (T22) rather
-        // than ESP-NOW, so runShell() answers via protocol_tcp_ instead of
-        // command_processor's default (ESP-NOW `protocol`) endpoint.
-        bool from_tcp = false;
-        // tcp_session_generation_ at enqueue time, only meaningful when
-        // from_tcp is true. runShell() runs on a different task than the one
-        // that can tear tcp_node_/protocol_tcp_ down (onTcpDisconnect(), on
-        // TcpBtpServer's own task) -- if the TCP connection this command
-        // came from is already gone (and possibly replaced by a newer one)
-        // by the time this reaches the front of the queue, the generation
-        // will no longer match and runShell() drops the reply instead of
-        // sending it through a protocol_tcp_ that meanwhile got rebound to a
-        // DIFFERENT connection's tcp_node_ (wrong recipient) or, worse, is
-        // still bound to the just-destroyed one (use-after-free).
-        uint32_t tcp_generation = 0U;
-        // Same shape as from_tcp/tcp_generation above, for a COMMAND_REQUEST
-        // that arrived over the direct BLE session (T33/T34) instead --
-        // mutually exclusive with from_tcp in practice (comm_mode selects
-        // exactly one direct transport per boot), but kept as its own pair
-        // rather than reusing from_tcp/tcp_generation: a future comm_mode
-        // that allows both at once must not have to re-plumb this struct.
-        bool from_ble = false;
-        uint32_t ble_generation = 0U;
+        // kLocalCommandSlot nor kTerminalCommandSlot): the node_ link the
+        // COMMAND_REQUEST arrived on, as it was at enqueue time. runShell()
+        // answers on that link, and only while node_->link_current() still
+        // says yes: it runs on a different task than the one that resets a
+        // direct link on disconnect, and a reply computed for a connection
+        // that has since gone must not reach whoever connected next.
+        btp::LinkRef reply_link{};
     };
 
     // cache_slot for a command that did not come from the radio: a job firing
@@ -1078,15 +1018,12 @@ private:
     static constexpr std::uint64_t kNodeReassemblyTimeoutMs = 4000U;
     static constexpr std::size_t kMaxManifestScratchBytes = 1900U;
 
-    // Shared shape for both this robot's ESP-NOW node_ and its (connection-
-    // scoped, see tcp_node_ below) direct-TCP node. Factored into an alias
-    // once T22 (TAREFAS_TCP_BLE_ANDROID.txt) needed a second instantiation
-    // of the exact same catalogue/subscription/command capacities -- both
-    // serve the identical catalogue (populateCatalog() below) and the same
-    // TelemetryPublisher::kMaxSubscriptions, so there is no reason for the
-    // two to size differently. Deliberately conservative for the TCP case
-    // (sized for the busier ESP-NOW/dongle path, not re-tuned down): a TCP
-    // session is one direct peer at a time, well inside these bounds.
+    // One node, three links (BTP 2.47.0 -- docs/btp-multi-link-node.md):
+    // kLinkEspNow (the dongle, no session), kLinkTcp and kLinkBle (a direct
+    // TraceView session each, HELLO first). The identity, the one sequence
+    // counter, the served catalogue and the scratch buffers are the node's;
+    // each link has its own reassembly slots (same size as ESP-NOW's --
+    // conservative for a direct peer), session and subscription table.
     using ProtocolNode = btp::StaticNode<
         kNodeSlotCount, kNodeSlotBytes,
         /*SealBytes=*/kMaxManifestScratchBytes,
@@ -1096,99 +1033,70 @@ private:
         /*CatalogStringBytes=*/768U,
         /*MaxSubscriptions=*/TelemetryPublisher::kMaxSubscriptions,
         /*MaxCommands=*/1U, /*CommandBytes=*/16U,
-        /*CatalogSourceInfo=*/ManifestCatalog::kMaxSourceInfoEntries>;
+        /*CatalogSourceInfo=*/ManifestCatalog::kMaxSourceInfoEntries,
+        /*Links=*/kProtocolLinkCount>;
 
     RobotLink protocol_link_{*this};
+    RobotDirectLink protocol_link_tcp_{*this, kLinkTcp};
+    RobotDirectLink protocol_link_ble_{*this, kLinkBle};
     std::optional<ProtocolNode> node_;
 
-    // Populates `catalog` from TelemetryPublisher::schemas() and
-    // source_info_entries_/source_info_count_ (ManifestCatalog::populate()) --
-    // called once from bindProtocolTransport() for node_->catalog(), and once
-    // per accepted TCP connection (onTcpConnect()) for tcp_node_->catalog().
-    // Logs a diagnostic on a boot-time/connection-time schema error
+    // Populates node_'s catalogue from TelemetryPublisher::schemas() and
+    // source_info_entries_/source_info_count_ (ManifestCatalog::populate()),
+    // once, from bindProtocolTransport(). Logs a diagnostic on a schema error
     // (duplicate topic_id, a pool too small); MANIFEST_DATA itself still
     // describes whatever fit, same "diagnostic only, not a boot failure"
-    // contract ManifestResponder::catalog_ok() used to have. Was
-    // populateProtocolCatalog() (node_-only, no parameter) before T22 needed
-    // the same population logic for a second Catalog.
+    // contract ManifestResponder::catalog_ok() used to have.
     void populateCatalog(btp::Catalog& catalog);
 
-    // ---- Direct TCP BTP session (TAREFAS_TCP_BLE_ANDROID.txt T21/T22) ----
+    // ---- Direct TCP / BLE sessions (T21/T22, T33/T34) ----
     //
-    // bally_OS is the TCP server, TraceView the client
-    // (BTP/docs/fragmentation-and-transports.md section 9); one control
-    // session at a time (session-and-terminal.md section 3.4). Unlike node_
-    // above (one long-lived instance for the ESP-NOW/dongle peer, session
-    // support never enabled -- ESP-NOW has no HELLO/session concept), the
-    // TCP node is CONNECTION-SCOPED: emplaced fresh in onTcpConnect() and
-    // reset() in onTcpDisconnect(), so a new TCP connection never inherits
-    // any state from a previous one (session-and-terminal.md section 3.4,
-    // "does not resume or inherit any state") -- this falls out for free
-    // from std::optional::reset()+emplace() rather than needing an explicit
-    // teardown/reinitialize step.
-    //
-    // A SEPARATE btp::Node from node_ is a deliberate choice, not an
-    // oversight: btp::Node::enable_session() gates EVERY frame the node's
-    // receive() sees behind the HELLO/session state machine (BTP/src/
-    // node.cpp's route_decoded -- confirmed by reading it before writing
-    // this). Enabling a session on the SAME node_ ESP-NOW already uses would
-    // gate ESP-NOW's own traffic behind a HELLO the dongle never sends,
-    // silently breaking the one link this task was told not to touch. Two
-    // independent btp::Endpoint sequence counters, both under this robot's
-    // one real (source_id, boot_id), is safe here specifically because the
-    // two never share an observer: ESP-NOW's counter is what the dongle's
-    // own dedup cache keys on, and TCP traffic never reaches the dongle at
-    // all (that is the whole point of a DIRECT connection) -- unlike the
-    // ESP-NOW case (BtpEndpoint's own class comment), nothing on the other
-    // end reconciles the two counters against each other.
-    static constexpr std::uint64_t kTcpNodeReassemblyTimeoutMs = 5000U;
+    // bally_OS is the TCP server / BLE peripheral, TraceView the client
+    // (BTP/docs/fragmentation-and-transports.md sections 8 and 9); one
+    // control session per transport at a time (session-and-terminal.md
+    // section 3.4). Each is a link of node_, attached once in
+    // bindProtocolTransport() with its own session enabled; a connect
+    // re-arms it and a disconnect resets it (node_->reset_link()), so a new
+    // connection never inherits reassembly, session or subscriptions from the
+    // previous one ("does not resume or inherit any state") -- and bumps the
+    // link's epoch, which is what keeps a reply queued for the old connection
+    // (QueuedCommand::reply_link) from reaching the new one.
+    static constexpr std::uint64_t kDirectReassemblyTimeoutMs = 5000U;
     // BTP/docs/session-and-terminal.md section 3.4.
-    static constexpr std::uint64_t kTcpHelloDeadlineMs = 2000U;
+    static constexpr std::uint64_t kDirectHelloDeadlineMs = 2000U;
 
     TcpBtpServer tcp_server_;
-    RobotTcpLink protocol_link_tcp_{*this};
-    std::optional<ProtocolNode> tcp_node_;
-    // Bumped once per onTcpConnect(), read by runShell() via
-    // QueuedCommand::tcp_generation -- see that field's own comment for the
-    // use-after-free/misdirection this guards against.
-    std::atomic<std::uint32_t> tcp_session_generation_{0U};
-    // Bound to tcp_node_->endpoint() in onTcpConnect() (BtpEndpoint::bind(),
-    // same pattern `protocol` uses for node_ in bindProtocolTransport()) --
-    // the one send path CommandProcessor::send_result(result, protocol_tcp_)
-    // uses to answer a COMMAND_REQUEST that arrived over TCP instead of
-    // ESP-NOW (see CommandProcessor's own new overload). tcp_node_'s own
-    // automatic replies (HELLO_RESULT, MANIFEST_DATA, SUBSCRIBE_RESULT) go
-    // out through protocol_link_tcp_/tcp_node_'s own endpoint directly, not
-    // through this wrapper -- this member exists only for the one producer
-    // (CommandProcessor) that is not itself part of btp::Node.
+    BleBtpServer ble_server_;
+
+    // The one producer that is not part of btp::Node itself -- CommandProcessor
+    // (COMMAND_RESULT) and TerminalResponder (TERMINAL_OUT) -- sends to a
+    // direct client through these. Bound once in bindProtocolTransport() to
+    // node_->endpoint(), the same btp::Endpoint `protocol` uses, so every link
+    // draws from the robot's one sequence counter (BtpEndpoint::bind()'s own
+    // comment: the counter lives on the shared btp::Endpoint, not on the
+    // wrapper). node_ outlives them, so there is nothing to rebind per
+    // connection.
     BtpEndpoint protocol_tcp_;
-    // T23 (TAREFAS_TCP_BLE_ANDROID.txt): a SECOND BtpEndpoint wrapper bound
-    // to the SAME shared tcp_node_->endpoint() as protocol_tcp_ (safe --
-    // BtpEndpoint::bind()'s own comment: the outgoing sequence counter lives
-    // on the shared btp::Endpoint, not on the wrapper, so two wrappers
-    // pointing at it never hand out colliding sequence numbers). The only
-    // difference from protocol_tcp_ is its send callback
-    // (tcpTelemetrySendStatic instead of tcpEndpointSendStatic), which tags
-    // every frame it sends as FramePriority::Telemetry on the way into
-    // tcp_server_.send() -- see TcpSendAdmission.h. Exists ONLY so
-    // TelemetryPublisher::bind_tcp_target() (which takes a single BtpEndpoint&
-    // for its whole TCP target) can be told apart, at admission time, from
-    // protocol_tcp_'s own COMMAND_RESULT/TERMINAL_OUT traffic -- decoding a
-    // frame's BTP message type inside TcpBtpServer itself would break its
-    // deliberate BTP-unaware design (TcpBtpServer.h's own class comment), so
-    // priority is tagged by the caller instead.
+    BtpEndpoint protocol_ble_;
+    // T23: a SECOND wrapper per direct link over the same endpoint, differing
+    // only in its send callback, which tags every frame FramePriority::
+    // Telemetry on the way into tcp_server_/ble_server_.send() (see
+    // TcpSendAdmission.h) -- so TelemetryPublisher's direct target can be
+    // told apart, at admission time, from COMMAND_RESULT/TERMINAL_OUT without
+    // either server decoding BTP (both stay BTP-unaware on purpose).
     BtpEndpoint protocol_tcp_telemetry_;
-    // This robot's own HELLO advertisement for the TCP responder role --
-    // built once in bindProtocolTransport() (same place node_'s identity is
-    // finalized) and reused both to enable_session() tcp_node_ on every
-    // accepted connection and to feed btp_command::TcpBusyResponder's own
-    // throwaway negotiation for a REJECTED second connection, so both paths
-    // always agree on what this robot advertises.
-    btp::Hello tcp_local_hello_{};
+    BtpEndpoint protocol_ble_telemetry_;
+
+    // This robot's HELLO advertisement for the direct responder role -- built
+    // once in bindProtocolTransport() and used both to enable_session_on()
+    // the TCP and BLE links and to feed tcp_busy_responder_'s throwaway
+    // negotiation for a REJECTED second TCP connection, so every path agrees
+    // on what this robot advertises.
+    btp::Hello direct_local_hello_{};
     // Decodes a pending (second, rejected) TCP connection's first datagram
     // and builds its BUSY HELLO_RESULT -- see BtpTransport.h's own class
-    // comment. One instance is enough: only one connection is ever pending
-    // at a time (TcpBtpServer's own single pending slot).
+    // comment. BLE has no equivalent: BleBtpServer refuses a second central
+    // at the GAP level (T04), so none ever reaches BTP.
     TcpBusyResponder tcp_busy_responder_;
 
     // Starts/stops tcp_server_ to match OTAUpdater's own Wi-Fi lifecycle --
@@ -1199,49 +1107,49 @@ private:
     // right after ota.process().
     void updateTcpServerLifecycle();
 
-    // TcpBtpServer::ConnectCallback: a new active TCP client was just
-    // accepted. Emplaces tcp_node_ fresh, populates its catalogue, binds
-    // protocol_tcp_, enable_session()s + arm_session()s it -- see tcp_node_'s
-    // own comment for why this is a full second btp::Node rather than
-    // reusing node_.
+    // TcpBtpServer / BleBtpServer callbacks. Both servers are BTP-unaware; all
+    // four land in the per-link methods below.
     static void onTcpConnectStatic(void* context) noexcept;
-    void onTcpConnect();
-
-    // protocol_tcp_'s send callback (btp::EndpointSendFn) -- forwards to
-    // tcp_server_.send(), the same destination tcp_node_'s own automatic
-    // sends reach through protocol_link_tcp_::send(). FramePriority::Normal
-    // (tcp_server_.send()'s default) -- see TcpSendAdmission.h.
-    static bool tcpEndpointSendStatic(void* context, const std::uint8_t* frame,
-                                      std::size_t size) noexcept;
-
-    // protocol_tcp_telemetry_'s send callback (T23) -- same shape as
-    // tcpEndpointSendStatic() above, except it passes
-    // TcpBtpServer::FramePriority::Telemetry so tcp_server_.send() can
-    // refuse it early under queue pressure, before it can crowd out a
-    // COMMAND_RESULT/TERMINAL_OUT/catalog reply going through protocol_tcp_.
-    static bool tcpTelemetrySendStatic(void* context, const std::uint8_t* frame,
-                                       std::size_t size) noexcept;
-
-    // TcpBtpServer::ReceiveCallback for the ACTIVE connection: feeds bytes
-    // into tcp_node_->receive(), same shape as handleReceiveStatic()'s
-    // ESP-NOW path (decode/reassemble/open/session -- all btp::Node's job --
-    // then route whatever it hands back). A COMMAND_REQUEST is the one
-    // message type btp::Node does not answer by itself (has_command() stays
-    // false here too, same reason RobotLink documents for node_), so it is
-    // the one type this function still dispatches by hand, into the SAME
-    // command_processor instance ESP-NOW uses -- only the reply's
-    // destination (protocol_tcp_ instead of `protocol`) differs.
     static void onTcpReceiveStatic(void* context, const std::uint8_t* data,
                                    std::size_t size) noexcept;
-    void onTcpReceive(const std::uint8_t* data, std::size_t size);
+    static void onTcpDisconnectStatic(void* context) noexcept;
+    static void onBleConnectStatic(void* context) noexcept;
+    static void onBleReceiveStatic(void* context, const std::uint8_t* data,
+                                   std::size_t size) noexcept;
+    static void onBleDisconnectStatic(void* context) noexcept;
 
-    // Mirrors processCommandRequest()'s ESP-NOW body (same command_processor
-    // instance, same receivedDataQueue) for a COMMAND_REQUEST decoded off
-    // the TCP session -- channel is always B_Endpoint (see RobotTcpLink's
-    // class comment, there is no C_Link case on this transport) and the
-    // queued entry is tagged from_tcp/tcp_generation so runShell() answers
-    // through protocol_tcp_ instead of the default ESP-NOW endpoint.
-    void processTcpCommandRequest(const btp::Header& header, btp::ByteView payload);
+    // protocol_tcp_ / protocol_ble_ send callbacks (FramePriority::Normal)
+    // and their telemetry twins (FramePriority::Telemetry) -- see T23 above.
+    static bool tcpEndpointSendStatic(void* context, const std::uint8_t* frame,
+                                      std::size_t size) noexcept;
+    static bool tcpTelemetrySendStatic(void* context, const std::uint8_t* frame,
+                                       std::size_t size) noexcept;
+    static bool bleEndpointSendStatic(void* context, const std::uint8_t* frame,
+                                      std::size_t size) noexcept;
+    static bool bleTelemetrySendStatic(void* context, const std::uint8_t* frame,
+                                       std::size_t size) noexcept;
+
+    // A direct client just connected on `link` (kLinkTcp / kLinkBle): starts
+    // the link from a clean slate and arms its session -- Idle ->
+    // AwaitingHello right as the link comes up (session-and-terminal.md
+    // section 3.4), kDirectHelloDeadlineMs bounding the wait -- and gives
+    // TerminalResponder this link's send target.
+    void onDirectConnect(ProtocolLinkId link);
+    // The direct client on `link` is gone (peer closed, a socket/radio error,
+    // or the server stopping): resets the link (see the block comment above)
+    // and evicts its terminal origins.
+    void onDirectDisconnect(ProtocolLinkId link);
+    // Bytes from a direct client: node_->receive_on(link) does decode /
+    // reassembly / session / open and answers every CONTROL / TERMINAL
+    // message by itself; a COMMAND_REQUEST is routed by routeMessage().
+    void onDirectReceive(ProtocolLinkId link, const std::uint8_t* data,
+                         std::size_t size);
+
+    // The BtpEndpoint a COMMAND_RESULT for `link` leaves through: nullptr for
+    // kLinkEspNow (command_processor's own default endpoint, `protocol`).
+    BtpEndpoint* commandEndpoint(ProtocolLinkId link) noexcept;
+    void sendCommandResult(ProtocolLinkId link,
+                           const CommandProcessor::ResultView& result);
 
     // TcpBtpServer::PendingCallback: bytes from a SECOND, not-yet-rejected
     // connection. Feeds tcp_busy_responder_; on a recognized HELLO, sends
@@ -1252,91 +1160,15 @@ private:
                                           std::size_t size) noexcept;
     void onTcpPendingReceive(const std::uint8_t* data, std::size_t size);
 
-    // TcpBtpServer::DisconnectCallback: the active client is gone (peer
-    // closed, a socket error, or the server stopping). Tears tcp_node_ down
-    // (std::optional::reset()) so the next connection starts from Idle, not
-    // whatever this one negotiated -- see tcp_node_'s own comment.
-    static void onTcpDisconnectStatic(void* context) noexcept;
-    void onTcpDisconnect();
-
-    // ---- Direct BLE BTP session (T33/T34, TAREFAS_TCP_BLE_ANDROID.txt) ----
-    //
-    // Mirrors the direct-TCP block above field-for-field, method-for-method
-    // -- same reasoning throughout (a SEPARATE btp::Node so enabling a
-    // session cannot gate ESP-NOW's own HELLO-less traffic, connection-
-    // scoped so a new central never inherits state from a previous one),
-    // except there is no TcpBusyResponder/pending-connection equivalent:
-    // BLE's second-session rejection happens at the GAP level, inside
-    // BleBtpServer itself (T04's decision -- see that class's own comment),
-    // so a second central is never even able to reach GATT, let alone send
-    // a HELLO this robot would have to decode and reject.
-    static constexpr std::uint64_t kBleNodeReassemblyTimeoutMs = 5000U;
-    static constexpr std::uint64_t kBleHelloDeadlineMs = 2000U;
-
-    BleBtpServer ble_server_;
-    RobotBleLink protocol_link_ble_{*this};
-    std::optional<ProtocolNode> ble_node_;
-    std::atomic<std::uint32_t> ble_session_generation_{0U};
-    BtpEndpoint protocol_ble_;
-    // T23's same split as protocol_tcp_/protocol_tcp_telemetry_, for the
-    // same reason: a distinct send callback (bleTelemetrySendStatic) lets
-    // BleBtpServer::send() tell a TELEMETRY frame apart from COMMAND_RESULT/
-    // TERMINAL_OUT/catalog replies at admission time, without decoding BTP
-    // inside BleBtpServer (which stays BTP-unaware, like TcpBtpServer).
-    BtpEndpoint protocol_ble_telemetry_;
-    // This robot's HELLO advertisement for the direct-BLE responder role --
-    // built once in bindProtocolTransport(), reused on every accepted
-    // connection (onBleConnect()). No busy-responder equivalent needs it a
-    // second way, unlike tcp_local_hello_.
-    btp::Hello ble_local_hello_{};
-
-    // BleBtpServer::ConnectCallback: a central just connected (never a
-    // second, concurrent one -- see the class comment). Emplaces ble_node_
-    // fresh, populates its catalogue, binds protocol_ble_/
-    // protocol_ble_telemetry_, enable_session()s + arm_session()s it.
-    static void onBleConnectStatic(void* context) noexcept;
-    void onBleConnect();
-
-    // protocol_ble_'s send callback (btp::EndpointSendFn) -- forwards to
-    // ble_server_.send(), FramePriority::Normal (BleBtpServer::send()'s
-    // default).
-    static bool bleEndpointSendStatic(void* context, const std::uint8_t* frame,
-                                      std::size_t size) noexcept;
-    // protocol_ble_telemetry_'s send callback (mirrors tcpTelemetrySendStatic).
-    static bool bleTelemetrySendStatic(void* context, const std::uint8_t* frame,
-                                       std::size_t size) noexcept;
-
-    // BleBtpServer::ReceiveCallback for the connected central: feeds bytes
-    // into ble_node_->receive(), same shape as onTcpReceive()'s body (a
-    // COMMAND_REQUEST is the one message type btp::Node does not answer by
-    // itself, dispatched by hand into the SAME command_processor instance
-    // every other transport uses).
-    static void onBleReceiveStatic(void* context, const std::uint8_t* data,
-                                   std::size_t size) noexcept;
-    void onBleReceive(const std::uint8_t* data, std::size_t size);
-
-    // Mirrors processTcpCommandRequest()'s body for a COMMAND_REQUEST
-    // decoded off the BLE session -- channel is always B_Endpoint (no
-    // C_Link case on this transport either), tagged from_ble/ble_generation
-    // so runShell() answers through protocol_ble_ instead of ESP-NOW/TCP.
-    void processBleCommandRequest(const btp::Header& header, btp::ByteView payload);
-
-    // BleBtpServer::DisconnectCallback: the connected central is gone.
-    // Tears ble_node_ down (std::optional::reset()) so the next connection
-    // starts from Idle.
-    static void onBleDisconnectStatic(void* context) noexcept;
-    void onBleDisconnect();
-
-    // Two tasks touch node_ once it exists, and it holds no lock: receive()
-    // from the ESP-NOW receive callback, tick()'s reassembly sweep once a
-    // second from routine() via publishStatus(). Tolerated single-writer-ish
-    // race, unchanged from before RxRouter existed and this was already the
-    // shape.
+    // Tasks touching node_: each link's own receive task (the Wi-Fi task for
+    // ESP-NOW, btp_tcp, the NimBLE host), each only ever on its own link, as
+    // btp::Node requires; the state they share is guarded by protocol_link_'s
+    // lock() / unlock(). publishStatus() only READS link 0's counters.
 
     // Classifies one decoded header the same way for both protocolOpen()
-    // (which key opens it) and dispatchDecoded() (which key answers it) --
+    // (which key opens it) and routeMessage() (which key answers it) --
     // one source of truth instead of two copies of channel_of_peer's call.
-    // CONTROL/MANIFEST_REQUEST never reaches dispatchDecoded() at all any
+    // CONTROL/MANIFEST_REQUEST never reaches routeMessage() at all any
     // more (node_->receive() answers it internally, NodeRx::RequestServed --
     // see node_'s own comment); protocolOpen() still classifies it C_Link,
     // consistent with the same fact that made it channel C by hand before:

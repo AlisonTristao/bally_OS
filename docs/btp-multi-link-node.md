@@ -125,8 +125,14 @@ Links fixos: `0 = ESP-NOW`, `1 = TCP`, `2 = BLE`.
   links com sessão também fica como está: hoje ninguém chama `tick()` no robô, e ligar o watchdog de
   sessão agora derrubaria sessões TCP/BLE ociosas. Isso fica para um item à parte.
 
-**RAM:** economia estimada de ~10–12 KB estáticos (2 × catálogo, 2 × scratch de manifest, 2 × seal
-scratch, 2 × caches de comando). O número real vai ser medido com `sizeof` no teste nativo antes do merge.
+**RAM (medido, `pio run -e esp32-s3`):** 227.584 → 210.512 bytes estáticos, ou seja, **−17.072 bytes**
+(69,5% → 64,2%). A economia vem de 2 × catálogo, 2 × scratch de manifest, 2 × seal scratch e 2 × caches de
+comando. A flash fica praticamente igual.
+
+**Achado fora do escopo:** o caminho principal de TCP/BLE do robô entrega os bytes crus ao `receive()` e
+envia frames crus, mas a spec (fragmentation-and-transports §8/§9) e o TraceView usam stream enquadrado com
+COBS. Isso já existia antes deste item, e só o `TcpBusyResponder` faz COBS. Precisa ser confirmado em
+hardware e corrigido à parte, de preferência com um enquadramento de stream por link no próprio BTP.
 
 ## 7. Conflito com trabalho em andamento
 

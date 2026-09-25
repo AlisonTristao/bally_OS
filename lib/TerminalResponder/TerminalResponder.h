@@ -98,13 +98,13 @@ public:
     // echo/prompt/output emitted through THIS endpoint instead of the one
     // configure() set, using this same class's single per-origin state
     // machine either way. `seal` is normally the same sealer configure() was
-    // given (RadioSeal::seal_e for both -- RobotTcpLink is always channel B,
+    // given (RadioSeal::seal_e for both -- a direct link is always channel B,
     // like the ESP-NOW link's own TERMINAL traffic), only the destination
     // endpoint differs. Call once per accepted TCP connection.
     void bind_tcp_target(BtpEndpoint& endpoint, BtpSealFn seal,
                          void* seal_context) noexcept;
 
-    // Reverses bind_tcp_target() (onTcpDisconnect()) AND evicts every
+    // Reverses bind_tcp_target() (onDirectDisconnect()) AND evicts every
     // TCP-origin slot: session-and-terminal.md's "a new connection does not
     // inherit state from a previous one" applies to the terminal too, and a
     // slot left resident for a now-dead connection would both waste one of
@@ -124,7 +124,7 @@ public:
     void bind_ble_target(BtpEndpoint& endpoint, BtpSealFn seal,
                          void* seal_context) noexcept;
 
-    // Reverses bind_ble_target() (onBleDisconnect()) AND evicts every
+    // Reverses bind_ble_target() (onDirectDisconnect()) AND evicts every
     // BLE-origin slot -- same contract as unbind_tcp_target().
     void unbind_ble_target() noexcept;
 

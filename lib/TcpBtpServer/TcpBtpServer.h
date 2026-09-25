@@ -116,7 +116,7 @@ public:
     // finding the queue at/above kTelemetryQueueCeiling -- see
     // TcpSendAdmission.h -- or the copy failing) nothing is queued and the
     // caller must retain/retry at the BTP queue boundary. `priority`
-    // defaults to Normal: every existing caller (RobotTcpLink::send(),
+    // defaults to Normal: every existing caller (RobotDirectLink::send(),
     // COMMAND_RESULT/TERMINAL_OUT via protocol_tcp_) keeps today's behavior
     // unchanged; only TelemetryPublisher's TCP target passes Telemetry.
     bool send(const std::uint8_t* data, std::size_t size,

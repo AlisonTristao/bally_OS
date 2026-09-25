@@ -211,25 +211,27 @@ public:
     // flush() checks EACH target's own table before sending a sample to it,
     // so a peer subscribed only on ESP-NOW never causes a sample to reach the
     // TCP client and vice versa. `endpoint`/`seal`/`seal_context` are the TCP
-    // session's own send path (protocol_tcp_, RadioSeal::seal_e -- channel
-    // B/key E, exactly like the ESP-NOW target: RobotTcpLink is always
-    // channel B, see its class comment in BallyRobot.h). Call once per
-    // accepted TCP connection, once tcp_node_'s own SubscriptionTable exists
-    // (mirrors bind_subscriptions()'s own call site in onTcpConnect()).
+    // session's own send path (protocol_tcp_telemetry_, RadioSeal::seal_e --
+    // channel B/key E, exactly like the ESP-NOW target: a direct link is
+    // always channel B, see RobotDirectLink's class comment in BallyRobot.h).
+    // The firmware calls it once, at boot, with node_'s TCP link table
+    // (node_->link_subscriptions(kLinkTcp)): that table lives as long as
+    // node_, is empty until a SUBSCRIBE arrives on the TCP link and is cleared
+    // on disconnect, so flush() simply finds nobody to publish to while no
+    // client is subscribed.
     //
-    // A caller that never calls this (every existing native test, and the
-    // firmware whenever no TCP client is connected) is unaffected: flush()
-    // only ever sees the one ESP-NOW target, exactly as before this existed.
+    // A caller that never calls this (every existing native test) is
+    // unaffected: flush() only ever sees the one ESP-NOW target.
     void bind_tcp_target(BtpEndpoint& endpoint, BtpSealFn seal,
                          void* seal_context,
                          const btp::SubscriptionTable& subscriptions) noexcept;
 
-    // Reverses bind_tcp_target() (onTcpDisconnect()): every method below goes
-    // back to reporting/publishing the ESP-NOW side alone. MUST be called
-    // before the TCP session's own SubscriptionTable is destroyed (tcp_node_.
-    // reset()) -- this only clears the pointers this class holds into it, it
-    // never touches tcp_node_ itself. Idempotent, and safe even when
-    // bind_tcp_target() was never called.
+    // Reverses bind_tcp_target(): every method below goes back to reporting/
+    // publishing the ESP-NOW side alone. MUST be called before the table
+    // bind_tcp_target() was given is destroyed -- this only clears the
+    // pointers this class holds into it. Idempotent, and safe even when
+    // bind_tcp_target() was never called. (The firmware's table outlives this
+    // object, so it never needs to.)
     void unbind_tcp_target() noexcept;
 
     // A THIRD, independent send target for a live direct-BLE session (T33/
@@ -240,14 +242,14 @@ public:
     // transport), but nothing in THIS class's own contract relies on that
     // invariant staying true forever, and a shared slot silently reused for
     // "whichever direct transport happens to be up" would be surprising to
-    // a future reader expecting bind_tcp_target() to mean TCP. Call once per
-    // accepted BLE connection, once ble_node_'s own SubscriptionTable exists
-    // (mirrors bind_subscriptions()'s own call site in onBleConnect()).
+    // a future reader expecting bind_tcp_target() to mean TCP. The firmware
+    // binds it once, at boot, with node_'s BLE link table -- same reasoning
+    // as bind_tcp_target().
     void bind_ble_target(BtpEndpoint& endpoint, BtpSealFn seal,
                          void* seal_context,
                          const btp::SubscriptionTable& subscriptions) noexcept;
 
-    // Reverses bind_ble_target() (onBleDisconnect()) -- same contract as
+    // Reverses bind_ble_target() -- same contract as
     // unbind_tcp_target(). Idempotent, and safe even when bind_ble_target()
     // was never called.
     void unbind_ble_target() noexcept;
@@ -456,17 +458,16 @@ private:
     // that would mean stalling the Wi-Fi RX task's SUBSCRIBE handling behind
     // whatever the state-machine task is doing at the same moment.
     const btp::SubscriptionTable* subscriptions_ = nullptr;
-    // TCP session's own SubscriptionTable (tcp_node_->subscriptions()), see
+    // TCP link's own SubscriptionTable (node_->link_subscriptions(kLinkTcp)), see
     // bind_tcp_target()'s comment -- same tolerated race and nullptr-default
-    // posture as subscriptions_ just above, except this one is expected to
-    // flip between a real table and nullptr at runtime (bind_tcp_target()/
-    // unbind_tcp_target() on every TCP connect/disconnect), not just once at
-    // boot.
+    // posture as subscriptions_ just above (the firmware binds it once, at
+    // boot; unbind_tcp_target() exists for a caller whose table does not
+    // outlive this object).
     const btp::SubscriptionTable* tcp_subscriptions_ = nullptr;
     // BLE target (bind_ble_target()/unbind_ble_target(), T33/T34) -- same
     // plain-pointer, tolerated-cross-task-race posture as tcp_endpoint_
-    // above (written from BleBtpServer's NimBLE host task on connect/
-    // disconnect, read from the comms task's flush()).
+    // above (bound once at boot by the firmware, read from the comms task's
+    // flush()).
     BtpEndpoint* ble_endpoint_ = nullptr;
     BtpSealFn ble_seal_ = nullptr;
     void* ble_seal_context_ = nullptr;

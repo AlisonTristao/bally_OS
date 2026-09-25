@@ -6,9 +6,9 @@
 
 // T23 (TAREFAS_TCP_BLE_ANDROID.txt): TcpBtpServer::send_queue_ is a single
 // 16-frame FIFO shared by every producer that reaches a direct-TCP session
-// (COMMAND_RESULT, TERMINAL_OUT, catalog/session replies via RobotTcpLink,
+// (COMMAND_RESULT, TERMINAL_OUT, catalog/session replies via RobotDirectLink,
 // and TELEMETRY via TelemetryPublisher's TCP target -- see BallyRobot.cpp's
-// onTcpConnect()). Unlike the ESP-NOW path (TxScheduler.h, 6 fixed-priority
+// bindProtocolTransport()). Unlike the ESP-NOW path (TxScheduler.h, 6 fixed-priority
 // circular queues: CommandResult > Status > Terminal > CriticalLog >
 // Telemetry > Debug), that FIFO does not distinguish frame classes: once
 // full, ANY frame is refused equally, including a COMMAND_RESULT that needs
@@ -42,7 +42,7 @@ enum class FramePriority : std::uint8_t {
     // Everything that is not telemetry: COMMAND_RESULT, TERMINAL_OUT, and
     // btp::Node's own automatic replies (HELLO_RESULT, MANIFEST_DATA,
     // SUBSCRIBE_RESULT/UNSUBSCRIBE_RESULT, SESSION_CLOSE) sent via
-    // RobotTcpLink::send(). Only ever refused once the queue is genuinely
+    // RobotDirectLink::send(). Only ever refused once the queue is genuinely
     // full (no reserved margin below it -- there is nothing lower-priority
     // than Telemetry to protect Normal frames from).
     Normal = 0,
