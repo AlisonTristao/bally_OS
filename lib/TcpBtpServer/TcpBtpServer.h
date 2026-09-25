@@ -145,6 +145,17 @@ public:
     void close_active_client() noexcept { close_client(); }
 
 private:
+    static constexpr std::size_t kReceiveBufferSize = 4096U;
+    // The second connection only needs enough bytes to recognize HELLO.
+    static constexpr std::size_t kPendingReceiveBufferSize = 512U;
+
+    // Owned by the server for its entire lifetime, accessed only by run().
+    // Receive callbacks borrow these bytes synchronously and must not retain
+    // them. Keeping these 4608 bytes off the task stack leaves room for
+    // select(), the BTP callbacks and their nested calls.
+    std::uint8_t receive_buffer_[kReceiveBufferSize]{};
+    std::uint8_t pending_receive_buffer_[kPendingReceiveBufferSize]{};
+
     static void task_entry(void* context) noexcept;
     void run() noexcept;
     void close_client() noexcept;

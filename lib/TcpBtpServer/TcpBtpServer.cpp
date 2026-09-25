@@ -8,17 +8,14 @@
 #include <esp_timer.h>
 #include <lwip/inet.h>
 #include <lwip/sockets.h>
+// Only the shared task-stack size alias is needed from this header.
+#include <Settings.h>
 
 namespace {
 
 constexpr char kTag[] = "TCP_BTP";
 constexpr int kListenBacklog = 2;
 constexpr int kPollTimeoutMs = 200;
-constexpr std::size_t kReceiveBufferSize = 4096U;
-// Only ever needs to hold a HELLO datagram (a few dozen octets) before the
-// composition layer's TcpBusyResponder recognizes it or this class's own
-// kPendingHelloDeadlineMs gives up -- see the header's class comment.
-constexpr std::size_t kPendingReceiveBufferSize = 512U;
 
 std::uint32_t now_ms() {
     return static_cast<std::uint32_t>(esp_timer_get_time() / 1000LL);
@@ -66,7 +63,9 @@ bool TcpBtpServer::start(std::uint16_t port, const Callbacks& callbacks) noexcep
     send_queue_head_ = 0U;
     send_queue_count_ = 0U;
     running_.store(true);
-    if (xTaskCreate(&TcpBtpServer::task_entry, "btp_tcp", 4096, this, 4, &task_) != pdPASS) {
+    // ESP-IDF takes stack depth in bytes. RX storage lives in the server;
+    // reserve stack headroom for socket, protocol and crypto call chains.
+    if (xTaskCreate(&TcpBtpServer::task_entry, "btp_tcp", M8KB, this, 4, &task_) != pdPASS) {
         running_.store(false);
         vSemaphoreDelete(send_mutex_);
         send_mutex_ = nullptr;
@@ -161,8 +160,6 @@ void TcpBtpServer::task_entry(void* context) noexcept {
 }
 
 void TcpBtpServer::run() noexcept {
-    std::uint8_t buffer[kReceiveBufferSize];
-    std::uint8_t pending_buffer[kPendingReceiveBufferSize];
     while (running_.load()) {
         fd_set read_set;
         fd_set write_set;
@@ -243,11 +240,11 @@ void TcpBtpServer::run() noexcept {
 
         const int active_fd = client_fd_.load();
         if (active_fd >= 0 && FD_ISSET(active_fd, &read_set)) {
-            const int received = ::recv(active_fd, buffer, sizeof(buffer), 0);
+            const int received = ::recv(active_fd, receive_buffer_, sizeof(receive_buffer_), 0);
             if (received <= 0) {
                 close_client();
             } else if (callbacks_.on_receive != nullptr) {
-                callbacks_.on_receive(callbacks_.context, buffer,
+                callbacks_.on_receive(callbacks_.context, receive_buffer_,
                                       static_cast<std::size_t>(received));
             }
         }
@@ -259,13 +256,13 @@ void TcpBtpServer::run() noexcept {
         const int watched_pending = pending_fd_.load();
         if (watched_pending >= 0 && FD_ISSET(watched_pending, &read_set)) {
             const int received =
-                ::recv(watched_pending, pending_buffer, sizeof(pending_buffer), 0);
+                ::recv(watched_pending, pending_receive_buffer_, sizeof(pending_receive_buffer_), 0);
             if (received <= 0) {
                 close_pending();
             } else {
                 if (callbacks_.on_pending_receive != nullptr) {
                     callbacks_.on_pending_receive(
-                        callbacks_.context, pending_buffer,
+                        callbacks_.context, pending_receive_buffer_,
                         static_cast<std::size_t>(received));
                 }
                 // A pending peer that keeps sending without ever completing
