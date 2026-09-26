@@ -1,6 +1,6 @@
 # Bally_OS - Firmware ESP32-S3
 
-Este projeto implementa o controle de um robô baseado em ESP32-S3, utilizando arquitetura orientada a objetos, FreeRTOS, comunicação ESP-NOW e execução paralela em dois núcleos. A telemetria e os comandos trafegam via [BTP](https://github.com/AlisonTristao/BTP), um protocolo binário de comunicação e plotagem de dados em tempo real sobre ESP-NOW.
+Este projeto implementa o controle de um robô baseado em ESP32-S3, utilizando arquitetura orientada a objetos, FreeRTOS e execução paralela em dois núcleos. A telemetria, os logs e os comandos trafegam via [BTP](https://github.com/AlisonTristao/BTP), e toda a comunicação (ESP-NOW, TCP, BLE ou USB serial, a chave, o terminal do TraceView e os tópicos) vem da [BTPDevice](https://github.com/AlisonTristao/BTPDevice).
 
 > **Compatibilidade:**
 > Este software está sendo desenvolvido para ser totalmente compatível com o hardware documentado no repositório [bally_robot](https://github.com/AlisonTristao/bally_robot).
@@ -15,6 +15,7 @@ Este projeto implementa o controle de um robô baseado em ESP32-S3, utilizando a
 ├── lib/           # Bibliotecas principais (sensores, controle, motores, logger, etc.)
 ├── robot/         # Implementação dos estados da máquina de estados
 ├── src/           # Código principal (main.cpp)
+│   └── btp/       # Configuração da BTPDevice: link, SD/chave, comandos, tópicos
 ├── utils/         # Objetos estáticos e utilitários globais
 ├── platformio.ini # Configuração do PlatformIO
 ```
@@ -25,12 +26,8 @@ Este projeto implementa o controle de um robô baseado em ESP32-S3, utilizando a
 - **Encoder**: Gerencia a leitura dos encoders usando periféricos de hardware do ESP32.
 - **Format**: Header-only, sem dependências — formatação de tamanhos em bytes (`"12.34 MB"`) reaproveitada por SDCard, USBMassStorage e Logger.
 - **HBridge**: Controle dos motores via ponte H, incluindo direção e PWM.
-- **BtpTransport**: Endpoint BTP v1 com identidade de boot e sequência atômica. O pipeline seal → fragment → encode é o `btp::Endpoint` da lib BTP (2.7.0); o que fica aqui é o callback de envio (o `TxScheduler`) e o perfil ESP-NOW.
-- **CommandProcessor**: Valida `COMMAND_REQUEST`, executa cada intenção uma vez e reproduz o mesmo `COMMAND_RESULT` correlacionado nos retries. A deduplicação por boot (cache em anel, high-water mark por requester) é o `btp::DedupCache` da lib BTP (2.6.0); o que fica aqui é executar a ação, selar/enviar a resposta e escolher as capacidades.
-- **ManifestCatalog**: Carrega os schemas estáticos de `TelemetryPublisher` (`protocol.test`, `robot.state`, `system.monitor`, `robot.sensors`, `robot.flags`) e o `source_info` no `btp::Catalog` que `node_` serve — quem responde `CONTROL/MANIFEST_REQUEST` de verdade é o próprio `node_->receive()` (`btp::Node::serve_catalog`, BTP 2.35.0+2.39.0); `config_revision` é uma constante por build e é incrementada quando o catálogo muda.
-- **TxScheduler**: Filas estáticas separadas e FIFO por classe; transmite `COMMAND_RESULT > STATUS > LOG` crítico `> TELEMETRY > DEBUG`, com um único envio ESP-NOW pendente e contadores de aceite, entrega, timeout e drop.
-- **Logger**: Ring de eventos em PSRAM; emite exclusivamente frames `LOG` BTP de tamanho real via ESP-NOW.
-- **TelemetryPublisher**: Fila SPSC estática e não bloqueante para as amostras numéricas (`protocol.test` em `PACKED_LE` a até 50 Hz, `robot.state` nas transições, `robot.sensors`/`robot.flags` a até 50 Hz cada); o documento `system.monitor` em `UTF8` (padrão de 0,33 Hz, configurável por assinatura até 1 Hz) é grande e de baixa taxa, então usa um slot de staging próprio, fora da fila. Todos preservam o timestamp da coleta.
+- **BTPDevice** (componente ESP-IDF, checkout irmão `../BTPDevice`): o link (um por boot, escolhido pelo `comm_mode`), o nó BTP (sessão, manifesto, STATUS, assinaturas), a chave, o terminal do TraceView, o shell em task própria e a publicação dos tópicos. A configuração do robô fica em `src/btp/` — ver "Comunicação" abaixo.
+- **Logger**: Ring de eventos em PSRAM; entrega cada linha à BTPDevice (`btpdev::log_record`, mensagens LOG com o horário original) e grava arquivos `.blog` no SD.
 - **OTAUpdater**: Atualização de firmware sem fio a partir do estado DEBUG — conecta a uma rede Wi-Fi cadastrada no cartão SD, anuncia `<hostname>.local` via mDNS e recebe o novo binário via HTTP (`POST /update`). `GET /status` (JSON: `device`, `online`, `firmware`, `ota_ready`) deixa uma ferramenta externa checar se o robô está pronto para receber o upload antes de mandá-lo.
 - **RobotSettings**: Armazena e persiste (`settings.conf` no SD) todos os parâmetros configuráveis em runtime. `settings -set` só muda a memória; `settings -apply <module>` empurra a mudança para o subsistema que já a consumiu no boot, sem reiniciar — ver "Aplicar configuração sem reboot" abaixo.
 - **SDCard** / **USBMassStorage**: Acesso ao cartão SD e transferência de propriedade exclusiva do FAT entre o robô e um host USB.
@@ -86,7 +83,7 @@ Nem todo módulo pode ser aplicado em runtime, e `settings -apply` diz honestame
 | `kinematics`, `error` | Não fazem nada: `encoder_ppr`/`wheel_radius`/`error_blink_ms` são lidos direto de `settings.data()` a cada uso, sem cópia para atualizar. Registrados como *no-op* só para a resposta ser "applied" em vez de "requires a reboot". |
 | `sensor`, `pins_*` (7 grupos) | **Sem aplicador**: `settings -apply` responde `requires a reboot`. `ArraySensor` reconfigura ADC/GPIO no construtor e os grupos de pino dimensionam periféricos já energizados — não há caminho de reconfiguração viva para nenhum dos dois. |
 
-`settings -revision` conta quantas vezes `save()` gravou o arquivo com sucesso **nesta sessão de boot** (zera a cada reboot, `load()` não mexe nele). É a forma barata de um cliente remoto perceber "a configuração mudou desde a última vez que eu olhei", sem reler as ~55 chaves de `settings -list_all` para comparar. Deliberadamente **não** é a mesma coisa que `ManifestCatalog::kConfigRevision`: aquele campo do protocolo (BTP/docs/commands.md seção 3) documenta "o catálogo de tópicos/schemas mudou", que neste firmware é genuinamente fixo em tempo de compilação — reaproveitá-lo para outra coisa seria mudar unilateralmente a semântica de um campo do protocolo, a mesma classe de problema que `include/bally_channels.h` existe para evitar entre os três repositórios.
+`settings -revision` conta quantas vezes `save()` gravou o arquivo com sucesso **nesta sessão de boot** (zera a cada reboot, `load()` não mexe nele). É a forma barata de um cliente remoto perceber "a configuração mudou desde a última vez que eu olhei", sem reler as ~55 chaves de `settings -list_all` para comparar. Deliberadamente **não** é a mesma coisa que o `config_revision` do manifesto: aquele campo do protocolo (BTP/docs/commands.md seção 3) documenta "o catálogo de tópicos/schemas mudou", que a BTPDevice deriva do próprio catálogo — reaproveitá-lo para outra coisa seria mudar unilateralmente a semântica de um campo do protocolo, a mesma classe de problema que `include/bally_channels.h` existe para evitar entre os três repositórios.
 
 ### Descoberta e diagnóstico
 
@@ -96,20 +93,29 @@ Nem todo módulo pode ser aplicado em runtime, e `settings -apply` diz honestame
 
 Um `esp_register_shutdown_handler()` grava o *ring* de PSRAM retido no cartão antes de todo reboot **ordenado** (`sys -reboot`, `factory_reset`, o restart pós-upload do OTA) — mesmo raciocínio que já existia só para a transição TELEMETRY: o que ainda não saiu pelo rádio (possivelmente sem alcance) seria perdido quando o *ring* é limpo. **Isso não cobre uma queda (panic/abort)** — `esp_restart()` pula os *shutdown handlers* nesse caso, e cobrir essa metade exigiria uma partição de coredump, que este firmware ainda não tem (ver "Limitações conhecidas" abaixo).
 
-### Canal B (chave E) de ponta a ponta
+### Comunicação (BTPDevice)
 
-Cada canal responde selado com a própria chave, nunca com a do outro:
+A comunicação inteira é da [BTPDevice](https://github.com/AlisonTristao/BTPDevice), configurada por quatro arquivos em `src/btp/`:
 
-- `RadioSeal::seal_e()`/`open_e()` espelham `seal()`/`open()`, lendo `key_e()` em vez de `key_l()`.
-- `ROBOT::handleReceiveStatic` classifica todo `COMMAND` recebido com `bally::channel_of_peer(Vantage::Robot, header.source_id, dongle_source_id_)` **antes** de decifrar — `source_id` viaja em claro mesmo dentro de um frame selado — e escolhe `open()` ou `open_e()` de acordo. `dongle_source_id_` é derivado uma vez de `MAC_ADDR` (o mesmo build flag que já identifica a dongle) com a mesma conversão MAC→source_id que o robô usa para a própria identidade.
-- `CommandProcessor` sabe de qual canal cada requisição veio (`ResultView::channel`, guardado por pedido no cache de deduplicação) e `send_result()` sela a resposta com a chave **daquele** canal. Se a chave do canal específico não estiver configurada mas a do outro canal estiver, a resposta é **descartada**, nunca sai em claro nem selada com a chave errada — testado em `test/btp_integration` (`test_channel_b_reply_is_sealed_with_endpoint_key_not_link_key`, `test_channel_b_reply_without_endpoint_key_configured_is_dropped`).
-- SUBSCRIBE_RESULT/UNSUBSCRIBE_RESULT recebem o mesmo tratamento do lado do `btp::Node` (`RobotLink::reply_seal()`, que reusa `ROBOT::classifyChannel()`): quem pediu pelo canal B recebe a resposta selada com a chave E. MANIFEST_REQUEST é sempre canal C, por definição (só a própria dongle legitimamente pede o manifesto de um robô).
+| Arquivo | O quê |
+|---|---|
+| `btp_device.cpp` | Nome (`settings.conf`, `identity.name`), link, canal ESP-NOW, MAC da dongle (`MAC_ADDR`), task de comunicação, `source_info` do manifesto |
+| `btp_storage.cpp` | O SD do robô como volume da aplicação: `bally.key` e `wifi.txt` são lidos dali |
+| `btp_commands.cpp` | Os módulos de shell do robô (`ROBOT::registerShell`) e o `state` |
+| `btp_topics.cpp` | Os tópicos (`protocol.test`, `robot.state`, `system.monitor`, `robot.sensors`, `robot.flags`, ids `0x0001`..`0x0005`) |
+
+- **Link:** `comm_mode` 0 ESP-NOW (dongle), 1 TCP (Wi-Fi do `wifi.txt`, porta 44300, `<nome>.local`), 2 BLE, 3 USB serial. Um boot em OTA (botão) usa TCP, porque o servidor de update anda na conexão Wi-Fi da BTPDevice.
+- **Chave:** `bally.key` (gerado por `tools/provision_key.py` da BTPDevice) na raiz do SD é importado para o NVS no boot e renomeado para `bally.key.imported`; dali em diante a chave vive no NVS, com ou sem cartão. `btp -key` mostra as tags públicas. ESP-NOW, TCP e BLE são sempre cifrados (sem chave, a BTPDevice cai para o USB serial); o USB serial fica sem cifra, porque quem está no cabo já tem o robô na mão.
+- **Canais:** no ESP-NOW a BTPDevice sela cada mensagem com a chave do canal (E para o TraceView através da dongle, L para a própria dongle) e responde pelo canal do pedido, conforme `include/bally_channels.h`.
+- **Diagnóstico:** o módulo `btp` substitui os antigos `link`, `telemetry` e `sec`: `btp -status`, `btp -errors`, `btp -topics`, `btp -key`, `btp -link`, `btp -wifi`, `btp -fs`.
+- **Telemetria:** as amostras são montadas na task de comunicação da BTPDevice, só na taxa assinada, a partir de snapshots do robô. Correntes e array sensor são lidos pela task da máquina de estados (a mesma que usa o mux no RUN) e só enquanto `robot.sensors` tem assinante.
+- **Logs:** `Logger` entrega as linhas retidas à BTPDevice, que as manda como LOG para o painel do TraceView; linha recusada (sem peer, fila cheia) fica na PSRAM para a próxima passada. Enquanto um comando roda, suas linhas também são a saída dele no terminal.
 
 `ota -scan` dispara uma varredura Wi-Fi de redes visíveis sem exigir nenhuma rede já cadastrada (ao contrário de `ota -start`, que precisa de pelo menos uma); `ota -scan_results` lista o que a última varredura viu (SSID, RSSI, aberta ou não). `job -save` grava todo job `every`/`at` ativo em `jobs.conf`, restaurado automaticamente no próximo boot (depois de `autoexec.job`); um job `once` nunca é salvo, porque seu atraso é relativo ao momento em que foi agendado — persisti-lo faria a mesma linha significar outra coisa depois de um reboot.
 
 ### Limitações conhecidas
 
-- **Sem política de autorização por canal (READ/CONFIG/ACT).** A chave L (canal C, dongle) só administra o link — não é uma chave "de administrador geral" — mas os dois canais têm acesso igual: qualquer requisição selada com **qualquer uma** das duas chaves executa qualquer comando, motores inclusive. `sec -channels` reporta os dois canais como selados (`sealed=1`) e avisa explicitamente sobre essa equivalência de acesso, documentada em vez de deixada implícita.
+- **Sem política de autorização por canal (READ/CONFIG/ACT).** A chave L (canal C, dongle) só administra o link — não é uma chave "de administrador geral" — mas os dois canais têm acesso igual: qualquer requisição selada com **qualquer uma** das duas chaves executa qualquer comando, motores inclusive.
 - **Sem coredump em flash.** Não há partição dedicada em `partitions.csv`; uma queda (panic/abort) não deixa coredump para inspeção.
 
 ### Outras Pastas
@@ -130,9 +136,8 @@ Alguns módulos de shell moram no próprio `ROBOT` (`registerSystemCommands`/`re
 - **`robot`** (btn/ssr/set_pwm/set_led): aciona os `Flags_in`/`Flags_out`/`Flags_pwm` que o próprio `ROBOT` compõe; não há uma biblioteca "dona" além dele.
 - **`kalman`** (estado do EKF + log periódico): o filtro (`TinyEKF`) é uma dependência externa vendorizada, sem wrapper próprio no `lib/`; quem possui a instância, o timer de amostragem e os vetores de controle/medição é o `ROBOT`.
 - **`debug`** (`test_arr_sensor`/`test_encoder`): o agendamento e o *gate* (estado DEBUG + USB ocioso) são aplicados uniformemente sobre vários sensores a partir de estado privado do `ROBOT`, não pertencem a nenhum sensor individual.
-- **`sys`** (identidade, saúde e ciclo de vida): cruza `esp_system`, `esp_ota_ops`, `BtpEndpoint`, `SystemMonitor` e `StateMachine` de uma vez; nenhuma lib isolada responde "quem sou eu e como estou".
-- **`job`** (comandos agendados + script do SD): o `JobScheduler` é propositalmente livre de TinyShell para ser testável no host, e o executor de script precisa do cartão SD e da fila de comandos, que são do `ROBOT`.
-- **`link`/`telemetry`/`sec`** (rádio, protocolo e chaves): todas as libs que eles leem — `TxScheduler`, `CommandProcessor`, `TelemetryPublisher`, `KeyStore` — são compiladas pelo `env:native`, onde o TinyShell não existe. Registrar do lado do `ROBOT` é o que mantém `pio test -e native` de pé.
+- **`sys`** (identidade, saúde e ciclo de vida): cruza `esp_system`, `esp_ota_ops`, a identidade BTP, `SystemMonitor` e `StateMachine` de uma vez; nenhuma lib isolada responde "quem sou eu e como estou".
+- **`job`** (comandos agendados + script do SD): o `JobScheduler` é propositalmente livre de TinyShell para ser testável no host, e o executor de script precisa do cartão SD, que é do `ROBOT`; as linhas rodam no shell da BTPDevice (`BtpDevice::run()`).
 
 Sobre `motion`: o `drive` recebe **comando normalizado (-100..100), não m/s**. Este firmware não tem modelo de motor calibrado — `EKF_K_R`/`EKF_K_L` são 1.0 de placeholder e `control_input[]` é PWM cru (ver `sampleEKF`), então converter metro por segundo em duty seria unidade inventada. A mistura diferencial é real; só a escala não é calibrada, e `motion -limits` diz isso no output.
 
@@ -140,9 +145,7 @@ Sobre `motion`: o `drive` recebe **comando normalizado (-100..100), não m/s**. 
 
 `motion -coast` precisa de um *latch* porque o `setOutputs()` reaplica as flags a cada passagem e `HBridge::applyPWM(0)` é **freio ativo** — um `coast()` solto seria desfeito em menos de um milissegundo. Qualquer PWM comandado vence o coast pendente.
 
-Sobre `link -reset_stats`: ele **não zera contador nenhum**. Os contadores do `CONTROL/STATUS` são normativamente monotônicos desde o boot (commands.md seção 5), e zerá-los faria qualquer consumidor que calcula delta ver um valor negativo. O comando marca um ponto zero e o `link -delta` mostra a diferença desde ele.
-
-Além disso, `BallyRobotShell.cpp` é **o único lugar** onde podem ser registrados comandos que operam sobre as bibliotecas compiladas pelo `env:native` (`BtpTransport`, `CommandProcessor`, `Format`, `KeyStore`, `ManifestCatalog`, `StatusReporter`, `TelemetryPublisher`, `TxScheduler`): nenhuma delas pode incluir `TinyShell.h`, que não existe no build de host. Ver `CONTRIBUTING.md` e o comentário de cabeçalho do próprio arquivo.
+Além disso, `BallyRobotShell.cpp` é **o único lugar** onde podem ser registrados comandos que operam sobre as bibliotecas compiladas pelo `env:native` (`Format`, `JobScheduler`): nenhuma delas pode incluir `TinyShell.h`, que não existe no build de host. Ver `CONTRIBUTING.md` e o comentário de cabeçalho do próprio arquivo.
 
 `ROBOT`/`BallyRobot` é o *composition root*: o único lugar que conhece e instancia todos os subsistemas. Ele não contém a lógica de negócio de nenhum deles.
 
@@ -150,68 +153,45 @@ Além disso, `BallyRobotShell.cpp` é **o único lugar** onde podem ser registra
 
 ### Tasks da aplicação
 
-O BallyOS cria oito tasks próprias. Todas usam `xTaskCreateStaticPinnedToCore()`,
-com stack e `StaticTask_t` reservados estaticamente em `src/main.cpp`. O tick do
-FreeRTOS está configurado em 1 kHz; portanto, nos loops que usam
-`WDOG_TIMEOUT_TK = 1`, o intervalo nominal entre passagens é de 1 ms.
+O BallyOS cria cinco tasks próprias, e a BTPDevice mais duas. As do robô usam
+`xTaskCreateStaticPinnedToCore()`, com stack e `StaticTask_t` reservados
+estaticamente em `src/main.cpp`. O tick do FreeRTOS está configurado em 1 kHz;
+portanto, nos loops que usam `WDOG_TIMEOUT_TK = 1`, o intervalo nominal entre
+passagens é de 1 ms.
 
 | Task | Core | Prioridade | Stack | Responsabilidade e forma de espera |
 |---|---:|---:|---:|---|
-| `state_machine` | 1 (`APP_CPU_NUM`) | 10 | 8 KB | Executa `StateMachine::run()`, roda a ação do estado atual e produz telemetria. Faz `vTaskDelay(1)` ao final de cada passagem. |
-| `comms` | 0 (`PRO_CPU_NUM`) | 4 | 8 KB | Processa os terminais remotos, drena o `TxScheduler` e publica `STATUS`. Faz `vTaskDelay(1)`. |
+| `state_machine` | 1 (`APP_CPU_NUM`) | 10 | 8 KB | Executa `StateMachine::run()`, roda a ação do estado atual, avisa a troca de estado (`robot.state`) e amostra correntes/array enquanto `robot.sensors` tem assinante. Faz `vTaskDelay(1)` ao final de cada passagem. |
+| `btpdev_comms` (BTPDevice) | 0 (`PRO_CPU_NUM`) | 4 | 8 KB | O link: recepção, sessão, terminal, STATUS, tópicos (os `fill()` de `src/btp/btp_topics.cpp`) e logs. Acordada pelo link ou a cada 1 ms. |
 | `EKF_task` | 0 (`PRO_CPU_NUM`) | 4 | 2 KB | Aguarda indefinidamente em `ulTaskNotifyTake()` e, quando notificada pelo timer, executa `predict()` e `update()`. |
-| `routine` | 0 (`PRO_CPU_NUM`) | 3 | 8 KB | Drena telemetria e Logger, atualiza flags/saídas, verifica transições, aciona sons e processa jobs e scripts. Faz `vTaskDelay(1)`. |
-| `shell_task` | 0 (`PRO_CPU_NUM`) | 2 | 8 KB | Retira e executa, de forma serial, um comando por vez da fila central. |
+| `routine` | 0 (`PRO_CPU_NUM`) | 3 | 8 KB | Processa o OTA, entrega os logs retidos à BTPDevice, atualiza flags/saídas, verifica transições, aciona sons e processa jobs e scripts. Faz `vTaskDelay(1)`. |
+| `btpdev_shell` (BTPDevice) | qualquer | 3 | 8 KB | Executa, um por vez, os comandos do terminal, de `COMMAND_REQUEST` e dos jobs/scripts. |
 | `junkebox_task` | 0 (`PRO_CPU_NUM`) | 1 | 4 KB | Fica bloqueada na mailbox de reprodução e usa task notifications para interromper uma nota em andamento. |
 | `interrupts` | 0 (`PRO_CPU_NUM`) | 0 | 2 KB | Task de inicialização: registra as GPIO ISRs e cria o timer periódico do EKF; depois executa `vTaskDelete(NULL)`. |
 
 `app_main` é a task de bootstrap criada pelo ESP-IDF. Ela inicializa o `ROBOT`,
-liga os callbacks, cria as tasks acima e então também se apaga. Existem ainda
-contextos pertencentes ao ESP-IDF: os callbacks de recepção/entrega ESP-NOW
-executam na task do Wi-Fi, as GPIO ISRs executam em contexto de interrupção e
-`sampleEKF()` executa na `ESP_TIMER_TASK` porque o timer usa
-`ESP_TIMER_TASK` como método de despacho.
+inicia a BTPDevice (`start_device()`), liga os callbacks, cria as tasks acima e
+então também se apaga. Existem ainda contextos pertencentes ao ESP-IDF: os
+callbacks dos links executam nas tasks do Wi-Fi/NimBLE/TinyUSB e só copiam
+bytes para a fila da BTPDevice, as GPIO ISRs executam em contexto de
+interrupção e `sampleEKF()` executa na `ESP_TIMER_TASK`.
 
 ### Fluxo entre tasks, filas e callbacks
 
 ```text
-GPIO ISR ───────────────> Flags ───────────────> routine ──> StateMachine::next()
-                                                    │
-ESP-NOW RX ──> BTP ──> fila de comandos ──> shell_task ──> COMMAND_RESULT
-     │                                                   │
-     └──> TerminalResponder ──> comms ───────────────────┘
+GPIO ISR ─────────> Flags ──────────> routine ──> StateMachine::next()
 
-state_machine ──> fila de telemetria ──> routine ──┐
-todas as tasks ──> Logger/PSRAM ───────> routine ──┼──> TxScheduler
-comms ────────────────────────────────> STATUS ─────┘       │
-                                                            └──> ESP-NOW
+link (ESP-NOW/TCP/BLE/USB) ──> btpdev_comms ──> btpdev_shell ──> resultado/terminal
+routine (jobs, scripts) ──────> BtpDevice::run() ──┘
+
+state_machine ──> snapshots/flags ──> btpdev_comms (fill dos tópicos) ──> link
+todas as tasks ──> Logger/PSRAM ──> routine ──> btpdev::log_record ──> link
 
 ESP_TIMER_TASK ──> amostra + task notification ──> EKF_task
 play()/stop() ───> mailbox + task notification ──> junkebox_task
 ```
 
-O caminho de transmissão tem duas etapas. Os produtores primeiro codificam e
-entregam frames ao `TxScheduler`; somente `comms` chama `esp_now_send()`. O
-callback de entrega não envia o próximo frame: ele apenas publica o resultado
-em um campo atômico, consumido por `comms` na passagem seguinte. Assim, uma
-operação lenta de SD, Logger ou máquina de estados não executa diretamente no
-caminho que mantém o rádio vivo.
-
 ### Filas, mailboxes e buffers de passagem
-
-#### Fila central de comandos
-
-`ROBOT::receivedDataQueue` é uma fila FreeRTOS estática com 10 posições. Cada
-item contém uma linha de shell de até 512 bytes, o slot do cache de deduplicação
-e, para comandos de terminal, a identidade da origem.
-
-- **Produtores:** callback ESP-NOW (`COMMAND_REQUEST`), `comms` (linhas do
-  terminal), e `routine` (jobs e scripts do SD).
-- **Consumidor:** `shell_task`, sempre com execução serial.
-- **Backpressure:** todos os produtores usam timeout zero e nunca bloqueiam. Um
-  comando BTP recusado recebe `BUSY/CAPACITY_EXHAUSTED`; o terminal imprime
-  `busy, command dropped`; uma ocorrência de job é contabilizada e descartada;
-  uma linha de script permanece no cursor e é tentada novamente.
 
 #### Mailbox da Junkebox
 
@@ -221,57 +201,17 @@ substituída pela mais recente, em vez de as músicas formarem backlog. A task
 notification acorda a task ou interrompe a nota atual; a própria mailbox
 carrega os parâmetros completos da próxima reprodução.
 
-#### Filas de prioridade do TxScheduler
-
-O `TxScheduler` mantém seis filas circulares independentes e pré-alocadas. Cada
-fila possui seu próprio `std::atomic_flag`; enqueue/pop nunca aguardam a
-liberação do lock. A seleção de saída é por prioridade estrita:
-
-| Ordem | Classe | Capacidade | Conteúdo típico |
-|---:|---|---:|---|
-| 1 | `CommandResult` | 8 | Resultado correlacionado de comando |
-| 2 | `Status` | 4 | Heartbeat e estado do link |
-| 3 | `Terminal` | 16 | Echo, prompt e saída interativa |
-| 4 | `CriticalLog` | 8 | Logs críticos |
-| 5 | `Telemetry` | 16 | Amostras e documentos de telemetria |
-| 6 | `Debug` | 8 | Logs informativos/debug e tráfego restante |
-
-A capacidade lógica total é de 60 frames. Fila cheia ou contenção instantânea
-do `atomic_flag` aplica `drop-newest`. Somente um frame pode aguardar callback
-ESP-NOW de cada vez; o firmware usa timeout de entrega de 60 ms antes de seguir
-para o próximo. Resultados de comando não são retransmitidos pelo scheduler: um
-retry da requisição recupera o resultado guardado no `CommandProcessor`.
-
-#### TelemetryPublisher
-
-As amostras numéricas usam uma fila SPSC estática de 16 posições. A
-`state_machine` é a única produtora e `routine` é a única consumidora, drenando
-no máximo quatro amostras por passagem. Os índices de leitura/escrita são
-atômicos; fila cheia descarta a amostra nova sem bloquear.
-
-O documento UTF-8 `system.monitor`, de até 1802 bytes, não ocupa esses 16
-slots. Ele possui uma mailbox própria de uma posição, publicada pelo campo
-atômico `pending`. Se o relatório anterior ainda não foi consumido, o relatório
-novo é contado e descartado.
-
-#### Logger e TerminalResponder
+#### Logger
 
 O Logger funciona como uma fila variável em um ring buffer de 7.440.000 bytes
-na PSRAM. Várias tasks produzem registros; `routine` os percorre para gerar
-frames de rádio. O envio por rádio não libera PSRAM: somente um flush para SD
-remove registros retidos. Quando não há espaço para o registro completo, o
-registro novo é descartado e o antigo é preservado.
+na PSRAM. Várias tasks produzem registros; `routine` os entrega à BTPDevice.
+Entregar não libera PSRAM: somente um flush para SD remove registros retidos.
+Quando não há espaço para o registro completo, o registro novo é descartado e o
+antigo é preservado.
 
-O `TerminalResponder` usa três slots de origem em vez de uma `QueueHandle_t`.
-Cada origem possui até 1024 bytes de entrada, 2048 bytes para a saída do comando
-e 1024 bytes de saída assíncrona, além de uma linha completa aguardando o
-comando anterior terminar. O callback Wi-Fi apenas deposita bytes; a edição de
-linha, echo e submissão acontecem em `comms`.
-
-Outras estruturas de capacidade fixa não são filas FIFO: o cache de
-deduplicação do `CommandProcessor` tem 16 slots, o `JobScheduler` tem 8 jobs, o
-Receiver BTP tem 4 slots de remontagem de 600 bytes e a tabela BTP comporta 8
-assinaturas.
+As filas do link, do shell e dos logs são da BTPDevice (tamanho fixo, alocadas
+no `begin()`, preset de memória `Medium`); `btp -errors` conta o que elas
+descartaram. O `JobScheduler` tem 8 jobs.
 
 ### Mutexes, spinlocks e notificações
 
@@ -279,15 +219,12 @@ O código próprio possui três mutexes FreeRTOS:
 
 | Mutex | Tipo/alocação | Estado protegido | Política de espera |
 |---|---|---|---|
-| `Logger::mutex_` | Mutex normal, dinâmico | Ring da PSRAM, cursores, consumidor ativo, endpoint e captura de saída do terminal | A maioria das operações tenta por 2 ms; etapas internas de flush usam `portMAX_DELAY`. |
+| `Logger::mutex_` | Mutex normal, dinâmico | Ring da PSRAM, cursores, consumidor ativo, endpoint, sink e eco | A maioria das operações tenta por 2 ms; etapas internas de flush usam `portMAX_DELAY`. |
 | `StateMachine::transitionMutex_` | Mutex recursivo, dinâmico | Execução de `run()`/`next()`, callbacks e ring de histórico das últimas 8 transições | `portMAX_DELAY`; o lock permanece tomado durante o callback do estado/transição. |
 | `SystemMonitor::state_mutex` | Mutex normal, estático | Vetor de tasks, deltas de CPU e geração consistente do relatório | `portMAX_DELAY`. |
 
-Além deles, existem nove spinlocks baseados em `std::atomic_flag`: seis no
-`TxScheduler`, um no cache do `CommandProcessor`, um no `TerminalResponder` e
-um nas estatísticas por tópico do `TelemetryPublisher`. Esses locks protegem
-seções curtas e usam políticas de falha rápida ou número limitado de tentativas
-nos caminhos em que bloquear uma task de maior prioridade seria perigoso.
+A BTPDevice tem os próprios locks (filas do link, dos prints e dos logs),
+sempre curtos e com espera limitada.
 
 As task notifications não carregam os dados completos e não substituem as
 filas: no EKF elas apenas informam que existe uma amostra nova nos vetores
@@ -304,47 +241,29 @@ O `void loop` roda exclusivamente no núcleo 1, especializado em executar a fun�
 No segundo núcleo, é executada a rotina paralela do robô, responsável por:
 - Verificar as *flags* dos botões, sensores laterais, sinais PWM e LEDs.
 - Gerir as transições da máquina de estados, de acordo com as *flags*.
-- Gerenciar a fila estática de comandos recebidos por ESP-NOW.
-- Antes da fila, validar o frame BTP (magic, versão, tamanhos, CRC e fragmentação), o MAC/source da origem, o alvo do boot e abrir o selo AEAD (canal B key E ou canal C key L). Chegam ao **TinyShell**: a ação de shell `0x0001` v1 de um `COMMAND_REQUEST`, e as linhas de `TERMINAL_IN` (`0x0001`) que o `TerminalResponder` edita server-side e cuja saída é espelhada de volta como `TERMINAL_OUT`. `TELEMETRY`, `LOG`, `CONTROL` não previstos e demais objetos são rejeitados.
-- Reservar a identidade `(source_id, boot_id, sequence)` antes de executar; retries idênticos reutilizam o resultado armazenado, conflitos são rejeitados e fila cheia gera `BUSY/CAPACITY_EXHAUSTED` estruturado.
-- Drenar o scheduler de transmissão sem deixar telemetria ou debug atrasarem resultados de comando; o callback ESP-NOW apenas confirma ou falha o único frame pendente.
+- Entregar os logs retidos à BTPDevice e processar jobs, scripts e o OTA.
 - Gerenciar o Filtro de Kalman Estendido, fazendo a amostragem, o cálculo de predição e a atualização do estado. 
 
 ---
 
-### Comunicação
-- **ESP-NOW/BTP:** Utilizado para comunicação sem fio. `BTP` (fio v2) é registrado como componente ESP-IDF (`components/btp/CMakeLists.txt`, revisão esperada v2.40.0), com as fontes vindas do checkout irmão `../BTP` — necessário para que `RadioSeal` enxergue os headers mbedtls/PSA, que uma lib `lib_deps` sob `framework = espidf` não recebe; `[env:native]` usa o mesmo checkout via `symlink://../BTP`. Nenhum `struct` C/C++ é transmitido.
-- **Identidade:** `source_id` deriva do MAC de fábrica; `boot_id` é um contador incremental não nulo persistido em NVS, com retorno a 1 após `UINT32_MAX`. A sequência é única por mensagem lógica e compartilhada com segurança entre tasks.
-- **Comandos:** o peer autorizado é o `MAC_ADDR` do build e seu `source_id` precisa corresponder ao MAC recebido. O payload da ação de shell é uma única linha de até 512 bytes, sem NUL, CR ou LF. O resultado BTP repete a tripla da requisição, `action_id/version`, status e erro; o cache estático de 16 entradas permanece durante todo o boot, portanto retry nunca repete o efeito.
-- **Scheduler TX:** cada produtor entrega frames completos a uma fila bounded da sua classe. Há capacidade exclusiva para resultados de comando mesmo com 16 telemetrias pendentes. Telemetria e logs espontâneos não são retransmitidos; perda de resultado é recuperada pelo retry da requisição e replay do cache.
+### Telemetria
 
-#### Logger (eventos e debug)
-O Logger preserva o ring de PSRAM, mas o armazenamento interno não é formato de wire. Na inserção, cada evento recebe `timestamp_us` e uma sequência BTP. No `flush`, o payload é lido em blocos de até 210 bytes, codificado com CRC-32 pelo codec canônico e enviado em frames de tamanho exato. Arquivos `.blog` também contêm frames BTP concatenados e são validados antes do replay. Telemetria de alta frequência permanece fora do Logger e é publicada por `TelemetryPublisher`.
+Os tópicos são declarados em `src/btp/btp_topics.cpp`: `protocol.test`
+(`topic_id=0x0001`, `counter:uint32`, `value:float32`, até 50 Hz),
+`robot.state` (`0x0002`, `state:uint8`, uma amostra por transição),
+`system.monitor` (`0x0003`, texto UTF-8 de até 1 KB, até 1 Hz),
+`robot.sensors` (`0x0004`: `linear_speed`/`angular_speed`/`gyro_z`/`accel_x`/
+`accel_y` em `float32`, `current_a`/`current_b` em `uint16` — contagem bruta do
+ADC, ainda não calibrada em amperes — e `array_0`..`array_7` em `uint8`, a
+leitura bruta de cada canal do array sensor reduzida para 1 byte (`>>4`),
+até 50 Hz) e `robot.flags` (`0x0005`: `buttons`/`side_sensors`/`leds` em
+`uint8` (bitmask) e `pwm_left`/`pwm_right` em `int8`, até 50 Hz). Nenhum desses
+campos é calibrado; o EKF e a lógica de seguir linha continuam usando
+`get_line_position()`/`normalize()` do `ArraySensor`, sem depender disso.
 
-#### TelemetryPublisher (amostras binárias)
-
-O publisher possui 16 slots pré-alocados e política explícita de `drop-newest`:
-se a fila estiver cheia, a task de controle contabiliza e descarta a nova
-amostra sem esperar. A sequência BTP e o `timestamp_us` são reservados na
-coleta; a task `routine` apenas codifica e envia depois. Falhas imediatas de
-rádio também são contabilizadas e removidas para não travar a fila.
-
-Os schemas estáticos são `protocol.test` (`topic_id=0x0001`, `counter:uint32`,
-`value:float32`), `robot.state` (`topic_id=0x0002`, `state:uint8`),
-`robot.sensors` (`topic_id=0x0004`: `linear_speed`/`angular_speed`/`gyro_z`/
-`accel_x`/`accel_y` em `float32`, `current_a`/`current_b` em `uint16` — contagem
-bruta do ADC, ainda não calibrada em amperes — e `array_0`..`array_7` em
-`uint8`, a leitura bruta de cada canal do array sensor (line follower)
-reduzida para 1 byte (`>>4`); nenhum desses campos é calibrado, todos são só
-para plotar — o EKF e a lógica de seguir linha continuam usando
-`get_line_position()`/`normalize()` do `ArraySensor`, sem depender disso) e
-`robot.flags` (`topic_id=0x0005`: `buttons`/`side_sensors`/`leds` em `uint8`
-(bitmask) e `pwm_left`/`pwm_right` em `int8`), todos `PACKED_LE`, versão 1.
-Não há CSV, formatação textual, terminador nem passagem pelo `Logger`.
-
-`robot.sensors` é alimentado pelo mesmo snapshot de alta taxa (`SensorSnapshot`,
-atualizado a `cfg.sample_micros` por `ROBOT::sampleEKF()`) que monta o vetor de
-medição do EKF — ver `utils/BallyRobot/BallyRobot.h`.
+`robot.sensors` usa o mesmo snapshot de alta taxa (`SensorSnapshot`, atualizado
+a `cfg.sample_micros` por `ROBOT::sampleEKF()`) que monta o vetor de medição do
+EKF — ver `utils/BallyRobot/BallyRobot.h`.
 
 ### Flags (Eventos Temporizados e Segurança)
 O projeto utiliza uma biblioteca de *flags* para facilitar a gestão de eventos temporizados e garantir segurança no controle dos atuadores:
@@ -375,13 +294,13 @@ Segure o(s) botão(ões) **antes** de resetar/ligar e só solte quando os LEDs m
 | só btn1 | USB storage (`DEBUG` + `storage expose`) | btn2 devolve o cartão |
 | nenhum | `SETUP` → `WAIT` | — |
 
-O BOOT (btn0/GPIO0) nunca entra nessa escolha: segurá-lo no reset põe o chip no bootloader da ROM. Com `comm_mode` BLE ou serial o Wi-Fi não sobe, então o OTA por botão não funciona — use `COMM_CONFIG` para voltar a ESP-NOW/TCP.
+O BOOT (btn0/GPIO0) nunca entra nessa escolha: segurá-lo no reset põe o chip no bootloader da ROM. O OTA por botão funciona em qualquer `comm_mode`: naquele boot o link é TCP (Wi-Fi do `wifi.txt`), e o upload vai para `<nome>.local`.
 
 No `comm_mode` serial o robô fala BTP pela porta CDC do USB nativo, **sem senha** (sem cifra, e sem precisar do `bally.key`): quem está nesse cabo já tem acesso físico ao robô. ESP-NOW, TCP e BLE continuam cifrados.
 
 ## Dependências externas
 
-- **TinyShell** (adicionada via `lib_deps` no platformio.ini):
+- **BTPDevice**, **BTP** e **TinyShell** (componentes ESP-IDF, checkouts irmãos `../BTPDevice`, `../BTP` e `../TinyShell` — ver `CMakeLists.txt`). O TinyShell:
   Usado para a interpretação de comandos textuais de telemetria. Oferece:
   - Validação do módulo, nome do comando e número de argumentos.
   - Conversão dinâmica de *strings* com parâmetros de escape.

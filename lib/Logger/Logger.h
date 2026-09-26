@@ -14,18 +14,10 @@
 #include <LogTypes.h>
 #include <Settings.h>
 
-// Only for btp::Header, named in the LogRadioSeal function-pointer type
-// below. BtpTransport.h defines the equivalent alias BtpSealFn, but Logger.h
-// is pulled in by RobotSettings/OTAUpdater, whose PlatformIO libraries do not
-// depend on BtpTransport -- including it here breaks their `chain` LDF
-// resolution on the esp32-s3 build. btp/codec.hpp is header-only and already
-// on every consumer's path (the btp ESP-IDF component's public include).
-#include <btp/codec.hpp>
-
 class SDCard;
 class TinyShell;
 class RobotSettings;
-class BtpEndpoint;
+namespace btp { class Endpoint; }
 
 class Logger {
 public:
@@ -38,30 +30,31 @@ public:
     Logger& operator=(const Logger&) = delete;
     void begin();
 
-    // Structurally identical to BtpTransport.h's BtpSealFn (and to
-    // BtpEndpoint::SealFn): a channel sealer passed straight through to
-    // BtpEndpoint::send_fragment. Redeclared here rather than pulled in with
-    // <BtpTransport.h> -- see the include note above.
-    using LogRadioSeal = bool (*)(void* context, const btp::Header& header,
-                                  std::uint16_t payload_size,
-                                  const std::uint8_t* plaintext,
-                                  std::uint8_t* out);
-
-    // acess methods for the logger
     /*
-    * @brief Attach the process-wide BTP endpoint used to allocate sequences,
-    * encode LOG frames and hand exact wire bytes to the selected transport.
-    *
-    * `seal`/`seal_context` (default nullptr) are the channel-B sealer for LOG
-    * over the radio. LOG rides channel B (TraceView<->robot, key E --
-    * bally_channels.h), so the real caller passes RadioSeal::seal_e. When
-    * set, every LOG frame flush_logs() and send_log_direct() put on the radio
-    * is sealed with it or NOT SENT (fail-closed, no cleartext fallback). The
-    * SD flush path (flush_logs_to) is never sealed: those files are local
-    * diagnostics and must stay readable without the key.
+    * @brief Attach the BTP endpoint that numbers the records and encodes the
+    * SD log files (flush_logs_to): the device's identity, never sealed --
+    * those files are local diagnostics and must stay readable without the
+    * key. Records inserted before this call are dropped.
     */
-    void configure_btp(BtpEndpoint& endpoint, LogRadioSeal seal = nullptr,
-                       void* seal_context = nullptr);
+    void configure_btp(btp::Endpoint& endpoint);
+
+    /*
+    * @brief Where flush_logs() and send_log_direct() hand each LOG line for
+    * the link (BtpDevice: btpdev::log_record, which seals and sends it).
+    * `false` means "not sent now": flush_logs() keeps the record in the ring
+    * and tries again on its next call. nullptr: nothing goes on the link.
+    */
+    using RadioSink = bool (*)(logType type, uint64_t timestamp_us,
+                               const uint8_t* text, size_t length);
+    void set_radio_sink(RadioSink sink);
+
+    /*
+    * @brief Called with every line inserted, synchronously, on the inserting
+    * task (BtpDevice: while a command runs, its lines become the command's
+    * output in TraceView's terminal). Must not call back into the logger.
+    */
+    using EchoFn = void (*)(const char* text, size_t length);
+    void set_echo(EchoFn echo);
 
     /**
      * @brief Configure how many packets flush_logs() sends per call
@@ -87,23 +80,6 @@ public:
      * Used for shell responses while the SD card belongs to the USB host.
      */
     bool send_log_direct(logType type, const char* msg);
-
-    /**
-     * @brief BTP terminal channel output capture (topico 19bis).
-     *
-     * Between begin_capture() and end_capture(), every insert_log/insert_logf/
-     * send_log_direct issued FROM @p task is ALSO appended (text + '\n') to an
-     * internal buffer bounded at kCaptureCapacity. TerminalResponder mirrors
-     * that buffer back to the origin as TERMINAL_OUT, so a command typed at
-     * TraceView's terminal shows its output inline the way bally_dongle does.
-     *
-     * The capture is additive: the same lines still go out as LOG frames.
-     * Only one capture is active at a time (the shell task runs one command
-     * at a time); a second begin_capture() replaces the first.
-     */
-    static constexpr size_t kCaptureCapacity = 4096;
-    void begin_capture(TaskHandle_t task);
-    void end_capture(std::string& out);
 
     /*
     * @brief Send the log messages that are currently in the logger's buffer using the configured send callback.
@@ -188,40 +164,27 @@ private:
     uint32_t read_offset_ = 0;
     uint32_t used_bytes_ = 0;
 
-    // ESP-NOW has its own cursor. Sending does not release retained PSRAM.
+    // The link has its own cursor. Sending does not release retained PSRAM.
     uint32_t send_offset_ = 0;
     uint32_t pending_send_bytes_ = 0;
     bool send_record_active_ = false;
     StoredLogHeader send_header_{};
-    // Octets of the current record already put on the radio. This was a
-    // uint8_t fragment index; it became a byte count once each radio chunk
-    // started going out as its own single-fragment LOG message rather than
-    // fragment N of one -- an AEAD tag covers the whole logical payload and
-    // cannot cover a slice of one, so a sealed LOG record over one ESP-NOW
-    // frame is sent as several independent sealed messages (each a separate
-    // line at the desktop). The SD flush path (flush_logs_to) still writes
-    // one multi-fragment record and is never sealed.
+    // Octets of the current record already handed to the radio sink: a
+    // long record goes out as several LOG lines. The SD flush path
+    // (flush_logs_to) still writes one multi-fragment record.
     uint32_t send_record_bytes_done_ = 0;
 
     // Only one consumer (ESP-NOW or SD) may walk the ring at a time.
     bool consumer_busy_ = false;
 
-    // Terminal-output capture (begin_capture/end_capture). Guarded by mutex_
-    // like endpoint_. capture_buf_ is bounded at kCaptureCapacity.
-    bool capture_active_ = false;
-    TaskHandle_t capture_task_ = nullptr;
-    std::string capture_buf_;
-    // caller must hold mutex_
+    // set_echo(); caller must hold mutex_.
+    EchoFn echo_ = nullptr;
     void capture_text(const uint8_t* data, size_t len);
 
     SemaphoreHandle_t mutex_ = NULL;
-    BtpEndpoint* endpoint_ = nullptr;
-    // Channel-B sealer for LOG on the radio (RadioSeal::seal_e in real
-    // firmware); nullptr means send LOG in the clear, the pre-topico state
-    // and what env:native would exercise if it built Logger. Guarded by
-    // mutex_ like endpoint_.
-    LogRadioSeal endpoint_seal_ = nullptr;
-    void* endpoint_seal_context_ = nullptr;
+    btp::Endpoint* endpoint_ = nullptr;
+    // set_radio_sink(). Guarded by mutex_ like endpoint_.
+    RadioSink radio_sink_ = nullptr;
     bool initialized_ = false;
 
     // SD log file naming/appending state (flush_to_sd/set_datetime).

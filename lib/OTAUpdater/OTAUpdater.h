@@ -128,6 +128,16 @@ public:
     bool start();
 
     /**
+     * @brief The Wi-Fi station belongs to someone else (BtpDevice's TCP
+     * link, which connects and reconnects it from wifi.txt). Then start()
+     * never scans, connects or disconnects: it serves updates as soon as the
+     * station has an IP, and cancel() only stops the HTTP server. mDNS is
+     * the owner's too: "_http._tcp" is added to its hostname.
+     */
+    void set_external_wifi(bool external) { external_wifi_ = external; }
+    bool external_wifi() const { return external_wifi_; }
+
+    /**
      * @brief Start scanning for a known network and connect, exactly like
      * start() (same candidates, same SCANNING/CONNECTING/retry state
      * machine) -- with two differences, both gated internally by
@@ -273,6 +283,9 @@ private:
     // start(). See is_upload_session()/startDirect()'s own comments for what
     // this changes inside process(). Reset to false in cancel().
     bool direct_mode_ = false;
+    // set_external_wifi().
+    bool external_wifi_ = false;
+    bool start_on_external_wifi();
 
     // Wi-Fi scan/connect bookkeeping, updated from the esp_event loop task.
     std::atomic<bool> scan_done_{false};

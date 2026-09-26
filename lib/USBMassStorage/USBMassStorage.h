@@ -67,7 +67,7 @@ public:
      * serial port under the robot's name -- TraceView's port picker shows
      * "COM5 -- <name>" without opening the port (Windows reads the CDC
      * interface string, Linux/macOS/Android the product string). Same name
-     * BleBtpServer advertises. Empty/null keeps the sdkconfig defaults.
+     * BtpDevice advertises over BLE. Empty/null keeps the sdkconfig defaults.
      *
      * Only takes effect for a driver installed after this call -- the host
      * reads descriptors at enumeration -- so ROBOT::init() calls it right

@@ -4242,6 +4242,57 @@ CONFIG_WL_SECTOR_SIZE=4096
 # end of Wear Levelling
 
 #
+# BTPDevice
+#
+# default:
+# CONFIG_BTPDEV_LOG_LEVEL_NONE is not set
+# default:
+# CONFIG_BTPDEV_LOG_LEVEL_ERROR is not set
+# default:
+# CONFIG_BTPDEV_LOG_LEVEL_WARN is not set
+# default:
+CONFIG_BTPDEV_LOG_LEVEL_INFO=y
+# default:
+# CONFIG_BTPDEV_LOG_LEVEL_DEBUG is not set
+# default:
+# CONFIG_BTPDEV_LOG_LEVEL_VERBOSE is not set
+# default:
+CONFIG_BTPDEV_LOG_LEVEL=3
+
+#
+# Links
+#
+# default:
+CONFIG_BTPDEV_LINK_SERIAL=y
+# default:
+CONFIG_BTPDEV_LINK_TCP=y
+# default:
+CONFIG_BTPDEV_LINK_BLE=y
+# default:
+CONFIG_BTPDEV_LINK_ESPNOW=y
+# default:
+# CONFIG_BTPDEV_INSECURE_CLEARTEXT_RADIO is not set
+# end of Links
+# end of BTPDevice
+
+#
+# TinyShell
+#
+# default:
+CONFIG_TINYSHELL_COLOR=y
+# default:
+CONFIG_TINYSHELL_MAX_MODULES=32
+# default:
+CONFIG_TINYSHELL_MAX_COMMANDS=160
+# default:
+CONFIG_TINYSHELL_MAX_ARGS=8
+# default:
+CONFIG_TINYSHELL_MAX_LINE=512
+# default:
+CONFIG_TINYSHELL_OUTPUT_CAPACITY=256
+# end of TinyShell
+
+#
 # TinyUSB Stack
 #
 # default:
@@ -4422,6 +4473,63 @@ CONFIG_MDNS_PREDEF_NETIF_AP=y
 CONFIG_MDNS_PREDEF_NETIF_ETH=y
 # end of MDNS Predefined interfaces
 # end of mDNS
+
+#
+# LittleFS
+#
+# default:
+# CONFIG_LITTLEFS_SDMMC_SUPPORT is not set
+# default:
+CONFIG_LITTLEFS_MAX_PARTITIONS=3
+# default:
+CONFIG_LITTLEFS_PAGE_SIZE=256
+# default:
+CONFIG_LITTLEFS_OBJ_NAME_LEN=64
+# default:
+CONFIG_LITTLEFS_READ_SIZE=128
+# default:
+CONFIG_LITTLEFS_WRITE_SIZE=128
+# default:
+CONFIG_LITTLEFS_LOOKAHEAD_SIZE=128
+# default:
+CONFIG_LITTLEFS_CACHE_SIZE=512
+# default:
+CONFIG_LITTLEFS_BLOCK_CYCLES=512
+# default:
+CONFIG_LITTLEFS_USE_MTIME=y
+# default:
+# CONFIG_LITTLEFS_USE_ONLY_HASH is not set
+# default:
+# CONFIG_LITTLEFS_HUMAN_READABLE is not set
+# default:
+CONFIG_LITTLEFS_MTIME_USE_SECONDS=y
+# default:
+# CONFIG_LITTLEFS_MTIME_USE_NONCE is not set
+# default:
+# CONFIG_LITTLEFS_SPIFFS_COMPAT is not set
+# default:
+# CONFIG_LITTLEFS_FLUSH_FILE_EVERY_WRITE is not set
+# default:
+# CONFIG_LITTLEFS_FCNTL_GET_PATH is not set
+# default:
+# CONFIG_LITTLEFS_MULTIVERSION is not set
+# default:
+# CONFIG_LITTLEFS_MALLOC_STRATEGY_DISABLE is not set
+# default:
+CONFIG_LITTLEFS_MALLOC_STRATEGY_DEFAULT=y
+# default:
+# CONFIG_LITTLEFS_MALLOC_STRATEGY_INTERNAL is not set
+# default:
+# CONFIG_LITTLEFS_MALLOC_STRATEGY_SPIRAM is not set
+# default:
+# CONFIG_LITTLEFS_MALLOC_STRATEGY_SPIRAM_PREFER is not set
+# default:
+CONFIG_LITTLEFS_ASSERTS=y
+# default:
+# CONFIG_LITTLEFS_MMAP_PARTITION is not set
+# default:
+# CONFIG_LITTLEFS_WDT_RESET is not set
+# end of LittleFS
 # end of Component config
 
 # default:

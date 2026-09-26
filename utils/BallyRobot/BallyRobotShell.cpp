@@ -5,16 +5,10 @@
 // same members, different translation unit -- nothing here is a new
 // abstraction, it is the same functions moved verbatim.
 //
-// THIS FILE IS THE ESP-IDF-ONLY SIDE OF THE SHELL. That matters beyond
-// tidiness: eight libraries (BtpTransport, CommandProcessor, Format,
-// KeyStore, ManifestCatalog, StatusReporter, TelemetryPublisher,
-// TxScheduler) are compiled by env:native for their unit
-// tests, where TinyShell does not exist. A register_shell_commands() inside
-// any of them would break `pio test -e native` for every suite at once, as a
-// link error that does not name the cause. Commands that operate on those
-// libraries are therefore registered HERE, from the composition root, which
-// only the ESP-IDF build ever compiles -- the same reasoning RadioSeal.h
-// documents for keeping btp::aead out of BtpTransport.
+// THIS FILE IS THE ESP-IDF-ONLY SIDE OF THE SHELL: Format and JobScheduler
+// are compiled by env:native for their unit tests, where TinyShell does not
+// exist, so commands that operate on them are registered HERE, from the
+// composition root. The shell itself is BtpDevice's (registerShell()).
 //
 // Modules owned by a subsystem still live in that subsystem's own .cpp (see
 // CONTRIBUTING.md, "Nova biblioteca" item 5); startWrappers() below is only
@@ -40,11 +34,6 @@
 #include "esp_timer.h"
 #include "esp_wifi.h"
 
-// For bally::kChannelContractVersion, reported by "sec -channels". This is the
-// one header that must stay byte-identical across bally_OS, bally_dongle and
-// TraceView -- read it, never edit it from here.
-#include <bally_channels.h>
-
 // Declared in BallyRobot.h (external linkage) so ROBOT::init() can also log
 // this name once at boot, not just from the "sys reset_reason" command below.
 const char* resetReasonName(esp_reset_reason_t reason) {
@@ -66,9 +55,7 @@ const char* resetReasonName(esp_reset_reason_t reason) {
 
 namespace {
 
-// verify_e/verify_l and protocol_uuid_ are public-by-construction values, so
-// this is only ever pointed at those. Never at key_e()/key_l() -- see the
-// SECURITY RULE on the KeyStore class.
+// Only for public values (the BTP peer_uuid). Never for key material.
 void hexEncode(const std::uint8_t* data, std::size_t size, char* out) {
     static const char kDigits[] = "0123456789abcdef";
     for (std::size_t i = 0; i < size; ++i) {
@@ -109,14 +96,22 @@ void scheduleRestart() {
 }  // namespace
 
 
+void ROBOT::registerShell(TinyShell& shell) {
+    // Called from src/btp/btp_commands.cpp while BtpDevice::begin() runs:
+    // the shell is BtpDevice's, which runs the commands from the terminal,
+    // from COMMAND_REQUEST and from submitLocalCommand() (jobs, scripts).
+    // The link, the key and the topics have their own module there, "btp"
+    // (btp -status/-errors/-topics/-key), which replaced this robot's old
+    // "link", "telemetry" and "sec".
+    shell_ = &shell;
+    startWrappers();
+}
+
 void ROBOT::startWrappers() {
     // Modules owned by ROBOT itself — see the declarations in BallyRobot.h
     // for why each one stays here instead of moving to a subsystem lib.
     registerSystemCommands();
     registerMotionCommands();
-    registerLinkCommands();
-    registerTelemetryCommands();
-    registerSecurityCommands();
     registerJobCommands();
     registerRobotIOCommands();
     registerKalmanCommands();
@@ -126,22 +121,22 @@ void ROBOT::startWrappers() {
     // and "storage" are each split across two owners below (array sensor vs.
     // encoders; SD file management vs. USB ownership) — both register into
     // the same TinyShell module name, which TinyShell allows.
-    array_sensor->register_shell_commands(shell, logger, settings);
-    Encoder::register_shell_commands(shell, logger, *encoder_left, *encoder_right);
-    junkebox->register_shell_commands(shell, logger);
+    array_sensor->register_shell_commands(*shell_, logger, settings);
+    Encoder::register_shell_commands(*shell_, logger, *encoder_left, *encoder_right);
+    junkebox->register_shell_commands(*shell_, logger);
 
     usb_storage.register_shell_commands(
-        shell, logger, sd_card,
+        *shell_, logger, sd_card,
         [this]() { return anyDebugTestActive(); },
         [this]() { sendNextShellOutputDirect(); });
-    sd_card.register_shell_commands(shell, logger);
+    sd_card.register_shell_commands(*shell_, logger);
 
     logger.register_shell_commands(
-        shell, sd_card, settings,
+        *shell_, sd_card, settings,
         [this]() { sendNextShellOutputDirect(); });
 
     ota.register_shell_commands(
-        shell, logger, sd_card, usb_storage,
+        *shell_, logger, sd_card, usb_storage,
         [this]() { return anyDebugTestActive(); },
         [this]() { sendNextShellOutputDirect(); });
 
@@ -149,7 +144,7 @@ void ROBOT::startWrappers() {
     // persists it, and every change needs a reboot to actually take effect
     // (pins, timers and EKF init are all applied once, at boot).
     settings.register_shell_commands(
-        shell, logger, sd_card,
+        *shell_, logger, sd_card,
         [this]() { sendNextShellOutputDirect(); });
 
     // Last on purpose: this one ADDS commands into modules the calls above
@@ -159,7 +154,7 @@ void ROBOT::startWrappers() {
     // instead of the subsystem's.
     registerCoverageCommands();
 
-    sysmon.register_shell_commands(shell, logger);
+    sysmon.register_shell_commands(*shell_, logger);
 }
 
 void ROBOT::registerMotionCommands() {
@@ -176,15 +171,15 @@ void ROBOT::registerMotionCommands() {
     // When the RUN controller lands it produces the same normalised pair and
     // goes through this same path -- that is the seam this module exists to
     // leave behind.
-    shell.create_module("motion", "Movement, arming and braking");
+    shell_->create_module("motion", "Movement, arming and braking");
 
-    shell.add([]() -> uint8_t {
+    shell_->add([]() -> uint8_t {
         instance_->motors_armed_.store(true, std::memory_order_release);
         ROBOT::logger.insert_log(logType::INFO, "armed=1");
         return RESULT_OK;
     }, "arm", "Allow the motors to be driven", "motion");
 
-    shell.add([]() -> uint8_t {
+    shell_->add([]() -> uint8_t {
         // Not just a flag the commands check: setOutputs() forces zero while
         // disarmed, so this stops the motors even if something else is still
         // writing PWM flags. That is what makes it usable as a kill switch.
@@ -194,7 +189,7 @@ void ROBOT::registerMotionCommands() {
         return RESULT_OK;
     }, "disarm", "Force the motors off and refuse further drive commands", "motion");
 
-    shell.add([](int8_t forward, int8_t turn, uint32_t time_ms) -> uint8_t {
+    shell_->add([](int8_t forward, int8_t turn, uint32_t time_ms) -> uint8_t {
         if (!instance_->motors_armed_.load(std::memory_order_acquire)) {
             ROBOT::logger.insert_log(logType::ERRO,
                                      "refused: motors are disarmed (motion -arm)");
@@ -225,14 +220,14 @@ void ROBOT::registerMotionCommands() {
         return RESULT_OK;
     }, "drive", "Move with a differential mix: forward,turn,time_ms (both -100..100)", "motion");
 
-    shell.add([]() -> uint8_t {
+    shell_->add([]() -> uint8_t {
         instance_->clearCoast();
         instance_->stopMotors();
         ROBOT::logger.insert_log(logType::INFO, "stopped=1 mode=brake");
         return RESULT_OK;
     }, "stop", "Stop immediately (PWM zero, which is an active brake)", "motion");
 
-    shell.add([](uint32_t time_ms) -> uint8_t {
+    shell_->add([](uint32_t time_ms) -> uint8_t {
         // PWM zero already means active brake in HBridge::applyPWM, so this is
         // "hold zero for time_ms" rather than a different electrical state. It
         // exists so the intent is sayable, and so brake/coast are a pair.
@@ -244,7 +239,7 @@ void ROBOT::registerMotionCommands() {
         return RESULT_OK;
     }, "brake", "Hold an active brake for a while: time_ms", "motion");
 
-    shell.add([](uint32_t time_ms) -> uint8_t {
+    shell_->add([](uint32_t time_ms) -> uint8_t {
         if (time_ms == 0U) {
             ROBOT::logger.insert_log(logType::ERRO, "time_ms must be greater than zero");
             return RESULT_ERROR;
@@ -258,7 +253,7 @@ void ROBOT::registerMotionCommands() {
         return RESULT_OK;
     }, "coast", "Free-wheel (both inputs low) for a while: time_ms", "motion");
 
-    shell.add([]() -> uint8_t {
+    shell_->add([]() -> uint8_t {
         const SettingsData& cfg = instance_->settings.data();
         // Reports geometry and, deliberately, the absence of a speed
         // calibration -- so nobody reads "drive" as metres per second.
@@ -290,9 +285,9 @@ void ROBOT::registerCoverageCommands() {
     // register_shell_commands().
 
     // ---- storage: reading and writing files, and taking the card back ----
-    shell.create_module("storage", "SD card file management and USB MSC ownership");
+    shell_->create_module("storage", "SD card file management and USB MSC ownership");
 
-    shell.add([]() -> uint8_t {
+    shell_->add([]() -> uint8_t {
         if (!instance_->usb_storage.is_active()) {
             ROBOT::logger.insert_log(logType::INFO,
                                      "owner=robot nothing to reclaim");
@@ -311,7 +306,7 @@ void ROBOT::registerCoverageCommands() {
         return RESULT_OK;
     }, "reclaim", "Take the SD card back from the USB host", "storage");
 
-    shell.add([](uint16_t file_index, uint32_t max_bytes) -> uint8_t {
+    shell_->add([](uint16_t file_index, uint32_t max_bytes) -> uint8_t {
         SDFileInfo info{};
         if (!instance_->sd_card.get_file_info(file_index, info)) {
             ROBOT::logger.insert_logf(logType::ERRO, "no file at index %u",
@@ -351,7 +346,7 @@ void ROBOT::registerCoverageCommands() {
         return RESULT_OK;
     }, "cat", "Show the start of a file: file_index,max_bytes (0 = the 1024 cap)", "storage");
 
-    shell.add([](std::string path, std::string text) -> uint8_t {
+    shell_->add([](std::string path, std::string text) -> uint8_t {
         // The point of this command is writing autoexec.job over the radio, so
         // a literal "\n" is turned into a newline -- the shell line itself
         // cannot carry one (COMMAND_REQUEST forbids CR and LF).
@@ -378,7 +373,7 @@ void ROBOT::registerCoverageCommands() {
         return RESULT_OK;
     }, "write", "Create/overwrite a text file: path,text (\\n becomes a newline)", "storage");
 
-    shell.add([](std::string path, std::string text) -> uint8_t {
+    shell_->add([](std::string path, std::string text) -> uint8_t {
         std::string content;
         content.reserve(text.size() + 1U);
         for (size_t i = 0; i < text.size(); ++i) {
@@ -403,7 +398,7 @@ void ROBOT::registerCoverageCommands() {
         return RESULT_OK;
     }, "append", "Append one line to a file: path,text (\\n becomes a newline)", "storage");
 
-    shell.add([](std::string path) -> uint8_t {
+    shell_->add([](std::string path) -> uint8_t {
         const bool exists = instance_->sd_card.file_exists(path.c_str());
         ROBOT::logger.insert_logf(logType::INFO, "path=%s exists=%d mounted=%d",
                                   path.c_str(), exists ? 1 : 0,
@@ -412,15 +407,15 @@ void ROBOT::registerCoverageCommands() {
     }, "exists", "Check whether a file exists on the card", "storage");
 
     // ---- sensor: encoder control and IMU readiness ----
-    shell.create_module("sensor", "Array sensor (line follower) and wheel encoders");
+    shell_->create_module("sensor", "Array sensor (line follower) and wheel encoders");
 
-    shell.add([]() -> uint8_t {
+    shell_->add([]() -> uint8_t {
         ROBOT::logger.insert_log(logType::INFO,
                                  instance_->array_sensor->debug().c_str());
         return RESULT_OK;
     }, "debug", "Raw mux readings, tab separated", "sensor");
 
-    shell.add([]() -> uint8_t {
+    shell_->add([]() -> uint8_t {
         // getCountDiff() is stateful, so zeroing the counters also disturbs the
         // EKF's next encoder measurement -- refuse while the filter is being
         // driven hard rather than silently injecting a step into it.
@@ -435,7 +430,7 @@ void ROBOT::registerCoverageCommands() {
         return RESULT_OK;
     }, "enc_reset", "Zero both encoder counters (not allowed in RUN)", "sensor");
 
-    shell.add([]() -> uint8_t {
+    shell_->add([]() -> uint8_t {
         instance_->encoder_left->pausePCNT();
         instance_->encoder_right->pausePCNT();
         ROBOT::logger.insert_log(logType::WARN,
@@ -443,14 +438,14 @@ void ROBOT::registerCoverageCommands() {
         return RESULT_OK;
     }, "enc_pause", "Stop counting encoder pulses", "sensor");
 
-    shell.add([]() -> uint8_t {
+    shell_->add([]() -> uint8_t {
         instance_->encoder_left->resumePCNT();
         instance_->encoder_right->resumePCNT();
         ROBOT::logger.insert_log(logType::INFO, "encoders_paused=0");
         return RESULT_OK;
     }, "enc_resume", "Resume counting encoder pulses", "sensor");
 
-    shell.add([]() -> uint8_t {
+    shell_->add([]() -> uint8_t {
         // imu_ready_ is the boot-time detection result; bus_open says whether
         // the I2C bus object exists at all. They differ exactly in the case
         // that matters on this hardware: bus up, sensor not answering.
@@ -463,9 +458,9 @@ void ROBOT::registerCoverageCommands() {
     }, "imu_status", "Whether the IMU answered at boot, and what it answers now", "sensor");
 
     // ---- ota: leaving the sub-mode, and where it landed ----
-    shell.create_module("ota", "Wi-Fi OTA firmware updates (DEBUG state)");
+    shell_->create_module("ota", "Wi-Fi OTA firmware updates (DEBUG state)");
 
-    shell.add([]() -> uint8_t {
+    shell_->add([]() -> uint8_t {
         if (!instance_->ota.is_active()) {
             ROBOT::logger.insert_log(logType::INFO, "ota_active=0 nothing to cancel");
             return RESULT_OK;
@@ -486,7 +481,7 @@ void ROBOT::registerCoverageCommands() {
         return RESULT_OK;
     }, "cancel", "Leave OTA mode and give the radio channel back", "ota");
 
-    shell.add([]() -> uint8_t {
+    shell_->add([]() -> uint8_t {
         const char* ssid = instance_->ota.connected_ssid();
         const char* ip   = instance_->ota.connected_ip();
         ROBOT::logger.insert_logf(
@@ -499,9 +494,9 @@ void ROBOT::registerCoverageCommands() {
     }, "ip", "Which network OTA joined and the address it got", "ota");
 
     // ---- junkebox: what is actually on the card ----
-    shell.create_module("junkebox", "Buzzer playback: SD-stored songs and compiled-in system sounds");
+    shell_->create_module("junkebox", "Buzzer playback: SD-stored songs and compiled-in system sounds");
 
-    shell.add([]() -> uint8_t {
+    shell_->add([]() -> uint8_t {
         const uint16_t count = instance_->sd_card.get_file_count();
         std::string out;
         char line[SDFileInfo::MAX_NAME_LENGTH + 48U];
@@ -536,25 +531,25 @@ void ROBOT::registerCoverageCommands() {
     }, "list", "List .txt/.jkb song files on the card, plus the builtin names", "junkebox");
 
     // ---- debug: stopping the scheduled tests ----
-    shell.create_module("debug", "Safe non-blocking sensor tests");
+    shell_->create_module("debug", "Safe non-blocking sensor tests");
 
-    shell.add([]() -> uint8_t {
+    shell_->add([]() -> uint8_t {
         instance_->cancelDebugTests();
         ROBOT::logger.insert_log(logType::INFO, "debug_tests_cancelled=1");
         return RESULT_OK;
     }, "cancel", "Cancel every scheduled sensor test", "debug");
 
     // ---- help: the completion the shell already knew how to do ----
-    shell.create_module("help", "Help module for listing available commands");
+    shell_->create_module("help", "Help module for listing available commands");
 
-    shell.add([](std::string partial) -> uint8_t {
+    shell_->add([](std::string partial) -> uint8_t {
         // TinyShell::complete_line() has always existed and the README has
         // always claimed autocompletion, but nothing in this firmware ever
         // called it. Exposing it here means a remote console can complete
         // against the robot's real catalogue instead of a local copy that
         // drifts.
         const std::vector<std::string> candidates =
-            instance_->shell.complete_line(partial, 16U);
+            instance_->shell_->complete_line(partial, 16U);
         if (candidates.empty()) {
             ROBOT::logger.insert_logf(logType::INFO, "prefix=%s matches=0",
                                       partial.c_str());
@@ -576,444 +571,6 @@ void ROBOT::registerCoverageCommands() {
     }, "complete", "Completion candidates for a partial command line", "help");
 }
 
-void ROBOT::registerLinkCommands() {
-    // "link": the radio and the protocol seen from the outside. Everything
-    // here is a read of a counter that already exists and, until now, only
-    // left the robot inside the binary CONTROL/STATUS message once a second.
-    //
-    // Registered here and not in TxScheduler/CommandProcessor because both
-    // are compiled by env:native for their unit suites, where TinyShell does
-    // not exist -- see this file's header comment.
-    shell.create_module("link", "Radio and protocol counters");
-
-    shell.add([]() -> uint8_t {
-        if (!instance_->node_) {
-            ROBOT::logger.insert_log(logType::ERRO, "protocol not bound yet");
-            return RESULT_ERROR;
-        }
-        const btp::Receiver::Stats rx = instance_->node_->receiver().stats();
-        // Same aggregation publishStatus() does for the wire message, so the
-        // two can be compared directly when something looks wrong.
-        ROBOT::logger.insert_logf(
-            logType::INFO,
-            "frames_rx=%llu crc_errors=%llu decode_errors=%llu "
-            "reassembly_completed=%llu reassembly_rejected=%llu reassembly_timeouts=%lu "
-            "routed=%lu",
-            static_cast<unsigned long long>(instance_->link_frames_rx_.load(std::memory_order_relaxed)),
-            static_cast<unsigned long long>(rx.dropped_crc),
-            static_cast<unsigned long long>(rx.dropped_decode),
-            static_cast<unsigned long long>(rx.completed),
-            static_cast<unsigned long long>(rx.dropped_reassembly),
-            static_cast<unsigned long>(rx.reassembly_timeouts),
-            static_cast<unsigned long>(rx.completed));
-        return RESULT_OK;
-    }, "stats", "Receive-side link counters (same numbers CONTROL/STATUS carries)", "link");
-
-    shell.add([]() -> uint8_t {
-        const TxScheduler::Stats tx = instance_->tx_scheduler.stats();
-        // Priority order is COMMAND_RESULT > STATUS > TERMINAL > CRIT_LOG >
-        // TELEMETRY > DEBUG (see TxScheduler). Printed per class because
-        // "which class is being dropped" is the whole diagnostic value here.
-        ROBOT::logger.insert_logf(
-            logType::INFO,
-            "accepted=%lu delivered=%lu timeouts=%lu dropped=%lu delivery_failed=%lu "
-            "queued=%lu/%lu/%lu/%lu/%lu/%lu dropped_by_class=%lu/%lu/%lu/%lu/%lu/%lu",
-            static_cast<unsigned long>(tx.accepted),
-            static_cast<unsigned long>(tx.delivered),
-            static_cast<unsigned long>(tx.timeouts),
-            static_cast<unsigned long>(tx.dropped),
-            static_cast<unsigned long>(tx.delivery_failed),
-            static_cast<unsigned long>(tx.queued_by_priority[0]),
-            static_cast<unsigned long>(tx.queued_by_priority[1]),
-            static_cast<unsigned long>(tx.queued_by_priority[2]),
-            static_cast<unsigned long>(tx.queued_by_priority[3]),
-            static_cast<unsigned long>(tx.queued_by_priority[4]),
-            static_cast<unsigned long>(tx.queued_by_priority[5]),
-            static_cast<unsigned long>(tx.dropped_by_priority[0]),
-            static_cast<unsigned long>(tx.dropped_by_priority[1]),
-            static_cast<unsigned long>(tx.dropped_by_priority[2]),
-            static_cast<unsigned long>(tx.dropped_by_priority[3]),
-            static_cast<unsigned long>(tx.dropped_by_priority[4]),
-            static_cast<unsigned long>(tx.dropped_by_priority[5]));
-        return RESULT_OK;
-    }, "tx", "Transmit scheduler counters, per priority class", "link");
-
-    shell.add([]() -> uint8_t {
-        if (!instance_->node_) {
-            ROBOT::logger.insert_log(logType::ERRO, "protocol not bound yet");
-            return RESULT_ERROR;
-        }
-        const btp::Receiver::Stats rx = instance_->node_->receiver().stats();
-        ROBOT::logger.insert_logf(
-            logType::INFO,
-            "routed=%lu fragments_accepted=%lu duplicate_fragments=%lu "
-            "dropped_decode=%lu dropped_crc=%lu dropped_reassembly=%lu "
-            "dropped_invalid_argument=%lu reassembly_timeouts=%lu slots=%u",
-            static_cast<unsigned long>(rx.completed),
-            static_cast<unsigned long>(rx.fragments_accepted),
-            static_cast<unsigned long>(rx.duplicate_fragments),
-            static_cast<unsigned long>(rx.dropped_decode),
-            static_cast<unsigned long>(rx.dropped_crc),
-            static_cast<unsigned long>(rx.dropped_reassembly),
-            static_cast<unsigned long>(rx.invalid_argument),
-            static_cast<unsigned long>(rx.reassembly_timeouts),
-            static_cast<unsigned>(ROBOT::kNodeSlotCount));
-        return RESULT_OK;
-    }, "rx", "Decode and reassembly counters", "link");
-
-    shell.add([]() -> uint8_t {
-        const CommandProcessor::Stats cmd = instance_->command_processor.stats();
-        // "unauthorized" counts both a frame from a MAC that is not the peer
-        // and one whose AEAD tag did not verify -- the two rejections
-        // handleReceiveStatic makes before a command can reach the shell.
-        ROBOT::logger.insert_logf(
-            logType::INFO,
-            "accepted=%lu executed=%lu duplicates=%lu replayed=%lu "
-            "rejected=%lu dropped=%lu unauthorized=%lu cache_slots=%u",
-            static_cast<unsigned long>(cmd.accepted),
-            static_cast<unsigned long>(cmd.executed),
-            static_cast<unsigned long>(cmd.duplicates),
-            static_cast<unsigned long>(cmd.replayed),
-            static_cast<unsigned long>(cmd.rejected),
-            static_cast<unsigned long>(cmd.dropped),
-            static_cast<unsigned long>(cmd.unauthorized),
-            static_cast<unsigned>(CommandProcessor::kCacheCapacity));
-        return RESULT_OK;
-    }, "cmd_stats", "Command intake: dedup, replay and rejection counters", "link");
-
-    shell.add([]() -> uint8_t {
-        const TerminalResponder::Stats t = instance_->terminal_responder.stats();
-        // origins_seen  = terminal sessions allocated (1 per TraceView terminal;
-        //                 climbing means boot_id churn / a reconnect loop)
-        // lines_submitted vs lines_dropped_busy = commands that reached the shell
-        //                 vs. those refused because one was still running
-        // in_bytes_dropped = TERMINAL_IN bytes lost because s.in was full while a
-        //                 command ran -- must stay 0, a lost '\r' wedges a line
-        // frames_out     = TERMINAL_OUT frames handed to the TX scheduler
-        ROBOT::logger.insert_logf(
-            logType::INFO,
-            "origins_seen=%lu origins_evicted=%lu lines_submitted=%lu "
-            "lines_dropped_busy=%lu frames_out=%lu in_bytes_dropped=%lu",
-            static_cast<unsigned long>(t.origins_seen),
-            static_cast<unsigned long>(t.origins_evicted),
-            static_cast<unsigned long>(t.lines_submitted),
-            static_cast<unsigned long>(t.lines_dropped_busy),
-            static_cast<unsigned long>(t.frames_out),
-            static_cast<unsigned long>(t.in_bytes_dropped));
-        return RESULT_OK;
-    }, "terminal", "BTP terminal channel: sessions, submitted/dropped lines, bytes lost", "link");
-
-    shell.add([]() -> uint8_t {
-        uint8_t channel = 0;
-        wifi_second_chan_t second = WIFI_SECOND_CHAN_NONE;
-        const bool read_ok = esp_wifi_get_channel(&channel, &second) == ESP_OK;
-
-        // The configured value and the one the radio is actually parked on can
-        // differ: OTA moves the radio to the access point's channel and only
-        // gives it back on cancel(). Printing both is what makes "the dongle
-        // stopped hearing me" diagnosable.
-        ROBOT::logger.insert_logf(
-            logType::INFO, "configured_channel=%u radio_channel=%s ota_active=%d",
-            static_cast<unsigned>(instance_->settings.data().espnow_channel),
-            read_ok ? std::to_string(channel).c_str() : "unknown",
-            instance_->ota.is_active() ? 1 : 0);
-        return RESULT_OK;
-    }, "channel", "Configured vs. actual ESP-NOW radio channel", "link");
-
-    shell.add([]() -> uint8_t {
-        instance_->captureLinkBaseline();
-        ROBOT::logger.insert_log(
-            logType::INFO,
-            "baseline=set counters unchanged; use 'link -delta' for the difference");
-        return RESULT_OK;
-    }, "reset_stats", "Mark a zero point for 'link -delta' (counters are not zeroed)", "link");
-
-    shell.add([]() -> uint8_t {
-        if (!instance_->link_baseline_.set) {
-            ROBOT::logger.insert_log(
-                logType::ERRO,
-                "no baseline: run 'link -reset_stats' first");
-            return RESULT_ERROR;
-        }
-
-        if (!instance_->node_) {
-            ROBOT::logger.insert_log(logType::ERRO, "protocol not bound yet");
-            return RESULT_ERROR;
-        }
-        const LinkStatsBaseline& base = instance_->link_baseline_;
-        const btp::Receiver::Stats rx = instance_->node_->receiver().stats();
-        const TxScheduler::Stats tx = instance_->tx_scheduler.stats();
-        const CommandProcessor::Stats cmd = instance_->command_processor.stats();
-        const uint32_t now_ms =
-            static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
-
-        ROBOT::logger.insert_logf(
-            logType::INFO,
-            "since_reset_ms=%lu frames_rx=%llu crc_errors=%llu decode_errors=%llu "
-            "reassembly_timeouts=%lu tx_accepted=%lu tx_dropped=%lu "
-            "cmd_executed=%lu cmd_duplicates=%lu cmd_unauthorized=%lu",
-            static_cast<unsigned long>(now_ms - base.uptime_ms),
-            static_cast<unsigned long long>(
-                instance_->link_frames_rx_.load(std::memory_order_relaxed) - base.frames_rx),
-            static_cast<unsigned long long>(rx.dropped_crc - base.crc_errors),
-            static_cast<unsigned long long>(rx.dropped_decode - base.decode_errors),
-            static_cast<unsigned long>(rx.reassembly_timeouts - base.rx.reassembly_timeouts),
-            static_cast<unsigned long>(tx.accepted - base.tx.accepted),
-            static_cast<unsigned long>(tx.dropped - base.tx.dropped),
-            static_cast<unsigned long>(cmd.executed - base.command.executed),
-            static_cast<unsigned long>(cmd.duplicates - base.command.duplicates),
-            static_cast<unsigned long>(cmd.unauthorized - base.command.unauthorized));
-        return RESULT_OK;
-    }, "delta", "Counter difference since the last 'link -reset_stats'", "link");
-}
-
-void ROBOT::registerTelemetryCommands() {
-    // "telemetry": what the robot publishes, to whom, and how fast. Same
-    // env:native reason as "link" for living here.
-    shell.create_module("telemetry", "Topics, subscriptions and publish rates");
-
-    shell.add([]() -> uint8_t {
-        TelemetryPublisher::TopicStats topics[StatusReporter::kMaxTopicRecords];
-        const size_t count =
-            instance_->telemetry.topic_stats(topics, StatusReporter::kMaxTopicRecords);
-
-        std::string out;
-        char line[176];
-        for (size_t i = 0; i < count; ++i) {
-            const uint64_t period_us =
-                instance_->telemetry.topic_period_us(topics[i].topic_id);
-            std::snprintf(
-                line, sizeof(line),
-                "topic_id=0x%04X subscribers=%u rate_millihz=%lu period_us=%llu "
-                "bytes=%llu dropped=%llu\n",
-                static_cast<unsigned>(topics[i].topic_id),
-                static_cast<unsigned>(topics[i].subscriber_count),
-                static_cast<unsigned long>(topics[i].effective_rate_millihz),
-                static_cast<unsigned long long>(period_us),
-                static_cast<unsigned long long>(topics[i].bytes_sent_total),
-                static_cast<unsigned long long>(topics[i].samples_dropped_total));
-            out += line;
-        }
-        // period_us == 0 means "nobody is subscribed, so it is not being
-        // published" -- that is the definition sampleTelemetry() gates on, not
-        // an error.
-        std::snprintf(line, sizeof(line), "topics=%u subscriptions=%u queued=%u",
-                      static_cast<unsigned>(count),
-                      static_cast<unsigned>(instance_->telemetry.active_subscription_count()),
-                      static_cast<unsigned>(instance_->telemetry.queued_count()));
-        out += line;
-
-        ROBOT::logger.insert_log(logType::INFO, out.c_str());
-        return RESULT_OK;
-    }, "topics", "Per-topic subscribers, granted rate, bytes and drops", "telemetry");
-
-    shell.add([](uint16_t topic_id, uint32_t rate_millihz,
-                 uint32_t lease_ms) -> uint8_t {
-        // Subscriptions are keyed by (session, topic), and the session comes
-        // from the BTP envelope. A shell subscription has no envelope, so it
-        // uses the reserved local identity -- node_'s own btp::
-        // SubscriptionTable (the SAME one every real SUBSCRIBE now goes
-        // through, BallyRobot.h's node_ comment) does not care where a
-        // request came from, only that source_id 0 never collides with a
-        // real peer's factory-MAC-derived one.
-        if (!instance_->node_) {
-            ROBOT::logger.insert_log(logType::ERRO, "protocol not bound yet");
-            return RESULT_ERROR;
-        }
-        btp::Header header{};
-        header.source_id = TelemetryPublisher::kLocalSubscriberSourceId;
-        header.boot_id = TelemetryPublisher::kLocalSubscriberBootId;
-
-        btp::Subscribe request{};
-        request.target_source_id = instance_->node_->source_id();
-        request.target_boot_id = instance_->node_->boot_id();
-        request.topic_id = topic_id;
-        request.requested_rate_millihz = rate_millihz;
-        request.requested_lease_ms = lease_ms;
-
-        btp::SubscribeResult result{};
-        instance_->node_->subscriptions()->handle_subscribe(
-            instance_->node_->catalog(), header, request,
-            static_cast<uint64_t>(esp_timer_get_time() / 1000ULL), &result);
-
-        if (result.status != static_cast<uint8_t>(btp::ResultStatus::Success)) {
-            ROBOT::logger.insert_logf(
-                logType::ERRO, "rejected: topic_id=0x%04X error_code=0x%04X",
-                static_cast<unsigned>(topic_id),
-                static_cast<unsigned>(result.error_code));
-            return RESULT_ERROR;
-        }
-
-        // The lease is uncapped by btp::SubscriptionTable (unlike the old
-        // TelemetryPublisher::subscribe(), which clamped it locally), so
-        // this reports exactly what was granted -- the same as what was
-        // asked, here.
-        ROBOT::logger.insert_logf(
-            logType::INFO,
-            "subscription_id=%lu topic_id=0x%04X rate_millihz=%lu lease_ms=%lu",
-            static_cast<unsigned long>(result.subscription_id),
-            static_cast<unsigned>(topic_id),
-            static_cast<unsigned long>(result.effective_rate_millihz),
-            static_cast<unsigned long>(result.granted_lease_ms));
-        return RESULT_OK;
-    }, "sub", "Subscribe locally: topic_id,rate_millihz,lease_ms", "telemetry");
-
-    shell.add([](uint32_t subscription_id) -> uint8_t {
-        if (!instance_->node_) {
-            ROBOT::logger.insert_log(logType::ERRO, "protocol not bound yet");
-            return RESULT_ERROR;
-        }
-        // btp::SubscriptionTable::handle_unsubscribe() always reports success
-        // (commands.md section 4: removing an already-absent subscription is
-        // idempotent) -- unlike the old TelemetryPublisher::unsubscribe(),
-        // there is no "no live subscription with that id" distinction left
-        // to report here.
-        btp::Header header{};
-        header.source_id = TelemetryPublisher::kLocalSubscriberSourceId;
-        header.boot_id = TelemetryPublisher::kLocalSubscriberBootId;
-
-        btp::Unsubscribe request{};
-        request.target_source_id = instance_->node_->source_id();
-        request.target_boot_id = instance_->node_->boot_id();
-        request.subscription_id = subscription_id;
-
-        btp::ControlResult result{};
-        instance_->node_->subscriptions()->handle_unsubscribe(header, request, &result);
-
-        ROBOT::logger.insert_logf(logType::INFO, "unsubscribe requested id=%lu",
-                                  static_cast<unsigned long>(subscription_id));
-        return RESULT_OK;
-    }, "unsub", "Cancel a subscription by id (see topics/sub)", "telemetry");
-
-    shell.add([]() -> uint8_t {
-        // Reads the same table node_->catalog() is built from
-        // (ManifestCatalog::populate()), so the text here can never disagree
-        // with the wire.
-        size_t schema_count = 0;
-        const TelemetryPublisher::TopicSchema* schemas =
-            TelemetryPublisher::schemas(&schema_count);
-
-        std::string out;
-        char line[176];
-        for (size_t i = 0; i < schema_count; ++i) {
-            const TelemetryPublisher::TopicSchema& schema = schemas[i];
-            std::snprintf(
-                line, sizeof(line),
-                "topic_id=0x%04X name=%s version=%u fields=%u payload_bytes=%u "
-                "max_rate_millihz=%lu\n",
-                static_cast<unsigned>(schema.topic_id), schema.name,
-                static_cast<unsigned>(schema.schema_version),
-                static_cast<unsigned>(schema.field_count),
-                static_cast<unsigned>(schema.payload_size),
-                static_cast<unsigned long>(schema.max_rate_millihz));
-            out += line;
-        }
-        // max_rate_millihz == 0 is commands.md section 3.3's "not periodic",
-        // which is what robot.state is: published on transitions only.
-        out += "note: max_rate_millihz=0 means event-driven, not periodic";
-
-        ROBOT::logger.insert_log(logType::INFO, out.c_str());
-        return RESULT_OK;
-    }, "manifest", "The static topic schemas, as MANIFEST_DATA reports them", "telemetry");
-
-    shell.add([]() -> uint8_t {
-        const TelemetryPublisher::Stats stats = instance_->telemetry.stats();
-        ROBOT::logger.insert_logf(
-            logType::INFO,
-            "queued=%lu sent=%lu dropped_full=%lu dropped_invalid=%lu "
-            "send_failed=%lu pending=%u",
-            static_cast<unsigned long>(stats.queued),
-            static_cast<unsigned long>(stats.sent),
-            static_cast<unsigned long>(stats.dropped_full),
-            static_cast<unsigned long>(stats.dropped_invalid),
-            static_cast<unsigned long>(stats.send_failed),
-            static_cast<unsigned>(instance_->telemetry.queued_count()));
-        return RESULT_OK;
-    }, "stats", "Publisher queue counters", "telemetry");
-}
-
-void ROBOT::registerSecurityCommands() {
-    // "sec": which keys are loaded and which channel they actually protect.
-    //
-    // SECURITY RULE, do not weaken it: nothing in this module may print
-    // key_e() or key_l(), not partially and not behind a debug flag. Only the
-    // verify tags, which are the images of the keys under a one-way function
-    // and are public by construction -- and are exactly what tells a bench
-    // WHICH key is wrong. See the KeyStore class comment.
-    shell.create_module("sec", "Channel keys and their status");
-
-    shell.add([]() -> uint8_t {
-        if (!instance_->key_store.loaded()) {
-            ROBOT::logger.insert_logf(
-                logType::WARN, "loaded=0 failed_field=%s file=%s",
-                KeyStore::error_field(instance_->key_store.last_error()),
-                KEY_STORE_FILE);
-            return RESULT_OK;
-        }
-
-        char verify_e_hex[KeyStore::kVerifyLength * 2U + 1U];
-        char verify_l_hex[KeyStore::kVerifyLength * 2U + 1U];
-        hexEncode(instance_->key_store.verify_e(), KeyStore::kVerifyLength, verify_e_hex);
-        hexEncode(instance_->key_store.verify_l(), KeyStore::kVerifyLength, verify_l_hex);
-
-        ROBOT::logger.insert_logf(
-            logType::INFO,
-            "loaded=1 verify_e=%s verify_l=%s kdf_iterations=%lu cipher=aes-128-gcm",
-            verify_e_hex, verify_l_hex,
-            static_cast<unsigned long>(instance_->key_store.iterations()));
-        return RESULT_OK;
-    }, "keys", "Public verify tags of the two channel keys (never the keys)", "sec");
-
-    shell.add([]() -> uint8_t {
-        // Re-reads bally.key without a reboot, so a re-provisioned card can be
-        // picked up in place. A failed reload wipes the previously held keys
-        // (KeyStore::load), which means channel C stops opening frames rather
-        // than silently keeping stale material -- say so plainly.
-        if (!instance_->key_store.load_from_card(instance_->sd_card)) {
-            ROBOT::logger.insert_logf(
-                logType::ERRO,
-                "reload failed at field=%s; previously held keys were wiped, "
-                "sealed traffic will now be refused until a valid %s is loaded",
-                KeyStore::error_field(instance_->key_store.last_error()),
-                KEY_STORE_FILE);
-            return RESULT_ERROR;
-        }
-
-        char verify_e_hex[KeyStore::kVerifyLength * 2U + 1U];
-        char verify_l_hex[KeyStore::kVerifyLength * 2U + 1U];
-        hexEncode(instance_->key_store.verify_e(), KeyStore::kVerifyLength, verify_e_hex);
-        hexEncode(instance_->key_store.verify_l(), KeyStore::kVerifyLength, verify_l_hex);
-        ROBOT::logger.insert_logf(logType::INFO,
-                                  "reloaded=1 verify_e=%s verify_l=%s",
-                                  verify_e_hex, verify_l_hex);
-        return RESULT_OK;
-    }, "reload", "Re-read bally.key from the SD card without rebooting", "sec");
-
-    shell.add([]() -> uint8_t {
-        // Reports the gap as much as the state: both channels are sealed
-        // (topico 31 closed CommandProcessor's reply path being channel-C-
-        // only), but there is still no per-channel command policy -- a
-        // channel B request (TraceView, key E) and a channel C request
-        // (dongle, key L) are equally authorized to run anything, motors
-        // included. That is the single most important thing an operator can
-        // know about this build's security posture, so it is printed, not
-        // left to documentation.
-        const bool loaded = instance_->key_store.loaded();
-        ROBOT::logger.insert_logf(
-            logType::INFO,
-            "contract_version=%u channel_a=console_cleartext "
-            "channel_b=endpoint_key_e sealed=1 key_e_loaded=%d "
-            "channel_c=link_key_l sealed=1 key_l_loaded=%d",
-            static_cast<unsigned>(bally::kChannelContractVersion),
-            loaded ? 1 : 0, loaded ? 1 : 0);
-        ROBOT::logger.insert_log(
-            logType::WARN,
-            "no per-channel command policy yet: a request sealed with EITHER "
-            "key can run every command, motors included");
-        return RESULT_OK;
-    }, "channels", "Which channel each key protects, and which are sealed today", "sec");
-}
-
 void ROBOT::registerJobCommands() {
     // "job": the robot running its own policy instead of waiting to be told.
     //
@@ -1026,9 +583,9 @@ void ROBOT::registerJobCommands() {
     // commas, so the scheduled command travels as one string argument and may
     // contain spaces freely. A command that itself needs commas escapes them:
     //   job -every 1000, robot -set_pwm_pair 40\, 40\, 500
-    shell.create_module("job", "Scheduled shell commands and SD scripts");
+    shell_->create_module("job", "Scheduled shell commands and SD scripts");
 
-    shell.add([](uint32_t interval_ms, std::string command) -> uint8_t {
+    shell_->add([](uint32_t interval_ms, std::string command) -> uint8_t {
         uint8_t id = 0;
         const JobScheduler::Error error = instance_->jobs.schedule_interval(
             interval_ms, 0U, command.c_str(), &id);
@@ -1044,7 +601,7 @@ void ROBOT::registerJobCommands() {
         return RESULT_OK;
     }, "every", "Run a command forever on an interval: interval_ms,command", "job");
 
-    shell.add([](uint32_t interval_ms, uint32_t times,
+    shell_->add([](uint32_t interval_ms, uint32_t times,
                  std::string command) -> uint8_t {
         if (times == 0U) {
             ROBOT::logger.insert_log(
@@ -1069,7 +626,7 @@ void ROBOT::registerJobCommands() {
         return RESULT_OK;
     }, "repeat", "Run a command a fixed number of times: interval_ms,times,command", "job");
 
-    shell.add([](uint32_t delay_ms, std::string command) -> uint8_t {
+    shell_->add([](uint32_t delay_ms, std::string command) -> uint8_t {
         uint8_t id = 0;
         const JobScheduler::Error error =
             instance_->jobs.schedule_once(delay_ms, command.c_str(), &id);
@@ -1085,7 +642,7 @@ void ROBOT::registerJobCommands() {
         return RESULT_OK;
     }, "once", "Run a command a single time after a delay: delay_ms,command", "job");
 
-    shell.add([](std::string state_name, std::string command) -> uint8_t {
+    shell_->add([](std::string state_name, std::string command) -> uint8_t {
         const uint8_t state = StateMachine::stateFromString(state_name.c_str());
         if (state == NONE) {
             ROBOT::logger.insert_logf(
@@ -1111,7 +668,7 @@ void ROBOT::registerJobCommands() {
         return RESULT_OK;
     }, "at", "Run a command every time a state is entered: state,command", "job");
 
-    shell.add([]() -> uint8_t {
+    shell_->add([]() -> uint8_t {
         JobScheduler::JobView views[JobScheduler::kMaxJobs];
         const size_t count = instance_->jobs.list(views, JobScheduler::kMaxJobs);
         if (count == 0U) {
@@ -1145,7 +702,7 @@ void ROBOT::registerJobCommands() {
         return RESULT_OK;
     }, "list", "List the scheduled jobs", "job");
 
-    shell.add([](uint8_t job_id) -> uint8_t {
+    shell_->add([](uint8_t job_id) -> uint8_t {
         if (!instance_->jobs.cancel(job_id)) {
             ROBOT::logger.insert_logf(logType::ERRO, "no active job with id=%u",
                                       static_cast<unsigned>(job_id));
@@ -1156,14 +713,14 @@ void ROBOT::registerJobCommands() {
         return RESULT_OK;
     }, "cancel", "Cancel one job by id (see list)", "job");
 
-    shell.add([]() -> uint8_t {
+    shell_->add([]() -> uint8_t {
         const size_t cancelled = instance_->jobs.cancel_all();
         ROBOT::logger.insert_logf(logType::INFO, "cancelled=%u",
                                   static_cast<unsigned>(cancelled));
         return RESULT_OK;
     }, "cancel_all", "Cancel every scheduled job", "job");
 
-    shell.add([](std::string path) -> uint8_t {
+    shell_->add([](std::string path) -> uint8_t {
         if (instance_->script_active_) {
             ROBOT::logger.insert_log(logType::ERRO,
                                      "a script is already running; wait for it to finish");
@@ -1182,7 +739,7 @@ void ROBOT::registerJobCommands() {
         return RESULT_OK;
     }, "run_file", "Run a file of shell commands from the SD card, one line per pass", "job");
 
-    shell.add([]() -> uint8_t {
+    shell_->add([]() -> uint8_t {
         if (!instance_->saveJobs()) {
             ROBOT::logger.insert_log(logType::ERRO,
                                      "cannot save jobs: SD card not mounted or write failed");
@@ -1193,7 +750,7 @@ void ROBOT::registerJobCommands() {
              " (restored automatically at next boot; 'once' jobs are not saved)",
        "job");
 
-    shell.add([]() -> uint8_t {
+    shell_->add([]() -> uint8_t {
         const JobScheduler::Stats stats = instance_->jobs.stats();
         ROBOT::logger.insert_logf(
             logType::INFO,
@@ -1221,9 +778,9 @@ void ROBOT::registerSystemCommands() {
     // rule. The delegating commands below (health/memory/tasks/uptime) are the
     // deliberate exception: they forward SystemMonitor's existing multi-line
     // report verbatim rather than reformatting it.
-    shell.create_module("sys", "Machine identity, health and lifecycle");
+    shell_->create_module("sys", "Machine identity, health and lifecycle");
 
-    shell.add([]() -> uint8_t {
+    shell_->add([]() -> uint8_t {
         const esp_app_desc_t* app = esp_app_get_description();
 
         esp_chip_info_t chip{};
@@ -1254,13 +811,13 @@ void ROBOT::registerSystemCommands() {
         return RESULT_OK;
     }, "info", "Firmware version, chip, flash and running OTA partition", "sys");
 
-    shell.add([]() -> uint8_t {
+    shell_->add([]() -> uint8_t {
         uint8_t mac[6] = {};
         esp_read_mac(mac, ESP_MAC_WIFI_STA);
 
-        char uuid_hex[sizeof(instance_->protocol_uuid_) * 2U + 1U];
-        hexEncode(instance_->protocol_uuid_, sizeof(instance_->protocol_uuid_),
-                  uuid_hex);
+        const btpdev::Identity& identity = btpdev::identity();
+        char uuid_hex[sizeof(identity.peer_uuid) * 2U + 1U];
+        hexEncode(identity.peer_uuid, sizeof(identity.peer_uuid), uuid_hex);
 
         static constexpr uint8_t peer[6] = {MAC_ADDR};
 
@@ -1277,7 +834,7 @@ void ROBOT::registerSystemCommands() {
         return RESULT_OK;
     }, "identity", "BTP source_id/boot_id, MAC, uuid, radio channel and peer", "sys");
 
-    shell.add([]() -> uint8_t {
+    shell_->add([]() -> uint8_t {
         // update() before reading: nothing else refreshes the task table on
         // its own, so an on-demand read should not show whatever the BTP
         // system.monitor publish cycle happened to leave behind.
@@ -1287,32 +844,32 @@ void ROBOT::registerSystemCommands() {
         return RESULT_OK;
     }, "health", "Full system health report (temperature, memory, tasks)", "sys");
 
-    shell.add([]() -> uint8_t {
+    shell_->add([]() -> uint8_t {
         ROBOT::logger.insert_log(logType::INFO,
                                  instance_->sysmon.getUptime().c_str());
         return RESULT_OK;
     }, "uptime", "Time since boot", "sys");
 
-    shell.add([]() -> uint8_t {
+    shell_->add([]() -> uint8_t {
         ROBOT::logger.insert_log(logType::INFO,
                                  instance_->sysmon.getMemoryStats().c_str());
         return RESULT_OK;
     }, "memory", "Heap and PSRAM usage", "sys");
 
-    shell.add([]() -> uint8_t {
+    shell_->add([]() -> uint8_t {
         instance_->sysmon.update();  // same reason as "health" above
         ROBOT::logger.insert_log(logType::INFO,
                                  instance_->sysmon.getTaskStats().c_str());
         return RESULT_OK;
     }, "tasks", "Per-task CPU load, priority, core and stack high water mark", "sys");
 
-    shell.add([]() -> uint8_t {
+    shell_->add([]() -> uint8_t {
         ROBOT::logger.insert_logf(logType::INFO, "core_temp_c=%.1f",
                                   instance_->sysmon.getCoreTemperature());
         return RESULT_OK;
     }, "temp", "SoC core temperature", "sys");
 
-    shell.add([]() -> uint8_t {
+    shell_->add([]() -> uint8_t {
         const esp_reset_reason_t reason = esp_reset_reason();
         ROBOT::logger.insert_logf(logType::INFO, "reset_reason=%d name=%s",
                                   static_cast<int>(reason),
@@ -1320,7 +877,7 @@ void ROBOT::registerSystemCommands() {
         return RESULT_OK;
     }, "reset_reason", "Why the chip last restarted (panic, watchdog, ...)", "sys");
 
-    shell.add([]() -> uint8_t {
+    shell_->add([]() -> uint8_t {
         ROBOT::logger.insert_logf(
             logType::INFO,
             "boot_state=%s current_state=%s ota_active=%d usb_exposed=%d",
@@ -1333,7 +890,7 @@ void ROBOT::registerSystemCommands() {
         return RESULT_OK;
     }, "boot_mode", "Which state this boot started in, and which sub-mode is active", "sys");
 
-    shell.add([]() -> uint8_t {
+    shell_->add([]() -> uint8_t {
         // A successful OTA upload sets the new image as the boot partition but
         // deliberately does not reboot on its own (see
         // OTAUpdater::finish_update) -- this is the remote trigger for that,
@@ -1346,7 +903,7 @@ void ROBOT::registerSystemCommands() {
         return RESULT_OK;
     }, "reboot", "Restart the robot now", "sys");
 
-    shell.add([](std::string confirmation) -> uint8_t {
+    shell_->add([](std::string confirmation) -> uint8_t {
         // Destructive, and reachable by radio from anywhere in range, so it
         // takes a literal confirmation word rather than being one typo away.
         // Deliberately not a flag or a number: it has to be typed on purpose.
@@ -1376,7 +933,7 @@ void ROBOT::registerSystemCommands() {
         return RESULT_OK;
     }, "factory_reset", "Restore compiled-in defaults and reboot: pass CONFIRMA", "sys");
 
-    shell.add([]() -> uint8_t {
+    shell_->add([]() -> uint8_t {
         // Every module and command this firmware's shell answers to, so a
         // new client can discover the catalog instead of shipping a
         // hand-copied list that drifts. Built from complete_line() because it
@@ -1390,7 +947,7 @@ void ROBOT::registerSystemCommands() {
         static constexpr size_t kMaxCommandsPerModule = 64U;
 
         const std::vector<std::string> modules =
-            instance_->shell.complete_line("", kMaxModules);
+            instance_->shell_->complete_line("", kMaxModules);
 
         std::string out;
         char header[64];
@@ -1404,7 +961,7 @@ void ROBOT::registerSystemCommands() {
                 module_name.pop_back();
             }
 
-            const std::vector<std::string> commands = instance_->shell.complete_line(
+            const std::vector<std::string> commands = instance_->shell_->complete_line(
                 module_name + " ", kMaxCommandsPerModule);
 
             std::snprintf(header, sizeof(header), "module=%s commands=%u\n",
@@ -1426,7 +983,7 @@ void ROBOT::registerSystemCommands() {
         return RESULT_OK;
     }, "manifest", "Every module and command this shell answers to (names only)", "sys");
 
-    shell.add([](uint32_t timeout_ms) -> uint8_t {
+    shell_->add([](uint32_t timeout_ms) -> uint8_t {
         // This robot's only Wi-Fi STA connection today is the one OTA makes
         // to reach the update server -- ESP-NOW, the normal radio, has no
         // route to an NTP server at all. So this only works while that
@@ -1495,9 +1052,9 @@ void ROBOT::registerSystemCommands() {
 
 void ROBOT::registerRobotIOCommands() {
     // Raw actuator/virtual-input I/O: motors, LEDs, virtual button/side-sensor triggers.
-    shell.create_module("robot", "Raw actuator and virtual-input commands");
+    shell_->create_module("robot", "Raw actuator and virtual-input commands");
 
-    shell.add([](uint8_t btn_idx) -> uint8_t {
+    shell_->add([](uint8_t btn_idx) -> uint8_t {
         // set the flag of the button with the given index
         if (btn_idx >= Flags_in::MAX_FLAGS)
             return RESULT_ERROR;
@@ -1505,7 +1062,7 @@ void ROBOT::registerRobotIOCommands() {
         return RESULT_OK;
     }, "btn", "Virtually trigger a button", "robot");
 
-    shell.add([](uint8_t ssr_idx) -> uint8_t {
+    shell_->add([](uint8_t ssr_idx) -> uint8_t {
         // set the flag of the side sensor with the given index
         if (ssr_idx >= Flags_in::MAX_FLAGS)
             return RESULT_ERROR;
@@ -1517,7 +1074,7 @@ void ROBOT::registerRobotIOCommands() {
     // force the output to zero anyway ("motion -disarm" is enforced there, not
     // here), but accepting the command and moving nothing reads as a hardware
     // fault -- say which software gate is closed instead.
-    shell.add([](uint8_t motor_idx, int8_t pwm_value, uint32_t time) -> uint8_t {
+    shell_->add([](uint8_t motor_idx, int8_t pwm_value, uint32_t time) -> uint8_t {
         // set the PWM value for the motor with the given index (-100..100)
         if (motor_idx > MOTOR_RIGHT_idx) {
             ROBOT::logger.insert_logf(logType::ERRO,
@@ -1539,7 +1096,7 @@ void ROBOT::registerRobotIOCommands() {
         return RESULT_OK;
     }, "set_pwm", "Set PWM value for a motor (0 for left, 1 for right)", "robot");
 
-    shell.add([](int8_t left_pwm, int8_t right_pwm, uint32_t time) -> uint8_t {
+    shell_->add([](int8_t left_pwm, int8_t right_pwm, uint32_t time) -> uint8_t {
         if (!instance_->motors_armed_.load(std::memory_order_acquire)) {
             ROBOT::logger.insert_log(logType::ERRO,
                                      "refused: motors are disarmed (motion -arm)");
@@ -1550,7 +1107,7 @@ void ROBOT::registerRobotIOCommands() {
         return RESULT_OK;
     }, "set_pwm_pair", "Set PWM values for both motors at once", "robot");
 
-    shell.add([](uint8_t pin, uint32_t time) -> uint8_t {
+    shell_->add([](uint8_t pin, uint32_t time) -> uint8_t {
         instance_->leds.setFlag(pin, time);
         return RESULT_OK;
     }, "set_led", "turn on a LED", "robot");
@@ -1559,7 +1116,7 @@ void ROBOT::registerRobotIOCommands() {
     // frequency in Hz, not a -100..100 duty percentage, so it doesn't fit
     // that struct's semantics. Junkebox::play_tone() gives the same
     // "one-shot, auto-stops after `time`" safety directly instead.
-    shell.add([](uint32_t freq_hz, uint32_t time) -> uint8_t {
+    shell_->add([](uint32_t freq_hz, uint32_t time) -> uint8_t {
         if (!instance_->junkebox->play_tone(static_cast<uint16_t>(freq_hz), time)) {
             ROBOT::logger.insert_log(logType::ERRO, "Junkebox is not initialized yet");
             return RESULT_ERROR;
@@ -1572,9 +1129,9 @@ void ROBOT::registerKalmanCommands() {
     // EKF (Kalman) state and periodic tuning log. Unlike the "debug" module
     // below, this is available in any state (including RUN) since tuning
     // the filter means watching it while the robot is actually driving.
-    shell.create_module("kalman", "EKF state and periodic tuning log");
+    shell_->create_module("kalman", "EKF state and periodic tuning log");
 
-    shell.add([]() -> uint8_t {
+    shell_->add([]() -> uint8_t {
         ROBOT::logger.insert_logf(logType::INFO, "EKF state: v=%.4f w=%.4f b=%.4f",
                                   instance_->EKF->get_state(0),
                                   instance_->EKF->get_state(1),
@@ -1582,7 +1139,7 @@ void ROBOT::registerKalmanCommands() {
         return RESULT_OK;
     }, "state", "Read the current EKF state (v, w, gyro bias)", "kalman");
 
-    shell.add([](uint32_t interval_ms) -> uint8_t {
+    shell_->add([](uint32_t interval_ms) -> uint8_t {
         if (interval_ms == 0 ||
             !instance_->kalman_log_test_.schedule(UINT32_MAX, interval_ms)) {
             ROBOT::logger.insert_log(logType::ERRO,
@@ -1595,7 +1152,7 @@ void ROBOT::registerKalmanCommands() {
         return RESULT_OK;
     }, "start_log", "Start periodic EKF state + measurement logging: interval_ms", "kalman");
 
-    shell.add([]() -> uint8_t {
+    shell_->add([]() -> uint8_t {
         instance_->kalman_log_test_.cancel();
         ROBOT::logger.insert_log(logType::INFO, "Kalman log stopped");
         return RESULT_OK;
@@ -1606,9 +1163,9 @@ void ROBOT::registerDebugCommands() {
     // DEBUG sensor tests: each schedules periodic, non-blocking sampling
     // (see ScheduledDebugTest/processDebug). Add one command per sensor
     // here — IMU and H-bridge current are planned next.
-    shell.create_module("debug", "Safe non-blocking sensor tests");
+    shell_->create_module("debug", "Safe non-blocking sensor tests");
 
-    shell.add([](uint32_t samples, uint32_t interval_ms) -> uint8_t {
+    shell_->add([](uint32_t samples, uint32_t interval_ms) -> uint8_t {
         if (!instance_->scheduleDebugTest(instance_->array_sensor_test_,
                                           samples, interval_ms)) {
             ROBOT::logger.insert_log(
@@ -1624,7 +1181,7 @@ void ROBOT::registerDebugCommands() {
         return RESULT_OK;
     }, "test_arr_sensor", "Print sensor array: samples,interval_ms", "debug");
 
-    shell.add([](uint32_t samples, uint32_t interval_ms) -> uint8_t {
+    shell_->add([](uint32_t samples, uint32_t interval_ms) -> uint8_t {
         if (!instance_->scheduleDebugTest(instance_->encoder_test_,
                                           samples, interval_ms)) {
             ROBOT::logger.insert_log(
@@ -1640,7 +1197,7 @@ void ROBOT::registerDebugCommands() {
         return RESULT_OK;
     }, "test_encoder", "Print left/right encoder counts: samples,interval_ms", "debug");
 
-    shell.add([](uint32_t samples, uint32_t interval_ms) -> uint8_t {
+    shell_->add([](uint32_t samples, uint32_t interval_ms) -> uint8_t {
         // Same reasoning as sampleEKF()'s imu_ready_ guard: without it, a
         // sensor that never answered at boot would retry (and block on) an
         // I2C timeout every sample instead of failing once, up front.
@@ -1665,7 +1222,7 @@ void ROBOT::registerDebugCommands() {
         return RESULT_OK;
     }, "test_imu", "Print IMU accel/gyro/temp readings: samples,interval_ms", "debug");
 
-    shell.add([]() -> uint8_t {
+    shell_->add([]() -> uint8_t {
         // Reuses the bus imu->begin() already opened on cfg.sda_pin/scl_pin
         // instead of opening a second i2c_master_bus on the same pins (see
         // ICM42688::scanBus()'s comment) -- so this works on demand, without
@@ -1687,7 +1244,7 @@ void ROBOT::registerDebugCommands() {
         return RESULT_OK;
     }, "scan_i2c", "Probe the IMU I2C bus and read WHO_AM_I; works even if the IMU wasn't detected at boot", "debug");
 
-    shell.add([](uint32_t samples, uint32_t interval_ms) -> uint8_t {
+    shell_->add([](uint32_t samples, uint32_t interval_ms) -> uint8_t {
         // Same reuse-the-existing-bus reasoning as scan_i2c: no imu_ready_
         // gate here on purpose -- the whole point is to keep re-checking
         // even after a failed boot detection, since the bus can (and does,

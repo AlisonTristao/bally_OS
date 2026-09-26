@@ -6,6 +6,7 @@
 
 #include "esp_app_desc.h"
 #include "esp_log.h"
+#include "esp_netif.h"
 #include "esp_now.h"
 #include "esp_ota_ops.h"
 #include "esp_system.h"
@@ -153,7 +154,13 @@ void OTAUpdater::configure(const OtaTuning& tuning) {
 }
 
 void OTAUpdater::ensure_mdns() {
-    if (mdns_ready_ || hostname_[0] == '\0') return;
+    if (mdns_ready_) return;
+    if (external_wifi_) {
+        // The Wi-Fi owner already runs mDNS under its own hostname.
+        if (mdns_service_add(nullptr, "_http", "_tcp", 80, nullptr, 0) == ESP_OK) mdns_ready_ = true;
+        return;
+    }
+    if (hostname_[0] == '\0') return;
     if (mdns_init() != ESP_OK) return;
 
     mdns_hostname_set(hostname_);
@@ -374,7 +381,37 @@ bool OTAUpdater::begin_scanning(bool direct_mode, const char* log_verb) {
 }
 
 bool OTAUpdater::start() {
+    if (external_wifi_) return start_on_external_wifi();
     return begin_scanning(/*direct_mode=*/false, "started");
+}
+
+bool OTAUpdater::start_on_external_wifi() {
+    if (phase_.load(std::memory_order_acquire) != Phase::IDLE) return true;
+    got_ip_.store(false, std::memory_order_relaxed);
+    disconnected_.store(false, std::memory_order_relaxed);
+    ensure_mdns();
+
+    esp_netif_ip_info_t ip{};
+    esp_netif_t* sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    const bool has_ip = sta != nullptr && esp_netif_get_ip_info(sta, &ip) == ESP_OK && ip.ip.addr != 0U;
+    if (!has_ip) {
+        // process() starts the server when IP_EVENT_STA_GOT_IP lands.
+        phase_.store(Phase::CONNECTING, std::memory_order_release);
+        log(logType::INFO, "OTA: started, waiting for the Wi-Fi connection");
+        return true;
+    }
+    snprintf(connected_ip_, sizeof(connected_ip_), IPSTR, IP2STR(&ip.ip));
+    wifi_ap_record_t ap{};
+    if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+        snprintf(connected_ssid_, sizeof(connected_ssid_), "%s", reinterpret_cast<const char*>(ap.ssid));
+    }
+    if (!start_http_server()) {
+        log(logType::ERRO, "OTA: the HTTP server failed to start");
+        return false;
+    }
+    phase_.store(Phase::SERVING, std::memory_order_release);
+    log(logType::INFO, "OTA: serving updates at %s ('%s')", connected_ip_, connected_ssid_);
+    return true;
 }
 
 bool OTAUpdater::startDirect() {
@@ -577,6 +614,14 @@ void OTAUpdater::process(uint8_t button_flags) {
             break;
 
         case Phase::CONNECTING:
+            if (external_wifi_) {
+                // Not ours to retry: wait for the owner's connection.
+                if (got_ip_.exchange(false, std::memory_order_acq_rel)) {
+                    phase_.store(Phase::IDLE, std::memory_order_release);
+                    start_on_external_wifi();
+                }
+                break;
+            }
             if (got_ip_.exchange(false, std::memory_order_acq_rel)) {
                 if (direct_mode_) {
                     // T25b: comm_mode==TCP wants the Wi-Fi link, not the
@@ -627,11 +672,13 @@ void OTAUpdater::cancel() {
     if (flashing_.load(std::memory_order_acquire)) return;
     if (phase_.load(std::memory_order_acquire) == Phase::IDLE) return;
 
-    log(logType::INFO, "OTA: cancelled, restoring ESP-NOW");
+    log(logType::INFO, external_wifi_ ? "OTA: cancelled" : "OTA: cancelled, restoring ESP-NOW");
 
     stop_http_server();
-    esp_wifi_disconnect();
-    esp_wifi_set_channel(tuning_.espnow_channel, WIFI_SECOND_CHAN_NONE);
+    if (!external_wifi_) {
+        esp_wifi_disconnect();
+        esp_wifi_set_channel(tuning_.espnow_channel, WIFI_SECOND_CHAN_NONE);
+    }
 
     for (uint8_t i = 0; i < 4; ++i) leds_->setFlag(i, 1);
 
