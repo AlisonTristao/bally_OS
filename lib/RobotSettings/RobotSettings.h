@@ -131,9 +131,8 @@ struct SettingsData {
     // 0=ESP-NOW (default -- a settings.conf written before this field
     // existed has no "comm.comm_mode" line, load() leaves this at its
     // compiled-in default, so an existing robot's behaviour is unchanged),
-    // 1=TCP, 2=BLE (reserved, not implemented yet -- ROBOT::init() falls
-    // back to 0 and logs a warning), 3=none (fully offline: no ESP-NOW, no
-    // Wi-Fi). Applied at boot only (ROBOT::init()'s comm_mode dispatch) --
+    // 1=TCP, 2=BLE, 3=serial (BTP over the native USB CDC port; no
+    // ESP-NOW, no Wi-Fi). Applied at boot only (ROBOT::init()'s comm_mode dispatch) --
     // changing it live via "settings -set comm comm_mode N" takes effect on
     // the next reboot, same as COMM_CONFIG's own btn0-confirm.
     uint8_t comm_mode = 0;
@@ -197,7 +196,7 @@ public:
      * Exists so a remote client can tell "has this robot's configuration
      * changed since I last looked" without re-reading all ~55 keys of
      * "settings -list_all" to diff them itself. Deliberately NOT wired into
-     * ManifestCatalog::kConfigRevision: that field's documented meaning is
+     * the manifest's config_revision: that field's documented meaning is
      * "has the published topic/schema catalog changed" (BTP/docs/commands.md
      * section 3), which is genuinely fixed at compile time in this firmware
      * -- repurposing a wire field to mean something else would be a protocol

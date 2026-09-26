@@ -30,6 +30,16 @@ CONFIG_TINYUSB_MSC_MOUNT_PATH="/sdcard"
 CONFIG_TINYUSB_DESC_PRODUCT_STRING="BallyRobot"
 CONFIG_TINYUSB_DESC_MSC_STRING="BallyRobot SD Card"
 
+# USB CDC-ACM on the same native USB device: BTP over serial for
+# comm_mode==3 (lib/UsbSerialBtpServer). 2 KB each way: the RX callback
+# drains in 512-byte reads, and TX is fed from UsbSerialBtpServer's own
+# frame queue, so the FIFO only has to keep the endpoint busy.
+CONFIG_TINYUSB_CDC_ENABLED=y
+CONFIG_TINYUSB_CDC_COUNT=1
+CONFIG_TINYUSB_CDC_RX_BUFSIZE=2048
+CONFIG_TINYUSB_CDC_TX_BUFSIZE=2048
+CONFIG_TINYUSB_DESC_CDC_STRING="BallyRobot BTP serial"
+
 # Automatic rollback if a newly OTA-flashed image never confirms itself healthy
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 

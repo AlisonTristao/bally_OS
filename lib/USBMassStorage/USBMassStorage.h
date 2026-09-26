@@ -46,6 +46,38 @@ public:
     bool expose();
 
     /**
+     * @brief Install the native USB device now and keep it installed for
+     * the rest of this boot -- the direct-serial comm_mode (comm_mode==3)
+     * needs its CDC interface up from boot, not only during a storage
+     * session. Works with or without begin() having succeeded (no SD card
+     * just means the MSC LUN reports no medium). expose()/reclaim() keep
+     * working on top of it: they only move the FAT mount point, and
+     * reclaim() never uninstalls a device installed this way.
+     *
+     * The TinyUSB task runs on PRO_CPU at priority 4 with an 8 KiB stack
+     * here: the CDC RX callback runs the whole BTP receive path (COBS,
+     * AEAD open, btp::Node replies) on it, and APP_CPU stays reserved for
+     * the state machine (CONTRIBUTING.md). Idempotent.
+     */
+    bool install_persistent_usb_device();
+
+    /**
+     * @brief Report `name` (the robot's configured identity name) as the USB
+     * product string and the CDC interface string, so a host lists the
+     * serial port under the robot's name -- TraceView's port picker shows
+     * "COM5 -- <name>" without opening the port (Windows reads the CDC
+     * interface string, Linux/macOS/Android the product string). Same name
+     * BleBtpServer advertises. Empty/null keeps the sdkconfig defaults.
+     *
+     * Only takes effect for a driver installed after this call -- the host
+     * reads descriptors at enumeration -- so ROBOT::init() calls it right
+     * after settings.load(), before anything installs the device. A rename
+     * shows up from the next boot, like the BLE name. esp_tinyusb sends at
+     * most 31 characters, one byte per character (ASCII).
+     */
+    void set_product_name(const char* name) noexcept;
+
+    /**
      * @brief Hand the SD card back to the robot: return the FAT mount point
      * to the app side and tear down the native USB peripheral driver that
      * expose() installed. Mirrors OTAUpdater::cancel() — a firmware-side
@@ -71,8 +103,11 @@ public:
     bool is_exposed() const {
         return session_active_.load() && !app_has_access_.load();
     }
+    // A persistent device (install_persistent_usb_device()) alone does not
+    // count: it is the serial link, not a storage session.
     bool is_active() const {
-        return session_active_.load() || usb_driver_installed_.load();
+        return session_active_.load() ||
+               (usb_driver_installed_.load() && !usb_driver_persistent_.load());
     }
     bool app_has_access() const { return app_has_access_.load(); }
     bool host_is_attached() const { return host_attached_.load(); }
@@ -105,10 +140,18 @@ private:
     Flags_out* leds_ = nullptr;
     void* storage_handle_ = nullptr;
     char usb_serial_[13]{};
-    const char* usb_string_descriptors_[5]{};
+    // set_product_name()'s copy; empty = sdkconfig's product/CDC strings.
+    // 32 = esp_tinyusb's MAX_DESC_BUF_SIZE (31 characters on the wire).
+    char usb_product_[32]{};
+    // LANGID, manufacturer, product, serial, CDC interface, MSC interface --
+    // the order esp_tinyusb's default descriptor (usb_descriptors.c) indexes
+    // them in with both CFG_TUD_CDC and CFG_TUD_MSC enabled.
+    static constexpr int kUsbStringCount = 6;
+    const char* usb_string_descriptors_[kUsbStringCount]{};
     std::atomic<bool> initialized_{false};
     std::atomic<bool> app_has_access_{false};
     std::atomic<bool> usb_driver_installed_{false};
+    std::atomic<bool> usb_driver_persistent_{false};
     std::atomic<bool> session_active_{false};
     std::atomic<bool> host_attached_{false};
     std::atomic<bool> mount_transition_failed_{false};
@@ -118,6 +161,7 @@ private:
     bool blink_alt_ = false;
 
     bool prepare_usb_identity();
+    bool install_usb_driver(bool persistent);
     bool sync_mount_state();
     void handle_storage_event(void* event);
 

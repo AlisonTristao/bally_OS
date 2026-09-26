@@ -370,12 +370,14 @@ Segure o(s) botão(ões) **antes** de resetar/ligar e só solte quando os LEDs m
 
 | Botões no reset | Modo | Saída |
 |---|---|---|
-| btn1 + btn2 | `COMM_CONFIG` — escolher `comm_mode` (LED azul=ESP-NOW, verde=TCP, amarelo=BLE, vermelho=nenhum) | btn1 próximo, btn2 anterior, **BOOT (btn0) confirma**, salva e reinicia; 30 s parado reinicia sem salvar |
+| btn1 + btn2 | `COMM_CONFIG` — escolher `comm_mode` (LED azul=ESP-NOW, verde=TCP, amarelo=BLE, vermelho=serial USB) | btn1 próximo, btn2 anterior, **BOOT (btn0) confirma**, salva e reinicia; 30 s parado reinicia sem salvar |
 | só btn2 | OTA (`DEBUG` + `ota start`) | reboot após upload ou botão |
 | só btn1 | USB storage (`DEBUG` + `storage expose`) | btn2 devolve o cartão |
 | nenhum | `SETUP` → `WAIT` | — |
 
-O BOOT (btn0/GPIO0) nunca entra nessa escolha: segurá-lo no reset põe o chip no bootloader da ROM. Com `comm_mode` BLE ou nenhum o Wi-Fi não sobe, então o OTA por botão não funciona — use `COMM_CONFIG` para voltar a ESP-NOW/TCP.
+O BOOT (btn0/GPIO0) nunca entra nessa escolha: segurá-lo no reset põe o chip no bootloader da ROM. Com `comm_mode` BLE ou serial o Wi-Fi não sobe, então o OTA por botão não funciona — use `COMM_CONFIG` para voltar a ESP-NOW/TCP.
+
+No `comm_mode` serial o robô fala BTP pela porta CDC do USB nativo, **sem senha** (sem cifra, e sem precisar do `bally.key`): quem está nesse cabo já tem acesso físico ao robô. ESP-NOW, TCP e BLE continuam cifrados.
 
 ## Dependências externas
 

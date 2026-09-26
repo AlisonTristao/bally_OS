@@ -54,6 +54,9 @@
 # session, which seals everything it sends. 2.46.0 also fragments every
 # send to <= 250-octet frames, which is what lets tcp_node_ / ble_node_ send
 # the ~1.7 KB MANIFEST_DATA at all (it used to fail as one oversized frame).
+# Now the minimum is v2.48.0: ManifestCatalog::populate() calls
+# btp::Catalog::set_config_revision_auto() (config_revision derived from the
+# catalogue content -- TraceView caches manifests by revision).
 # Keep this in step with [env:native]'s symlink; this can become a submodule
 # pinned to the tag.
 #

@@ -143,6 +143,15 @@ public:
     // overload; only the wire destination differs.
     bool send_result(const ResultView& result, BtpEndpoint& endpoint) noexcept;
 
+    // Same as the overload above, but always UNSEALED, whatever
+    // result.channel and configure()'s keys say -- for the direct serial
+    // session (USB CDC, comm_mode==3), which runs without a key on purpose:
+    // whoever holds the cable already has physical access to the robot. Only
+    // ever pass the serial endpoint here; every radio/network path keeps
+    // using the sealing overloads.
+    bool send_result_cleartext(const ResultView& result,
+                               BtpEndpoint& endpoint) noexcept;
+
     void note_unauthorized() noexcept;
     void note_drop() noexcept;
     Stats stats() const noexcept;
@@ -150,7 +159,8 @@ public:
 private:
     // Shared body for both send_result() overloads; `endpoint` is
     // endpoint_ for the zero-arg one, or the caller-supplied one otherwise.
-    bool send_result_via(const ResultView& result, BtpEndpoint* endpoint) noexcept;
+    bool send_result_via(const ResultView& result, BtpEndpoint* endpoint,
+                         bool cleartext = false) noexcept;
 
     // btp::DedupCache stores the verbatim request then the COMMAND_RESULT in
     // one region per slot. The result is prefixed with the 12 octets the

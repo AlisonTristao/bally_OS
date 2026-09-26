@@ -37,19 +37,15 @@ struct SourceInfoEntry {
 // Must match node_'s StaticNode CatalogSourceInfo template argument.
 constexpr std::size_t kMaxSourceInfoEntries = 16U;
 
-// This robot's served catalogue never changes shape at runtime (one static,
-// compile-time schema -- same reasoning ManifestResponder::kConfigRevision
-// always documented), so config_revision is a compile-time constant, bumped
-// whenever a firmware build changes the topics or fields TelemetryPublisher
-// exposes. RobotSettings.h's own comment on "the field's documented meaning"
-// refers to this constant.
-//
-// Bumped to 3: added robot.sensors (encoder speeds, IMU, current_a/current_b)
-// and robot.flags (buttons/side_sensors/leds/pwm) topics.
-// Bumped to 4: current_a/current_b and pwm_left/pwm_right now declare a
-// min_value/max_value range (BTP 2.45.0, manifest_format_version 3) -- a
-// consumer holding revision 3 has the field, but not its range.
-constexpr std::uint32_t kConfigRevision = 4U;
+// config_revision is NOT a hand-bumped constant any more (it was, up to
+// revision 4): populate() puts the catalogue in BTP 2.48.0's auto mode
+// (btp::Catalog::set_config_revision_auto()), so the revision is a digest of
+// the topics/fields themselves. TraceView caches manifests across sessions
+// by revision now -- a schema change shipped without a manual bump would
+// have kept serving it the old schema from its cache forever. Read the live
+// value with catalog.config_revision() (the HELLO advertisements in
+// BallyRobot.cpp do). RobotSettings.h's comment on "the field's documented
+// meaning" refers to this.
 
 // btp::Role::Producer -- a leaf node describing only itself (see
 // bindProtocolTransport()'s serve_catalog() call).
@@ -78,7 +74,8 @@ constexpr std::size_t kMaxCatalogFields = 24U;
 // SUBSCRIBE (btp::SubscriptionTable::handle_subscribe()), so this is the
 // only place that policy needs to be threaded through any more; nothing
 // else revalidates it. Then loads `source_info`[0..source_info_count) via
-// add_source_info() and sets catalog.config_revision() to kConfigRevision.
+// add_source_info() and switches catalog.config_revision() to auto mode (a
+// digest of the content -- see the note above kSourceRoleRobot).
 //
 // `schemas` and `source_info` are only read for the duration of this call;
 // the STRINGS they point at (topic/field names, units, source_info

@@ -193,6 +193,22 @@ void TelemetryPublisher::unbind_ble_target() noexcept {
     ble_subscriptions_ = nullptr;
 }
 
+void TelemetryPublisher::bind_serial_target(
+    BtpEndpoint& endpoint, BtpSealFn seal, void* seal_context,
+    const btp::SubscriptionTable& subscriptions) noexcept {
+    serial_endpoint_ = &endpoint;
+    serial_seal_ = seal;
+    serial_seal_context_ = seal_context;
+    serial_subscriptions_ = &subscriptions;
+}
+
+void TelemetryPublisher::unbind_serial_target() noexcept {
+    serial_endpoint_ = nullptr;
+    serial_seal_ = nullptr;
+    serial_seal_context_ = nullptr;
+    serial_subscriptions_ = nullptr;
+}
+
 std::size_t TelemetryPublisher::collect_targets(
     TargetView out[kMaxTargets]) const noexcept {
     std::size_t n = 0U;
@@ -206,6 +222,10 @@ std::size_t TelemetryPublisher::collect_targets(
     if (ble_endpoint_ != nullptr) {
         out[n++] = TargetView{ble_endpoint_, ble_seal_, ble_seal_context_,
                               ble_subscriptions_};
+    }
+    if (serial_endpoint_ != nullptr) {
+        out[n++] = TargetView{serial_endpoint_, serial_seal_,
+                              serial_seal_context_, serial_subscriptions_};
     }
     return n;
 }
@@ -614,7 +634,7 @@ bool TelemetryPublisher::topic_active(std::uint16_t topic_id) const noexcept {
 std::uint16_t TelemetryPublisher::topic_subscriber_count(
     std::uint16_t topic_id) const noexcept {
     if (topic_id == 0U) return 0U;
-    // Use the same target inventory as delivery, including BLE.
+    // Use the same target inventory as delivery, including BLE/serial.
     TargetView targets[kMaxTargets];
     const auto target_count = collect_targets(targets);
     std::uint32_t count = 0U;

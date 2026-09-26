@@ -19,6 +19,8 @@ std::size_t terminal_out_stride(TerminalResponder::LinkTarget target,
         max_payload = btp::kTcpMaxPayloadSize;
     } else if (target == TerminalResponder::LinkTarget::Ble) {
         max_payload = btp::kBleMaxPayloadSize;
+    } else if (target == TerminalResponder::LinkTarget::Serial) {
+        max_payload = btp::kSerialMaxPayloadSize;
     }
     return sealed ? (max_payload - kBtpAeadTagSize) : max_payload;
 }
@@ -145,6 +147,29 @@ void TerminalResponder::unbind_ble_target() noexcept {
     if (!try_lock()) return;
     for (Slot& s : slots_) {
         if (s.used && s.target == LinkTarget::Ble) {
+            s.used = false;
+        }
+    }
+    unlock();
+}
+
+void TerminalResponder::bind_serial_target(BtpEndpoint& endpoint, BtpSealFn seal,
+                                           void* seal_context) noexcept {
+    serial_endpoint_ = &endpoint;
+    serial_seal_ = seal;
+    serial_seal_context_ = seal_context;
+}
+
+void TerminalResponder::unbind_serial_target() noexcept {
+    serial_endpoint_ = nullptr;
+    serial_seal_ = nullptr;
+    serial_seal_context_ = nullptr;
+
+    // Same bounded-try eviction as unbind_ble_target() above, for every
+    // serial-origin slot (runs on the TinyUSB task).
+    if (!try_lock()) return;
+    for (Slot& s : slots_) {
+        if (s.used && s.target == LinkTarget::Serial) {
             s.used = false;
         }
     }
@@ -449,6 +474,10 @@ void TerminalResponder::emit_terminal_out(LinkTarget target, const std::string& 
         endpoint = ble_endpoint_;
         seal = ble_seal_;
         seal_context = ble_seal_context_;
+    } else if (target == LinkTarget::Serial) {
+        endpoint = serial_endpoint_;
+        seal = serial_seal_;
+        seal_context = serial_seal_context_;
     }
     if (bytes.empty() || endpoint == nullptr) {
         return;

@@ -179,22 +179,19 @@ bool USBMassStorage::expose() {
         return false;
     }
 
-    // Install the native USB task only for an explicitly requested session.
-    // This prevents a connected PC from taking the card during normal states.
-    host_attached_.store(false);
-
-    tinyusb_config_t usb_config =
-        TINYUSB_DEFAULT_CONFIG(usb_device_event, this);
-    usb_config.descriptor.string = usb_string_descriptors_;
-    usb_config.descriptor.string_count = 5;
-    if (tinyusb_driver_install(&usb_config) != ESP_OK) {
-        tinyusb_msc_set_storage_mount_point(
-            handle, TINYUSB_MSC_STORAGE_MOUNT_APP);
-        sync_mount_state();
-        return false;
+    // Install the native USB task only for an explicitly requested session
+    // (unless the serial comm_mode already keeps it installed). This
+    // prevents a connected PC from taking the card during normal states.
+    if (!usb_driver_installed_.load()) {
+        host_attached_.store(false);
+        if (!install_usb_driver(false)) {
+            tinyusb_msc_set_storage_mount_point(
+                handle, TINYUSB_MSC_STORAGE_MOUNT_APP);
+            sync_mount_state();
+            return false;
+        }
     }
 
-    usb_driver_installed_.store(true);
     session_active_.store(true);
     // Always start the blink pattern from the same phase (LED0/LED2 first).
     blink_alt_ = false;
@@ -210,12 +207,12 @@ bool USBMassStorage::reclaim() {
     tinyusb_msc_set_storage_mount_point(handle, TINYUSB_MSC_STORAGE_MOUNT_APP);
     sync_mount_state();
 
-    if (usb_driver_installed_.load()) {
+    if (usb_driver_installed_.load() && !usb_driver_persistent_.load()) {
         tinyusb_driver_uninstall();
         usb_driver_installed_.store(false);
+        host_attached_.store(false);
     }
 
-    host_attached_.store(false);
     session_active_.store(false);
 
     // Same "set for 1ms" trick as OTAUpdater::cancel(): lets Flags_out's own
@@ -226,6 +223,36 @@ bool USBMassStorage::reclaim() {
     }
 
     return app_has_access_.load();
+}
+
+bool USBMassStorage::install_persistent_usb_device() {
+    if (usb_driver_persistent_.load()) return true;
+    if (usb_driver_installed_.load()) {
+        // A storage session installed it first (boot-time storage mode):
+        // adopt it, so reclaim() leaves it up for the serial link.
+        usb_driver_persistent_.store(true);
+        return true;
+    }
+    if (usb_string_descriptors_[0] == nullptr && !prepare_usb_identity()) {
+        return false;
+    }
+    return install_usb_driver(true);
+}
+
+bool USBMassStorage::install_usb_driver(bool persistent) {
+    tinyusb_config_t usb_config =
+        TINYUSB_DEFAULT_CONFIG(usb_device_event, this);
+    usb_config.descriptor.string = usb_string_descriptors_;
+    usb_config.descriptor.string_count = kUsbStringCount;
+    if (persistent) {
+        // See install_persistent_usb_device()'s comment. 0 == PRO_CPU_NUM.
+        usb_config.task = TINYUSB_TASK_CUSTOM(8192, 4, 0);
+    }
+    if (tinyusb_driver_install(&usb_config) != ESP_OK) return false;
+
+    usb_driver_persistent_.store(persistent);
+    usb_driver_installed_.store(true);
+    return true;
 }
 
 void USBMassStorage::process(uint8_t button_flags) {
@@ -300,10 +327,26 @@ bool USBMassStorage::prepare_usb_identity() {
 
     usb_string_descriptors_[0] = USB_LANGUAGE_DESCRIPTOR;
     usb_string_descriptors_[1] = CONFIG_TINYUSB_DESC_MANUFACTURER_STRING;
-    usb_string_descriptors_[2] = CONFIG_TINYUSB_DESC_PRODUCT_STRING;
+    const bool named = usb_product_[0] != '\0';
+    usb_string_descriptors_[2] = named ? usb_product_ : CONFIG_TINYUSB_DESC_PRODUCT_STRING;
     usb_string_descriptors_[3] = usb_serial_;
-    usb_string_descriptors_[4] = CONFIG_TINYUSB_DESC_MSC_STRING;
+    // The CDC interface string is what Windows lists the port under, so it
+    // carries the same name as the product string, not a separate label.
+    usb_string_descriptors_[4] = named ? usb_product_ : CONFIG_TINYUSB_DESC_PRODUCT_STRING;
+    usb_string_descriptors_[5] = CONFIG_TINYUSB_DESC_MSC_STRING;
     return true;
+}
+
+void USBMassStorage::set_product_name(const char* name) noexcept {
+    // Too late for this boot's descriptors: the host already enumerated.
+    if (usb_driver_installed_.load() || name == nullptr || name[0] == '\0') return;
+    std::snprintf(usb_product_, sizeof(usb_product_), "%s", name);
+    // begin() usually prepared the table before settings were loaded;
+    // repoint its product/CDC entries at the new name.
+    if (usb_string_descriptors_[0] != nullptr) {
+        usb_string_descriptors_[2] = usb_product_;
+        usb_string_descriptors_[4] = usb_product_;
+    }
 }
 
 uint64_t USBMassStorage::capacity_bytes() const {

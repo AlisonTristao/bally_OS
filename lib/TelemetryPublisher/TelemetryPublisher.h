@@ -252,6 +252,18 @@ public:
     // was never called.
     void unbind_ble_target() noexcept;
 
+    // A FOURTH, independent send target for a live direct-serial session
+    // (USB CDC, comm_mode==3) -- same shape and same reasoning as
+    // bind_ble_target() just above. Call once per serial session, once
+    // serial_node_'s own SubscriptionTable exists.
+    void bind_serial_target(BtpEndpoint& endpoint, BtpSealFn seal,
+                            void* seal_context,
+                            const btp::SubscriptionTable& subscriptions) noexcept;
+
+    // Reverses bind_serial_target() (onSerialDisconnect()) -- same contract
+    // as unbind_tcp_target().
+    void unbind_serial_target() noexcept;
+
     static const TopicSchema* find_schema(std::uint16_t topic_id) noexcept;
 
     // True when topic_id currently has at least one live, unexpired
@@ -413,14 +425,15 @@ private:
         void* seal_context;
         const btp::SubscriptionTable* subscriptions;
     };
-    static constexpr std::size_t kMaxTargets = 3U;
+    static constexpr std::size_t kMaxTargets = 4U;
     // Writes up to kMaxTargets currently-configured targets into `out`.
     // A base subscription table may be bound before its endpoint: include
     // it for rate/count queries; delivery skips a null endpoint.
     // (index 0 ESP-NOW when endpoint_ or subscriptions_ is set, then TCP when tcp_endpoint_ is
-    // set, then BLE when ble_endpoint_ is set) and returns how many were
-    // written. In practice at most two of the three are ever set at once
-    // (comm_mode picks exactly one of ESP-NOW/TCP/BLE per boot -- see
+    // set, then BLE when ble_endpoint_ is set, then serial when
+    // serial_endpoint_ is set) and returns how many were written. In
+    // practice at most two are ever set at once (comm_mode picks exactly one
+    // of ESP-NOW/TCP/BLE/serial per boot -- see
     // bind_ble_target()'s own comment for why this method does not rely on
     // that itself).
     std::size_t collect_targets(TargetView out[kMaxTargets]) const noexcept;
@@ -471,6 +484,12 @@ private:
     BtpSealFn ble_seal_ = nullptr;
     void* ble_seal_context_ = nullptr;
     const btp::SubscriptionTable* ble_subscriptions_ = nullptr;
+    // Serial target (bind_serial_target()/unbind_serial_target()) -- same
+    // posture as the BLE one, written from the TinyUSB task.
+    BtpEndpoint* serial_endpoint_ = nullptr;
+    BtpSealFn serial_seal_ = nullptr;
+    void* serial_seal_context_ = nullptr;
+    const btp::SubscriptionTable* serial_subscriptions_ = nullptr;
     bool runtime_initialized_ = false;
     // Guards runtime_[] only. Independent of, and never held across, anything
     // touching BtpEndpoint/TxScheduler -- so it cannot introduce a wait on

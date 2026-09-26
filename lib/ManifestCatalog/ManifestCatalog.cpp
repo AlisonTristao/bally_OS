@@ -20,7 +20,8 @@ bool populate(btp::Catalog& catalog,
              std::size_t schema_count,
              const SourceInfoEntry* source_info,
              std::size_t source_info_count) noexcept {
-    catalog.set_config_revision(kConfigRevision);
+    // Derived from the content, never bumped by hand -- see ManifestCatalog.h.
+    catalog.set_config_revision_auto();
 
     bool ok = true;
 

@@ -2,6 +2,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <esp_err.h>
+#include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <esp_system.h>
 #include <esp_now.h>
@@ -41,14 +42,33 @@ static StackType_t xStateMachineStack[M8KB];
 static StaticTask_t xStateMachineBuffer;
 static StackType_t xEKFStack[M2KB];
 static StaticTask_t xEKFBuffer;
-static StackType_t xInterruptsStack[M2KB];
+// interrupts and junkebox keep their stacks in PSRAM (psramStack() below),
+// not in .bss: internal RAM is what the BLE stack needs (NimBLE's host task
+// alone wants an 8 KB contiguous block -- without it the robot never
+// advertised), and these two tasks are neither timing-critical nor ever
+// touch the flash (a task with a PSRAM stack must not: NVS, partition reads
+// and OTA disable the cache). interrupts only arms GPIO ISRs, which run on
+// the ISR stack; junkebox drives LEDC and reads songs off the SD card.
+// Their TCBs stay internal.
+static StackType_t* xInterruptsStack = nullptr;
 static StaticTask_t xInterruptsBuffer;
 // SD-backed playback enters stdio/VFS/FatFs/SDSPI before the first note.
 // That call chain needs materially more stack than compiled-in playback,
 // which never leaves Junkebox's parser. 2 KiB was enough for builtins but
 // could trip the FreeRTOS stack canary as soon as play_file() called fopen().
-static StackType_t xJunkeboxStack[M4KB];
+static StackType_t* xJunkeboxStack = nullptr;
 static StaticTask_t xJunkeboxBuffer;
+
+// A task stack in PSRAM, falling back to internal RAM if PSRAM is missing.
+static StackType_t* psramStack(size_t bytes) {
+    void* stack = heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (stack == nullptr) {
+        ESP_LOGW("ROBOT_MAIN", "no PSRAM for a %u-byte task stack, using internal RAM",
+                 static_cast<unsigned>(bytes));
+        stack = heap_caps_malloc(bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    }
+    return static_cast<StackType_t*>(stack);
+}
 
 static void setup_system_callbacks();
 static void start_freertos_tasks();
@@ -95,7 +115,7 @@ static void setup_system_callbacks() {
     // watch stats() (delivered/timeouts/dropped) on the bench to confirm this
     // is still giving honest numbers at 5 ms.
     robot.tx_scheduler.configure([](void*, const uint8_t *data, size_t len) {
-        // T25b: comm_mode==3 (none) never calls esp_now_init() at all (see
+        // T25b: comm_mode 2/3 (BLE/serial) never call esp_now_init() (see
         // ROBOT::init()'s comm_mode dispatch and radio_enabled_'s own
         // comment in BallyRobot.h) -- fail soft here instead of assuming the
         // radio is up. ESP-IDF's own esp_now_send() already returns
@@ -204,6 +224,11 @@ static void start_freertos_tasks() {
     // TX scheduler was holding. comms only pumps queues and re-publishes
     // STATUS — it never blocks — so it is safe at EKF's priority; EKF itself
     // spends almost all its time blocked on ulTaskNotifyTake().
+    xInterruptsStack = psramStack(M2KB);
+    xJunkeboxStack = psramStack(M4KB);
+    if (xInterruptsStack == nullptr || xJunkeboxStack == nullptr) {
+        ESP_LOGE("ROBOT_MAIN", "no memory for the interrupts/junkebox task stacks");
+    }
     xTaskCreateStaticPinnedToCore(robot.routine,           "routine",       M8KB, NULL, 3,  xRoutineStack,      &xRoutineBuffer,      PRO_CPU_NUM);
     xTaskCreateStaticPinnedToCore(robot.runComms,          "comms",         M8KB, NULL, 4,  xCommsStack,        &xCommsBuffer,        PRO_CPU_NUM);
     xTaskCreateStaticPinnedToCore(robot.initInterruptions, "interrupts",    M2KB, NULL, 0,  xInterruptsStack,   &xInterruptsBuffer,   PRO_CPU_NUM);

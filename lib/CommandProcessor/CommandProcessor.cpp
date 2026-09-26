@@ -370,7 +370,8 @@ bool CommandProcessor::reject_busy(std::uint8_t cache_slot,
 }
 
 bool CommandProcessor::send_result_via(const ResultView& result,
-                                       BtpEndpoint* endpoint) noexcept {
+                                       BtpEndpoint* endpoint,
+                                       bool cleartext) noexcept {
     if (endpoint == nullptr || result.sequence == 0U ||
         result.payload == nullptr || result.payload_size == 0U ||
         result.payload_size > btp::kEspNowMaxPayloadSize) {
@@ -381,10 +382,13 @@ bool CommandProcessor::send_result_via(const ResultView& result,
     // channel_of_peer(Vantage::Robot, ...) never returns A_Console (see
     // bally_channels.h) -- this firmware is never the console's own peer --
     // so B_Endpoint is the only branch besides the C_Link default.
-    const BtpSealFn seal = result.channel == bally::Channel::B_Endpoint
+    // send_result_cleartext(): the caller asked for no seal explicitly.
+    const BtpSealFn seal = cleartext ? nullptr
+                           : result.channel == bally::Channel::B_Endpoint
                                 ? seal_endpoint_
                                 : seal_link_;
-    void* const seal_context = result.channel == bally::Channel::B_Endpoint
+    void* const seal_context = cleartext ? nullptr
+                               : result.channel == bally::Channel::B_Endpoint
                                     ? seal_endpoint_context_
                                     : seal_link_context_;
 
@@ -394,7 +398,7 @@ bool CommandProcessor::send_result_via(const ResultView& result,
     // configured, a channel whose own key is still missing must never fall
     // back to cleartext or to the other channel's key -- that key is the one
     // its requester actually holds.
-    if (seal == nullptr &&
+    if (!cleartext && seal == nullptr &&
         (seal_link_ != nullptr || seal_endpoint_ != nullptr)) {
         note_drop();
         return false;
@@ -415,6 +419,11 @@ bool CommandProcessor::send_result(const ResultView& result) noexcept {
 bool CommandProcessor::send_result(const ResultView& result,
                                    BtpEndpoint& endpoint) noexcept {
     return send_result_via(result, &endpoint);
+}
+
+bool CommandProcessor::send_result_cleartext(const ResultView& result,
+                                             BtpEndpoint& endpoint) noexcept {
+    return send_result_via(result, &endpoint, true);
 }
 
 void CommandProcessor::note_unauthorized() noexcept {

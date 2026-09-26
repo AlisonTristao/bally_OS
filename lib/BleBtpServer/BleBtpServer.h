@@ -80,6 +80,21 @@ public:
         void* context = nullptr;
     };
 
+    // Longest name the scan response can carry: 31 octets minus the name
+    // field's own 2-octet AD header. See start_advertising() for how the
+    // rest of that packet is shared.
+    static constexpr std::size_t kMaxDeviceNameLength = 29U;
+    static constexpr const char* kDefaultDeviceName = "BallyRobot";
+
+    // The name this peripheral advertises (scan response) and reports as its
+    // GAP Device Name -- what TraceView's BLE link looks a robot up by, the
+    // way a TCP link looks a host up by name. Robots sharing a name cannot
+    // be told apart that way, so each should get its own ("settings -set
+    // identity name ..."). Empty or null keeps kDefaultDeviceName; longer
+    // than kMaxDeviceNameLength is cut there. Read by start(), so call it
+    // before.
+    void set_device_name(const char* name) noexcept;
+
     // Brings up the NimBLE host + controller (nimble_port_init()), registers
     // the BTP GATT service/RX/TX characteristics and starts advertising.
     // `callbacks.on_receive` is required (start() fails without one), the
@@ -164,6 +179,8 @@ private:
     std::atomic<std::uint16_t> att_mtu_{23U};
     Callbacks callbacks_{};
     SemaphoreHandle_t send_mutex_ = nullptr;
+    // See set_device_name(). Written before start() only, so no guard.
+    char device_name_[kMaxDeviceNameLength + 1U] = "BallyRobot";
 
     // Bounded FIFO of frames still owed to the connected central -- see
     // kSendQueueDepth. Guarded by send_mutex_. Each entry owns a heap

@@ -334,7 +334,7 @@ void test_full_manifest_response_matches_telemetry_schemas() {
     // which alone is enough for btp::Node::emit_manifest() to pick format 3.
     TEST_ASSERT_EQUAL_UINT16(3U, reader.u16());
     TEST_ASSERT_EQUAL_UINT16(0U, reader.u16());  // reserved
-    TEST_ASSERT_EQUAL_UINT32(ManifestCatalog::kConfigRevision, reader.u32());
+    TEST_ASSERT_EQUAL_UINT32(node.catalog().config_revision(), reader.u32());
 
     std::uint8_t uuid[16]{};
     reader.bytes(uuid, sizeof(uuid));
@@ -512,7 +512,7 @@ void test_known_revision_returns_not_modified_with_no_topics() {
     make_node(node);
 
     const auto request_payload =
-        manifest_request_payload(0U, 0U, ManifestCatalog::kConfigRevision);
+        manifest_request_payload(0U, 0U, node.catalog().config_revision());
     const auto header = manifest_request_header(kRequesterSourceId, kRequesterBootId,
                                                 kRequestSequence);
     const auto result = send_request_and_reassemble(node, header, request_payload);
@@ -531,7 +531,7 @@ void test_known_revision_returns_not_modified_with_no_topics() {
     // which alone is enough for btp::Node::emit_manifest() to pick format 3.
     TEST_ASSERT_EQUAL_UINT16(3U, reader.u16());
     reader.u16();  // reserved
-    TEST_ASSERT_EQUAL_UINT32(ManifestCatalog::kConfigRevision, reader.u32());
+    TEST_ASSERT_EQUAL_UINT32(node.catalog().config_revision(), reader.u32());
     std::uint8_t uuid[16]{};
     reader.bytes(uuid, sizeof(uuid));
     reader.u32();  // described_source_id
@@ -614,7 +614,7 @@ void test_request_with_stale_boot_id_is_rejected() {
     TEST_ASSERT_EQUAL_HEX16(static_cast<std::uint16_t>(btp::ResultError::StaleTargetBoot), reader.u16());
     TEST_ASSERT_EQUAL_UINT16(1U, reader.u16());  // format_version: REJECTED always stays format 1
     reader.u16();  // reserved
-    TEST_ASSERT_EQUAL_UINT32(ManifestCatalog::kConfigRevision, reader.u32());  // real, not zeroed
+    TEST_ASSERT_EQUAL_UINT32(node.catalog().config_revision(), reader.u32());  // real, not zeroed
 
     std::uint8_t uuid[16]{};
     reader.bytes(uuid, sizeof(uuid));
@@ -682,7 +682,7 @@ void test_reply_is_sealed_when_link_has_a_seal_function() {
     // the AEAD tag at the end of the sealed logical payload is simple to
     // reason about.
     const auto request_payload =
-        manifest_request_payload(0U, 0U, ManifestCatalog::kConfigRevision);
+        manifest_request_payload(0U, 0U, node.catalog().config_revision());
     const auto header = manifest_request_header(kRequesterSourceId, kRequesterBootId,
                                                 kRequestSequence);
     sent_count = 0U;
@@ -782,7 +782,7 @@ void test_source_info_block_round_trips_and_skips_empty_values() {
     {
         const auto result = send_request_and_reassemble(
             node, header,
-            manifest_request_payload(0U, 0U, ManifestCatalog::kConfigRevision));
+            manifest_request_payload(0U, 0U, node.catalog().config_revision()));
         Reader reader(result.logical);
         std::uint16_t topic_count = 0U;
         skip_prefix_and_name_to_source_info(reader, &topic_count);

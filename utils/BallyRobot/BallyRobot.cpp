@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <memory>
 #include <new>
+#include <esp_heap_caps.h>
 #include <ctime>
 #include <string>
 #include "freertos/FreeRTOS.h"
@@ -771,6 +772,23 @@ void RobotBleLink::reply_seal(const btp::Header& /*request_header*/,
     *out_seal_ctx = nullptr;
 }
 
+// ---------------------------------------------------------------------------
+// RobotSerialLink -- serial_node_'s NodeConfig (USB CDC, comm_mode==3).
+// Cleartext: no seal()/open()/reply_seal() -- see its class comment.
+// ---------------------------------------------------------------------------
+
+bool RobotSerialLink::send(const std::uint8_t* frame, std::size_t frame_size) {
+    return sendCobsFramed(robot_.serial_server_, frame, frame_size,
+                          UsbSerialBtpServer::FramePriority::Normal);
+}
+
+void RobotSerialLink::terminal(btp::Node& /*node*/, const btp::Header& header,
+                               btp::ByteView payload, std::uint64_t /*now_ms*/) {
+    if (header.object_id != TerminalResponder::kTerminalInObjectId) return;
+    robot_.terminal_responder.on_terminal_in(TerminalResponder::LinkTarget::Serial,
+                                             header, payload);
+}
+
 bool ROBOT::bindProtocolTransport() {
     // protocol_link_ is a plain member (node_ holds it by reference): identity
     // is the only thing not known until configureProtocolIdentity() ran, so it
@@ -793,6 +811,12 @@ bool ROBOT::bindProtocolTransport() {
     protocol_link_ble_.source_id = protocol_source_id_;
     protocol_link_ble_.boot_id = protocol_boot_id_;
     protocol_link_ble_.transport = btp::kBleTransport;
+
+    // Same identity, serial limits (USB CDC, comm_mode==3) -- the profile
+    // TraceView encodes a serial port under too.
+    protocol_link_serial_.source_id = protocol_source_id_;
+    protocol_link_serial_.boot_id = protocol_boot_id_;
+    protocol_link_serial_.transport = btp::kSerialTransport;
 
     node_.emplace(protocol_link_, kNodeReassemblyTimeoutMs);
     populateCatalog(node_->catalog());
@@ -830,7 +854,7 @@ bool ROBOT::bindProtocolTransport() {
             .max_inflight_reassemblies(kNodeSlotCount)
             .max_subscriptions(TelemetryPublisher::kMaxSubscriptions)
             .max_dedup_entries(CommandProcessor::kCacheCapacity)
-            .config_revision(ManifestCatalog::kConfigRevision)
+            .config_revision(node_->catalog().config_revision())
             .build();
 
     // Same HELLO advertisement, built the same way, for the direct-BLE
@@ -842,7 +866,18 @@ bool ROBOT::bindProtocolTransport() {
             .max_inflight_reassemblies(kNodeSlotCount)
             .max_subscriptions(TelemetryPublisher::kMaxSubscriptions)
             .max_dedup_entries(CommandProcessor::kCacheCapacity)
-            .config_revision(ManifestCatalog::kConfigRevision)
+            .config_revision(node_->catalog().config_revision())
+            .build();
+
+    // And once more for the direct-serial responder role (comm_mode==3),
+    // reused on every serial session (startSerialSession()).
+    serial_local_hello_ =
+        btp::HelloBuilder(btp::Role::Producer, protocol_uuid_)
+            .max_logical_payload(BtpEndpoint::kMaxLogicalPayloadSize)
+            .max_inflight_reassemblies(kNodeSlotCount)
+            .max_subscriptions(TelemetryPublisher::kMaxSubscriptions)
+            .max_dedup_entries(CommandProcessor::kCacheCapacity)
+            .config_revision(node_->catalog().config_revision())
             .build();
 
     // T33/T34: comm_mode==2 starts advertising the BTP GATT service HERE,
@@ -859,12 +894,39 @@ bool ROBOT::bindProtocolTransport() {
         callbacks.on_connect = &ROBOT::onBleConnectStatic;
         callbacks.on_disconnect = &ROBOT::onBleDisconnectStatic;
         callbacks.context = this;
+        // Advertised under the robot's configured name ("settings -set
+        // identity name ..."), so TraceView can reach it by that name the way
+        // it reaches a TCP robot by hostname. Read once here: like comm_mode
+        // itself, a new name is advertised from the next boot.
+        ble_server_.set_device_name(settings.data().name);
         if (ble_server_.start(callbacks)) {
             logger.insert_log(logType::INFO,
                               "comm_mode=BLE: advertising the BTP GATT service");
         } else {
             logger.insert_log(logType::ERRO,
                               "comm_mode=BLE: failed to start the BLE peripheral");
+        }
+    }
+
+    // comm_mode==3 (serial) starts HERE for the same reason BLE does: a host
+    // that already holds the port open would HELLO the moment the CDC
+    // interface comes up, and serial_local_hello_/this robot's identity are
+    // only ready as of this point. USBMassStorage owns the one TinyUSB
+    // driver, so it installs the device (CDC + MSC) and keeps it up for the
+    // whole boot; serial_server_ only attaches to the CDC interface.
+    if (effective_comm_mode_ == 3U) {
+        UsbSerialBtpServer::Callbacks callbacks{};
+        callbacks.on_receive = &ROBOT::onSerialReceiveStatic;
+        callbacks.on_connect = &ROBOT::onSerialConnectStatic;
+        callbacks.on_disconnect = &ROBOT::onSerialDisconnectStatic;
+        callbacks.context = this;
+        if (usb_storage.install_persistent_usb_device() &&
+            serial_server_.start(callbacks)) {
+            logger.insert_log(logType::INFO,
+                              "comm_mode=serial: BTP on the native USB CDC port");
+        } else {
+            logger.insert_log(logType::ERRO,
+                              "comm_mode=serial: failed to start the USB CDC port");
         }
     }
 
@@ -1057,8 +1119,8 @@ namespace {
 // TraceView closes, so the reopened app reuses a link whose session the
 // robot still considers live -- and its HELLO was never answered. A fresh
 // HELLO means a fresh client, so the caller rebuilds the session first.
-template <typename Node>
-bool isStaleHello(const std::optional<Node>& node, const btp::DecodedFrame& frame) {
+template <typename NodeHolder>  // std::optional<Node> or a std::unique_ptr<Node>
+bool isStaleHello(const NodeHolder& node, const btp::DecodedFrame& frame) {
     if (frame.header.type != btp::MessageType::Control ||
         frame.header.object_id != btp::object_id::kHello) {
         return false;
@@ -1374,6 +1436,183 @@ void ROBOT::onBleDisconnect() {
     terminal_responder.unbind_ble_target();
 
     ble_node_.reset();
+}
+
+// ---------------------------------------------------------------------------
+// Direct serial BTP session (USB CDC, comm_mode==3)
+//
+// Verbatim mirror of the direct-BLE block above; every callback here runs on
+// the TinyUSB task. A "connection" is the host asserting DTR (see
+// UsbSerialBtpServer's class comment), and there is no second-session
+// rejection to do: one CDC port, one host.
+// ---------------------------------------------------------------------------
+
+bool ROBOT::serialEndpointSendStatic(void* context, const std::uint8_t* frame,
+                                     std::size_t size) noexcept {
+    ROBOT* self = static_cast<ROBOT*>(context);
+    return self != nullptr &&
+           sendCobsFramed(self->serial_server_, frame, size,
+                          UsbSerialBtpServer::FramePriority::Normal);
+}
+
+bool ROBOT::serialTelemetrySendStatic(void* context, const std::uint8_t* frame,
+                                      std::size_t size) noexcept {
+    ROBOT* self = static_cast<ROBOT*>(context);
+    return self != nullptr &&
+           sendCobsFramed(self->serial_server_, frame, size,
+                          UsbSerialBtpServer::FramePriority::Telemetry);
+}
+
+void ROBOT::onSerialConnectStatic(void* context) noexcept {
+    if (context != nullptr) static_cast<ROBOT*>(context)->onSerialConnect();
+}
+
+void ROBOT::onSerialConnect() {
+    if (!serial_rx_stream_.reset()) {
+        logger.insert_log(logType::ERRO,
+                          "Serial BTP: no memory for the COBS decoder");
+        return;
+    }
+    startSerialSession();
+}
+
+void ROBOT::HeapNodeDeleter::operator()(ProtocolNode* node) const noexcept {
+    if (node == nullptr) return;
+    node->~ProtocolNode();
+    heap_caps_free(node);
+}
+
+void ROBOT::startSerialSession() {
+    serial_session_generation_.fetch_add(1U, std::memory_order_relaxed);
+
+    // PSRAM first (see serial_node_'s comment), internal RAM as a fallback.
+    void* storage = heap_caps_aligned_alloc(alignof(ProtocolNode), sizeof(ProtocolNode),
+                                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (storage == nullptr) {
+        storage = heap_caps_aligned_alloc(alignof(ProtocolNode), sizeof(ProtocolNode),
+                                          MALLOC_CAP_8BIT);
+    }
+    if (storage == nullptr) {
+        logger.insert_log(logType::ERRO, "Serial BTP: no memory for the session node");
+        return;
+    }
+    serial_node_.reset(new (storage) ProtocolNode(protocol_link_serial_,
+                                                  kSerialNodeReassemblyTimeoutMs));
+    populateCatalog(serial_node_->catalog());
+    if (!serial_node_->begin()) {
+        logger.insert_log(logType::ERRO,
+                          "Serial BTP: serial_node_->begin() failed");
+        serial_node_.reset();
+        return;
+    }
+
+    serial_node_->serve_catalog(ManifestCatalog::kSourceRoleRobot, protocol_uuid_,
+                                "bally_software");
+
+    protocol_serial_.bind(serial_node_->endpoint());
+    protocol_serial_.set_transport(btp::kSerialTransport);
+    protocol_serial_.set_send_callback(&ROBOT::serialEndpointSendStatic, this);
+
+    protocol_serial_telemetry_.bind(serial_node_->endpoint());
+    protocol_serial_telemetry_.set_transport(btp::kSerialTransport);
+    protocol_serial_telemetry_.set_send_callback(&ROBOT::serialTelemetrySendStatic, this);
+
+    // No seal on this link (RobotSerialLink's class comment): telemetry and
+    // TERMINAL_OUT leave in cleartext.
+    telemetry.bind_serial_target(protocol_serial_telemetry_, nullptr, nullptr,
+                                 *serial_node_->subscriptions());
+    terminal_responder.bind_serial_target(protocol_serial_, nullptr, nullptr);
+
+    serial_node_->enable_session(serial_local_hello_, kSerialHelloDeadlineMs);
+    serial_node_->arm_session(static_cast<uint64_t>(esp_timer_get_time() / 1000ULL));
+}
+
+void ROBOT::onSerialReceiveStatic(void* context, const std::uint8_t* data,
+                                  std::size_t size) noexcept {
+    if (context != nullptr) {
+        static_cast<ROBOT*>(context)->onSerialReceive(data, size);
+    }
+}
+
+void ROBOT::onSerialReceive(const std::uint8_t* data, std::size_t size) {
+    // UsbSerialBtpServer always calls on_connect() before the first
+    // on_receive() of a session, but a failed startSerialSession() leaves
+    // serial_node_ empty: keep decoding anyway, so the host's next HELLO
+    // rebuilds it (isStaleHello() treats a missing node as stale).
+    serial_rx_stream_.feed(data, size, [this](const btp::DecodedFrame& frame) {
+        onSerialFrame(frame);
+    });
+}
+
+void ROBOT::onSerialFrame(const btp::DecodedFrame& frame) {
+    if (isStaleHello(serial_node_, frame)) {
+        logger.insert_log(logType::INFO,
+                          "Serial BTP: new HELLO on a live link, restarting the session");
+        onSerialDisconnect();
+        startSerialSession();
+    }
+    if (!serial_node_) return;
+
+    btp::ReceivedMessage msg{};
+    const btp::NodeRx outcome = serial_node_->receive(
+        frame, static_cast<uint64_t>(esp_timer_get_time() / 1000ULL), &msg);
+    if (outcome != btp::NodeRx::Complete) return;
+
+    const btp::Header& header = msg.header;
+    switch (header.type) {
+        case btp::MessageType::Command:
+            if (header.object_id != btp_command::kCommandRequestObjectId) {
+                command_processor.note_drop();
+                return;
+            }
+            break;
+        case btp::MessageType::Control:
+        case btp::MessageType::Terminal:
+        case btp::MessageType::Telemetry:
+        case btp::MessageType::Log:
+        case btp::MessageType::Invalid:
+            command_processor.note_drop();
+            return;
+    }
+
+    processSerialCommandRequest(header, msg.payload);
+}
+
+void ROBOT::processSerialCommandRequest(const btp::Header& header,
+                                        btp::ByteView payload) {
+    const uint64_t now_us = static_cast<uint64_t>(esp_timer_get_time());
+    const CommandProcessor::Intake intake = command_processor.intake(
+        header, payload, now_us, bally::Channel::B_Endpoint);
+    if (intake.kind == CommandProcessor::IntakeKind::ResultReady) {
+        command_processor.send_result_cleartext(intake.result, protocol_serial_);
+        return;
+    }
+    if (intake.kind != CommandProcessor::IntakeKind::Ready) return;
+
+    QueuedCommand command{};
+    command.cache_slot = intake.work.cache_slot;
+    std::memcpy(command.text, intake.work.command, sizeof(command.text));
+    command.from_serial = true;
+    command.serial_generation = serial_session_generation_.load(std::memory_order_relaxed);
+    if (xQueueSend(receivedDataQueue, &command, 0) != pdTRUE) {
+        CommandProcessor::ResultView result{};
+        if (command_processor.reject_busy(command.cache_slot, now_us, &result)) {
+            command_processor.send_result_cleartext(result, protocol_serial_);
+        }
+    }
+}
+
+void ROBOT::onSerialDisconnectStatic(void* context) noexcept {
+    if (context != nullptr) static_cast<ROBOT*>(context)->onSerialDisconnect();
+}
+
+void ROBOT::onSerialDisconnect() {
+    serial_session_generation_.fetch_add(1U, std::memory_order_relaxed);
+
+    telemetry.unbind_serial_target();
+    terminal_responder.unbind_serial_target();
+
+    serial_node_.reset();
 }
 
 bool ROBOT::configureCommunication() {
@@ -1770,10 +2009,9 @@ constexpr uint32_t kCommConfigInactivityTimeoutMs = 30000U;
 constexpr uint32_t kCommConfigLedHoldMs = 200U;
 
 // LED index for each comm_mode option, in the same 0..3 = ESP-NOW/TCP/BLE/
-// none order RobotSettings.h documents. Chosen to read intuitively (not
-// specified by T25b beyond "one of the 4 LEDs per option"): blue/green for
-// the two working transports, yellow ("caution") for BLE which is not
-// implemented yet, red for fully offline.
+// serial order RobotSettings.h documents (not specified by T25b beyond "one
+// of the 4 LEDs per option"): blue ESP-NOW, green TCP, yellow BLE, red
+// serial (USB CDC).
 constexpr uint8_t kCommConfigLedForOption[4] = {LED_BLUE, LED_GREEN,
                                                 LED_YELLOW, LED_RED};
 
@@ -2899,6 +3137,14 @@ void ROBOT::runShell(void *param) {
                         instance_->command_processor.send_result(
                             result, instance_->protocol_ble_);
                     }
+                } else if (received_command.from_serial) {
+                    // Same guard, against onSerialDisconnect() (TinyUSB task).
+                    if (received_command.serial_generation ==
+                        instance_->serial_session_generation_.load(
+                            std::memory_order_relaxed)) {
+                        instance_->command_processor.send_result_cleartext(
+                            result, instance_->protocol_serial_);
+                    }
                 } else {
                     instance_->command_processor.send_result(result);
                 }
@@ -3537,6 +3783,11 @@ bool ROBOT::init() {
     }
     logger.set_flush_limits(settings.data().max_chunks_per_flush,
                             settings.data().block_size);
+    // The USB serial port is listed under the robot's name (the same one BLE
+    // advertises), so TraceView can tell robots apart without opening ports.
+    // Before anything below installs the USB device (storage boot, comm_mode
+    // serial): descriptors are read once, at enumeration.
+    usb_storage.set_product_name(settings.data().name);
 
     // bally.key (lib/KeyStore): the two channel keys, already derived from
     // the two passwords by scripts/provision_key.py -- the robot never runs
@@ -3640,7 +3891,8 @@ bool ROBOT::init() {
     // COMM_CONFIG (commConfigTick() above). Resolved here, once, into
     // effective_comm_mode: anything out of the 0..3 range (a hand-edited or
     // corrupted settings.conf) falls back to 0, the safest default. 2 (BLE)
-    // is real now (T33/T34) -- see the BLE dispatch a few lines below.
+    // is real now (T33/T34) -- see the BLE dispatch a few lines below -- and
+    // 3 is BTP over the native USB CDC port (serial).
     uint8_t effective_comm_mode = cfg.comm_mode;
     if (effective_comm_mode > 3) {
         logger.insert_logf(
@@ -3655,10 +3907,10 @@ bool ROBOT::init() {
     // esp_netif_create_default_wifi_sta() inside configureCommunication())
     // that ota.begin()'s own event handler registration builds on top of.
     //
-    // comm_mode==3 (none) and comm_mode==2 (BLE) both skip this: neither
+    // comm_mode==3 (serial) and comm_mode==2 (BLE) both skip this: neither
     // needs Wi-Fi STA or ESP-NOW -- BLE is a physically separate radio path
-    // (NimBLE, no esp_wifi_*/esp_now_* calls at all) with its own dispatch
-    // below. radio_enabled_ gates main.cpp's two esp_now_send() call sites
+    // (NimBLE, no esp_wifi_*/esp_now_* calls at all) and serial is the USB
+    // cable, each with its own dispatch in bindProtocolTransport(). radio_enabled_ gates main.cpp's two esp_now_send() call sites
     // (the only ones in this codebase -- see its own comment in
     // BallyRobot.h for why one flag is enough here instead of auditing
     // every TxScheduler/BtpTransport call site).
@@ -3668,7 +3920,7 @@ bool ROBOT::init() {
     // boot_enter_ota/boot_enter_storage, but boot_enter_ota's ota.start()
     // needs the Wi-Fi STA netif + event loop configureCommunication() sets
     // up -- skip it here and "hold btn2 at boot to force OTA" silently stops
-    // working on a robot configured comm_mode==none OR comm_mode==BLE. This
+    // working on a robot configured comm_mode==serial OR comm_mode==BLE. This
     // follows directly from T25b's "não suba... Wi-Fi" taken literally for
     // these modes; a robot painted into that corner still has a way out
     // (COMM_CONFIG: hold btn1+btn2 at boot, switch back to ESP-NOW/TCP,
@@ -3678,7 +3930,7 @@ bool ROBOT::init() {
         radio_enabled_ = false;
         logger.insert_log(
             logType::INFO,
-            "comm_mode=none: radio (Wi-Fi/ESP-NOW) not initialized");
+            "comm_mode=serial: radio (Wi-Fi/ESP-NOW) not initialized, USB CDC only");
     } else if (effective_comm_mode == 2U) {
         radio_enabled_ = false;
         logger.insert_log(

@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <esp_timer.h>
 #include <esp_now.h>
@@ -30,6 +31,7 @@
 #include <BtpTransport.h>
 #include <TcpBtpServer.h>
 #include <BleBtpServer.h>
+#include <UsbSerialBtpServer.h>
 #include <CommandProcessor.h>
 #include <ManifestCatalog.h>
 #include <TerminalResponder.h>
@@ -224,6 +226,30 @@ private:
     ROBOT& robot_;
 };
 
+// The btp::NodeConfig for serial_node_ (USB CDC, comm_mode==3) -- a
+// direct-serial control session's counterpart to RobotBleLink above, with
+// one deliberate difference: NO key. has_seal()/has_open() stay false (the
+// NodeConfig defaults), so btp::Node neither seals its replies nor opens --
+// or demands -- sealed requests, and bally.key is not needed for this mode.
+// The link is a USB cable: whoever can talk on it already has physical
+// access to the robot (and could reflash it), so AEAD would protect nothing
+// here. Every other transport keeps its key.
+class RobotSerialLink : public btp::NodeConfig {
+public:
+    explicit RobotSerialLink(ROBOT& robot) noexcept : robot_(robot) {}
+
+    // Routes to UsbSerialBtpServer::send() (the connected host), never
+    // tx_scheduler.
+    bool send(const std::uint8_t* frame, std::size_t frame_size) override;
+
+    bool has_terminal() const noexcept override { return true; }
+    void terminal(btp::Node& node, const btp::Header& header, btp::ByteView payload,
+                 std::uint64_t now_ms) override;
+
+private:
+    ROBOT& robot_;
+};
+
 /**
  * @brief Non-blocking, periodic sample scheduler. Originally built for the
  * "debug" shell module's per-sensor tests (test_arr_sensor, test_encoder,
@@ -334,6 +360,9 @@ class ROBOT {
     // protocol_link_ble_ (ble_node_'s btp::NodeConfig, T33/T34) -- same
     // reasoning as RobotTcpLink, for ble_server_ instead of tcp_server_.
     friend class RobotBleLink;
+    // protocol_link_serial_ (serial_node_'s btp::NodeConfig) -- same, for
+    // serial_server_.
+    friend class RobotSerialLink;
 
 public:
     // singleton pattern
@@ -483,8 +512,8 @@ public:
     // which are unaffected and still work the normal way.
     stateName bootState() const { return boot_state_; }
 
-    // False only for comm_mode==3 (none) -- see radio_enabled_'s own
-    // comment. Guards main.cpp's two esp_now_send() call sites.
+    // False for comm_mode==2 (BLE) and 3 (serial) -- see radio_enabled_'s
+    // own comment. Guards main.cpp's two esp_now_send() call sites.
     bool radioEnabled() const { return radio_enabled_; }
 
     // Keep selected shell responses out of the retained PSRAM log.
@@ -608,7 +637,8 @@ private:
     // esp_now_init(), esp_now_add_peer()... all error/warn on a second call).
     bool communication_configured_ = false;
 
-    // False only when comm_mode (RobotSettings, module "comm") is 3 (none)
+    // False when comm_mode (RobotSettings, module "comm") is 2 (BLE) or 3
+    // (serial), neither of which touches Wi-Fi/ESP-NOW
     // -- set once in init(), never toggled at runtime (comm_mode is
     // apply-on-reboot only, see its own comment in RobotSettings.h). Set
     // BEFORE configureCommunication() is skipped for that mode, so main.cpp's
@@ -622,7 +652,7 @@ private:
     // ESP_ERR_*_NOT_INIT rather than crash when called before their driver
     // is initialized (documented ESP-IDF behaviour, not assumed) -- this
     // flag is a cheap, explicit, self-documenting belt on top of that, not
-    // the only thing standing between comm_mode==3 and a crash.
+    // the only thing standing between those modes and a crash.
     bool radio_enabled_ = true;
 
     // The comm_mode (RobotSettings, "comm.comm_mode") this boot actually
@@ -922,6 +952,9 @@ private:
         // that allows both at once must not have to re-plumb this struct.
         bool from_ble = false;
         uint32_t ble_generation = 0U;
+        // Same pair again for the direct serial session (USB CDC).
+        bool from_serial = false;
+        uint32_t serial_generation = 0U;
     };
 
     // cache_slot for a command that did not come from the radio: a job firing
@@ -1342,6 +1375,49 @@ private:
     // starts from Idle.
     static void onBleDisconnectStatic(void* context) noexcept;
     void onBleDisconnect();
+
+    // ---- Direct serial BTP session (USB CDC, comm_mode==3) ----
+    //
+    // Mirrors the direct-BLE block above field-for-field, method-for-method.
+    // Every callback runs on the TinyUSB task; a session opens when the host
+    // asserts DTR and closes when it drops it (UsbSerialBtpServer).
+    static constexpr std::uint64_t kSerialNodeReassemblyTimeoutMs = 5000U;
+    static constexpr std::uint64_t kSerialHelloDeadlineMs = 2000U;
+
+    UsbSerialBtpServer serial_server_;
+    RobotSerialLink protocol_link_serial_{*this};
+    // Heap (PSRAM), not std::optional like tcp_node_/ble_node_: ROBOT is a
+    // static singleton, so an in-object node lands in internal .bss, and a
+    // fourth one no longer fits in DRAM. Allocated per session by
+    // startSerialSession() (HeapNodeDeleter frees it the same way).
+    struct HeapNodeDeleter {
+        void operator()(ProtocolNode* node) const noexcept;
+    };
+    std::unique_ptr<ProtocolNode, HeapNodeDeleter> serial_node_;
+    CobsStreamDecoder serial_rx_stream_;
+    std::atomic<std::uint32_t> serial_session_generation_{0U};
+    BtpEndpoint protocol_serial_;
+    // T23's same split, for UsbSerialBtpServer's telemetry admission.
+    BtpEndpoint protocol_serial_telemetry_;
+    btp::Hello serial_local_hello_{};
+
+    static void onSerialConnectStatic(void* context) noexcept;
+    void onSerialConnect();
+    void startSerialSession();
+
+    static bool serialEndpointSendStatic(void* context, const std::uint8_t* frame,
+                                         std::size_t size) noexcept;
+    static bool serialTelemetrySendStatic(void* context, const std::uint8_t* frame,
+                                          std::size_t size) noexcept;
+
+    static void onSerialReceiveStatic(void* context, const std::uint8_t* data,
+                                      std::size_t size) noexcept;
+    void onSerialReceive(const std::uint8_t* data, std::size_t size);
+    void onSerialFrame(const btp::DecodedFrame& frame);
+    void processSerialCommandRequest(const btp::Header& header, btp::ByteView payload);
+
+    static void onSerialDisconnectStatic(void* context) noexcept;
+    void onSerialDisconnect();
 
     // Two tasks touch node_ once it exists, and it holds no lock: receive()
     // from the ESP-NOW receive callback, tick()'s reassembly sweep once a

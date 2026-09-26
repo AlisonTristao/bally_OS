@@ -3,6 +3,7 @@
 #include <cstring>
 #include <new>
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "host/ble_att.h"
 #include "host/ble_gap.h"
@@ -20,7 +21,11 @@
 namespace {
 
 constexpr const char* kTag = "BleBtpServer";
-constexpr const char* kDeviceName = "BallyRobot";
+
+// Legacy advertising PDU / scan response payload ceiling, and the size of
+// one complete 128-bit service UUID AD structure (2-octet header + 16).
+constexpr std::size_t kAdvPayloadMax = 31U;
+constexpr std::size_t kUuid128AdSize = 18U;
 
 // One chunk read/written off the RX characteristic can never exceed
 // ATT_MTU-3, and this project's own negotiated ceiling never exceeds
@@ -93,6 +98,22 @@ BleBtpServer::~BleBtpServer() {
     stop();
 }
 
+void BleBtpServer::set_device_name(const char* name) noexcept {
+    if (name == nullptr || name[0] == '\0') name = kDefaultDeviceName;
+    std::size_t length = std::strlen(name);
+    if (length > kMaxDeviceNameLength) {
+        length = kMaxDeviceNameLength;
+        // Never cut a UTF-8 sequence in half: back off to the start of the
+        // character the cut landed in.
+        while (length > 0U &&
+               (static_cast<unsigned char>(name[length]) & 0xC0U) == 0x80U) {
+            --length;
+        }
+    }
+    std::memcpy(device_name_, name, length);
+    device_name_[length] = '\0';
+}
+
 bool BleBtpServer::start(const Callbacks& callbacks) noexcept {
     if (running_.load()) return true;
     if (callbacks.on_receive == nullptr) return false;
@@ -108,6 +129,9 @@ bool BleBtpServer::start(const Callbacks& callbacks) noexcept {
 
     instance_ = this;
 
+    ESP_LOGI(kTag, "before nimble_port_init: internal free %u, largest %u",
+             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+             static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)));
     if (nimble_port_init() != 0) {
         ESP_LOGE(kTag, "nimble_port_init() failed");
         instance_ = nullptr;
@@ -143,7 +167,8 @@ bool BleBtpServer::start(const Callbacks& callbacks) noexcept {
         return false;
     }
 
-    ble_svc_gap_device_name_set(kDeviceName);
+    ble_svc_gap_device_name_set(device_name_);
+    ESP_LOGI(kTag, "advertising as \"%s\"", device_name_);
 
     // Logged once, at bring-up, so a real UUID transcription mistake (see
     // the array comments above) is visible in the very first boot log
@@ -159,6 +184,9 @@ bool BleBtpServer::start(const Callbacks& callbacks) noexcept {
 
     running_.store(true);
     nimble_port_freertos_init(&BleBtpServer::host_task);
+    ESP_LOGI(kTag, "host task requested: internal free %u, largest %u",
+             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+             static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)));
     return true;
 }
 
@@ -181,6 +209,7 @@ void BleBtpServer::close_active_client() noexcept {
 }
 
 void BleBtpServer::host_task(void* /*param*/) {
+    ESP_LOGI(kTag, "host task running");
     // Blocks until nimble_port_stop() (called from stop() above) unblocks
     // it -- standard ESP-IDF NimBLE host-task shape (every bleprph-style
     // example uses this exact body).
@@ -197,6 +226,7 @@ void BleBtpServer::on_sync() noexcept {
     // address exists at all before the first advertise attempt.
     std::uint8_t address_type = 0U;
     ble_hs_id_infer_auto(0, &address_type);
+    ESP_LOGI(kTag, "host synced (address type %u)", static_cast<unsigned>(address_type));
     if (instance_ != nullptr) instance_->start_advertising();
 }
 
@@ -213,11 +243,17 @@ void BleBtpServer::start_advertising() noexcept {
     // on it); the name moves to the scan response, which every active
     // scanner (phones, Qt on Windows/Android) requests anyway.
     //
-    // The UUID is repeated in the scan response (name 12 + UUID 18 = 30
-    // bytes, fits): Qt's Windows backend builds a device from whichever PDU
-    // it sees FIRST and emits deviceDiscovered() once; later PDUs only come
-    // through deviceUpdated(). If the name-only scan response won that race,
-    // TraceView's UUID filter dropped the robot for the whole scan.
+    // The UUID is repeated in the scan response when it fits beside the name
+    // (name AD + UUID 18 <= 31, i.e. a name of up to 11 octets, which the
+    // default "BallyRobot" is): Qt's Windows backend builds a device from
+    // whichever PDU it sees FIRST and emits deviceDiscovered() once; later
+    // PDUs only come through deviceUpdated(). If the name-only scan response
+    // won that race, an older TraceView's UUID filter dropped the robot for
+    // the whole scan. A longer configured name wins the space instead:
+    // TraceView is the one that looks robots up BY name, and its discovery
+    // now also re-reads Qt's merged device list while scanning
+    // (BleDiscoveryService::sweepDiscoveredDevices), which catches the UUID
+    // from the advertisement whichever PDU came first.
     struct ble_hs_adv_fields fields{};
     fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
     fields.uuids128 = &kServiceUuid;
@@ -230,12 +266,15 @@ void BleBtpServer::start_advertising() noexcept {
         return;
     }
 
+    const std::size_t name_len = std::strlen(device_name_);
     struct ble_hs_adv_fields rsp_fields{};
-    rsp_fields.uuids128 = &kServiceUuid;
-    rsp_fields.num_uuids128 = 1;
-    rsp_fields.uuids128_is_complete = 1;
-    rsp_fields.name = reinterpret_cast<const std::uint8_t*>(kDeviceName);
-    rsp_fields.name_len = static_cast<std::uint8_t>(std::strlen(kDeviceName));
+    if (2U + name_len + kUuid128AdSize <= kAdvPayloadMax) {
+        rsp_fields.uuids128 = &kServiceUuid;
+        rsp_fields.num_uuids128 = 1;
+        rsp_fields.uuids128_is_complete = 1;
+    }
+    rsp_fields.name = reinterpret_cast<const std::uint8_t*>(device_name_);
+    rsp_fields.name_len = static_cast<std::uint8_t>(name_len);
     rsp_fields.name_is_complete = 1;
 
     rc = ble_gap_adv_rsp_set_fields(&rsp_fields);
@@ -264,7 +303,13 @@ void BleBtpServer::start_advertising() noexcept {
                            &BleBtpServer::gap_event_handler, nullptr);
     if (rc != 0) {
         ESP_LOGE(kTag, "ble_gap_adv_start() failed: %d", rc);
+        return;
     }
+    std::uint8_t address[6] = {};
+    ble_hs_id_copy_addr(own_addr_type, address, nullptr);
+    ESP_LOGI(kTag, "advertising started at %02x:%02x:%02x:%02x:%02x:%02x (type %u)",
+             address[5], address[4], address[3], address[2], address[1], address[0],
+             static_cast<unsigned>(own_addr_type));
 }
 
 int BleBtpServer::gap_event_handler(struct ble_gap_event* event, void* /*arg*/) {
@@ -279,6 +324,16 @@ int BleBtpServer::gap_event_handler(struct ble_gap_event* event, void* /*arg*/) 
                 // connect while advertising is stopped (see the DISCONNECT
                 // case, which is the only place advertising resumes). No
                 // second, defensive check needed here.
+                {
+                    struct ble_gap_conn_desc desc{};
+                    if (ble_gap_conn_find(event->connect.conn_handle, &desc) == 0) {
+                        const std::uint8_t* a = desc.peer_id_addr.val;
+                        ESP_LOGI(kTag,
+                                 "central %02x:%02x:%02x:%02x:%02x:%02x connected "
+                                 "(advertising stops until it leaves)",
+                                 a[5], a[4], a[3], a[2], a[1], a[0]);
+                    }
+                }
                 self->conn_handle_.store(event->connect.conn_handle);
                 self->notifications_enabled_.store(false);
                 self->reset_send_queue();
@@ -300,6 +355,7 @@ int BleBtpServer::gap_event_handler(struct ble_gap_event* event, void* /*arg*/) 
                     self->callbacks_.on_connect(self->callbacks_.context);
                 }
             } else {
+                ESP_LOGW(kTag, "connection attempt failed: %d", event->connect.status);
                 // Failed connection attempt -- still not advertising
                 // (ble_gap_adv_start() is one-shot per successful/failed
                 // attempt), so restart it.
@@ -308,6 +364,8 @@ int BleBtpServer::gap_event_handler(struct ble_gap_event* event, void* /*arg*/) 
             return 0;
 
         case BLE_GAP_EVENT_DISCONNECT:
+            ESP_LOGI(kTag, "central disconnected (reason 0x%x), advertising again",
+                     static_cast<unsigned>(event->disconnect.reason));
             self->conn_handle_.store(kInvalidHandle);
             self->notifications_enabled_.store(false);
             self->att_mtu_.store(23U);

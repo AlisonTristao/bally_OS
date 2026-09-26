@@ -84,7 +84,7 @@ public:
     // through different BtpEndpoint objects with different send queues, and
     // a slot's whole point is to keep one origin's line editing/output
     // isolated from another's (see this class's own comment above).
-    enum class LinkTarget : std::uint8_t { EspNow = 0U, Tcp = 1U, Ble = 2U };
+    enum class LinkTarget : std::uint8_t { EspNow = 0U, Tcp = 1U, Ble = 2U, Serial = 3U };
 
     // One reassembled, already-opened TERMINAL_IN payload from `header`'s
     // origin, arriving on `target`. Runs on the Wi-Fi RX task: it only
@@ -127,6 +127,12 @@ public:
     // Reverses bind_ble_target() (onBleDisconnect()) AND evicts every
     // BLE-origin slot -- same contract as unbind_tcp_target().
     void unbind_ble_target() noexcept;
+
+    // Direct-serial (USB CDC, comm_mode==3) twin of bind_ble_target() /
+    // unbind_ble_target() -- same contract, for LinkTarget::Serial origins.
+    void bind_serial_target(BtpEndpoint& endpoint, BtpSealFn seal,
+                            void* seal_context) noexcept;
+    void unbind_serial_target() noexcept;
 
     // Advances every active origin: drains its buffered input through the
     // editor, emits whatever it echoed as TERMINAL_OUT frame(s), submits any
@@ -253,6 +259,11 @@ private:
     BtpEndpoint* ble_endpoint_ = nullptr;
     BtpSealFn ble_seal_ = nullptr;
     void* ble_seal_context_ = nullptr;
+    // Serial target (bind_serial_target()/unbind_serial_target()) -- same
+    // posture, written from the TinyUSB task.
+    BtpEndpoint* serial_endpoint_ = nullptr;
+    BtpSealFn serial_seal_ = nullptr;
+    void* serial_seal_context_ = nullptr;
     ShellLineEditor::CompletionProvider completion_;
     SubmitFn submit_ = nullptr;
     void* submit_context_ = nullptr;
